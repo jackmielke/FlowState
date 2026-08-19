@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vibe Voice</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header data-tauri-drag-region>
+        <span class="wordmark" data-tauri-drag-region><b>VIBE</b> VOICE</span>
+        <span class="spacer" data-tauri-drag-region></span>
+        <span class="pill" id="state-pill" data-state="idle"><i class="dot"></i><span id="state-text">Idle</span></span>
+        <button class="icon-btn" id="btn-settings" title="Settings">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <path d="M8 10.2a2.2 2.2 0 1 0 0-4.4 2.2 2.2 0 0 0 0 4.4Z" stroke="currentColor" stroke-width="1.3"/>
+            <path d="M13 8c0-.4 0-.7-.1-1l1.3-1-1.3-2.2-1.6.5c-.5-.4-1-.7-1.6-.9L9.3 1.7H6.7l-.4 1.7c-.6.2-1.1.5-1.6.9l-1.6-.5L1.8 6l1.3 1c0 .3-.1.6-.1 1s0 .7.1 1l-1.3 1L3.1 12.2l1.6-.5c.5.4 1 .7 1.6.9l.4 1.7h2.6l.4-1.7c.6-.2 1.1-.5 1.6-.9l1.6.5 1.3-2.2-1.3-1c.1-.3.1-.6.1-1Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </header>
+
+      <main>
+        <section class="stage">
+          <div class="watching" id="watching"><i class="ring"></i> Watching screen</div>
+
+          <canvas id="orb" width="340" height="340"></canvas>
+
+          <div class="meter"><i id="meter-fill"></i></div>
+
+          <div class="stage-caption">
+            <div class="who" id="who" data-who="none">Not connected</div>
+            <div class="hint" id="hint">Press Connect and just start talking.</div>
+          </div>
+
+          <div class="controls">
+            <button class="btn primary" id="btn-connect">Connect</button>
+            <button class="btn" id="btn-shot" disabled>
+              Send screen <kbd>⌘⇧2</kbd>
+            </button>
+            <button class="btn" id="btn-watch" disabled>Watch</button>
+          </div>
+        </section>
+
+        <aside>
+          <div class="aside-head">Transcript</div>
+          <div id="transcript"><div class="empty">Nothing yet. Your conversation will appear here.</div></div>
+        </aside>
+      </main>
+    </div>
+
+    <div class="scrim" id="scrim"></div>
+    <div class="drawer" id="drawer">
+      <h2>Settings <span class="spacer"></span>
+        <button class="icon-btn" id="btn-close-settings">
+          <svg width="13" height="13" viewBox="0 0 12 12"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+      </h2>
+      <div class="scroll">
+        <div class="field">
+          <label>Voice</label>
+          <select id="s-voice">
+            <option>alloy</option><option>ash</option><option>ballad</option><option>coral</option>
+            <option>echo</option><option>sage</option><option>shimmer</option><option>verse</option>
+            <option>marin</option><option>cedar</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label>Model</label>
+          <select id="s-model">
+            <option>gpt-realtime-2.1</option>
+            <option>gpt-realtime-2.1-mini</option>
+            <option>gpt-realtime-2</option>
+            <option>gpt-realtime-1.5</option>
+            <option>gpt-realtime</option>
+            <option>gpt-realtime-mini</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label>Personality / system prompt</label>
+          <textarea id="s-instructions" spellcheck="false"></textarea>
+        </div>
+
+        <div class="field">
+          <label>Speaking speed <span class="val" id="s-speed-val">1.00×</span></label>
+          <input type="range" id="s-speed" min="0.5" max="1.5" step="0.05" />
+        </div>
+
+        <div class="toggle">
+          <div>
+            <div class="t-label">Continuous screen</div>
+            <div class="t-sub">Auto-send a frame on an interval</div>
+          </div>
+          <div class="switch" id="s-continuous"></div>
+        </div>
+
+        <div class="field">
+          <label>Interval <span class="val" id="s-interval-val">5s</span></label>
+          <input type="range" id="s-interval" min="2" max="30" step="1" />
+        </div>
+
+        <div class="field">
+          <label>VAD threshold <span class="val" id="s-vad-val">0.50</span></label>
+          <input type="range" id="s-vad" min="0.1" max="0.9" step="0.05" />
+        </div>
+
+        <div class="field">
+          <label>Silence before reply <span class="val" id="s-silence-val">500 ms</span></label>
+          <input type="range" id="s-silence" min="200" max="1500" step="50" />
+        </div>
+
+        <div class="toggle">
+          <div>
+            <div class="t-label">Transcribe my speech</div>
+            <div class="t-sub">gpt-4o-mini-transcribe, shown in the transcript</div>
+          </div>
+          <div class="switch" id="s-transcribe"></div>
+        </div>
+
+        <button class="btn" id="btn-privacy-screen">Open Screen Recording settings</button>
+        <button class="btn" id="btn-privacy-mic">Open Microphone settings</button>
+      </div>
+    </div>
+
+    <div id="banner"><span id="banner-text"></span><button id="banner-close">dismiss</button></div>
+
+    <audio id="remote-audio" autoplay></audio>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

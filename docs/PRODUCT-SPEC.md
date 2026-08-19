@@ -36,9 +36,20 @@ Dark, modern, "state-of-the-art". Think Linear / Raycast / Arc.
 - Typography: SF Pro / system font. Tight, confident spacing. No cramped rows.
 - Motion: everything eases. Nothing snaps. 150–250ms curves.
 - Frameless / vibrancy window where the stack allows it.
+- **Rounded window corners are mandatory.** A hard square perimeter instantly reads
+  as unfinished on macOS. Note that going frameless/transparent often *removes* the
+  system rounding, so it must be restored explicitly and then verified — screenshot
+  against a LIGHT background, because dark square corners on a dark desktop look
+  rounded when they are not. No child element may paint past the corner radius.
 - Must look intentional, not bootstrap-y. No default-looking form controls.
 
 ## Hard constraints
+- **Boots IDLE. Never auto-connect.** The app must open disconnected, with no mic
+  capture and no audio output, until a human explicitly clicks Connect. Learned the
+  hard way: all three implementations auto-connected at once and started talking to
+  each other through the speakers. There is no auto-connect flag, ever.
+- **Only one implementation may hold a live session at a time.** They share one pair
+  of speakers and one mic. Launch them one at a time.
 - Local only. No servers, no telemetry, no analytics.
 - API key read from ~/.config/vibe-voice/config.json at runtime.
   NEVER hardcoded, NEVER committed, NEVER exposed to a renderer/webview process —

@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; connect-src https://api.openai.com; base-uri 'none'; form-action 'none';" />
+<title>Vibe Voice</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="grain" aria-hidden="true"></div>
+
+  <header class="titlebar">
+    <div class="drag"></div>
+    <div class="brand">
+      <span class="mark" id="brandMark"></span>
+      <span class="word">vibe<b>voice</b></span>
+    </div>
+    <div class="tb-right">
+      <div id="watchPill" class="watch-pill hidden"><i></i>watching screen</div>
+      <div id="statusPill" class="pill idle"><i></i><span id="statusText">idle</span></div>
+      <button id="settingsBtn" class="icon-btn" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+          <circle cx="12" cy="12" r="3.1"/>
+          <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4 0v.1A1.7 1.7 0 0 0 15 4.6a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9v.1a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1.03z"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="stage">
+    <section class="left">
+      <div class="orb-wrap">
+        <canvas id="orb"></canvas>
+        <div class="orb-caption">
+          <div id="speakerLabel" class="speaker">not connected</div>
+          <div id="subLabel" class="sub">press connect and just talk</div>
+        </div>
+      </div>
+
+      <div class="meter" title="microphone input level">
+        <div class="meter-label">mic</div>
+        <div class="meter-track"><div id="meterFill" class="meter-fill"></div></div>
+        <div id="meterDb" class="meter-db">—</div>
+      </div>
+
+      <div class="controls">
+        <button id="connectBtn" class="primary">
+          <span class="dot"></span><span id="connectLabel">Connect</span>
+        </button>
+        <button id="shotBtn" class="ghost" title="Send a screenshot (⌘⇧2)">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round">
+            <path d="M3 8.5A2.5 2.5 0 0 1 5.5 6h1.2a1.6 1.6 0 0 0 1.36-.76l.62-1A1.6 1.6 0 0 1 10.04 3.5h3.92a1.6 1.6 0 0 1 1.36.74l.62 1A1.6 1.6 0 0 0 17.3 6h1.2A2.5 2.5 0 0 1 21 8.5v8A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/>
+            <circle cx="12" cy="12.5" r="3.4"/>
+          </svg>
+          Screenshot <kbd>⌘⇧2</kbd>
+        </button>
+      </div>
+
+      <div id="errBar" class="errbar hidden"><b>error</b><span id="errText"></span><button id="errClose">×</button></div>
+    </section>
+
+    <section class="right">
+      <div class="panel-head">
+        <span>Transcript</span>
+        <button id="clearBtn" class="mini">clear</button>
+      </div>
+      <div id="log" class="log">
+        <div class="empty" id="emptyState">
+          <div class="empty-orbit"></div>
+          <p>Nothing yet.</p>
+          <span>Connect, then speak. Your words and the model's replies land here.</span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Settings sheet -->
+  <div id="scrim" class="scrim hidden"></div>
+  <aside id="settings" class="sheet">
+    <div class="sheet-head">
+      <h2>Settings</h2>
+      <button id="closeSettings" class="icon-btn" aria-label="Close">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="sheet-body">
+      <div class="field">
+        <label>Voice</label>
+        <div id="voices" class="chips"></div>
+      </div>
+
+      <div class="field">
+        <label>Model</label>
+        <div class="select-wrap">
+          <select id="model">
+            <option>gpt-realtime-2.1</option>
+            <option>gpt-realtime-2.1-mini</option>
+            <option>gpt-realtime-2</option>
+            <option>gpt-realtime</option>
+            <option>gpt-realtime-mini</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Personality <em>system prompt</em></label>
+        <textarea id="instructions" rows="5" spellcheck="false"></textarea>
+      </div>
+
+      <div class="field">
+        <label>Speaking speed <output id="speedOut">1.00×</output></label>
+        <input type="range" id="speed" min="0.5" max="1.5" step="0.05" />
+      </div>
+
+      <div class="rule"></div>
+
+      <div class="field row">
+        <div>
+          <label>Continuous screen</label>
+          <em>auto-send a frame on an interval</em>
+        </div>
+        <button id="contToggle" class="switch" role="switch" aria-checked="false"><span></span></button>
+      </div>
+      <div class="field">
+        <label>Interval <output id="intervalOut">5s</output></label>
+        <input type="range" id="interval" min="2" max="30" step="1" />
+      </div>
+
+      <div class="rule"></div>
+
+      <div class="field">
+        <label>VAD threshold <output id="vadOut">0.50</output></label>
+        <input type="range" id="vad" min="0.1" max="0.9" step="0.05" />
+      </div>
+      <div class="field">
+        <label>Silence before turn ends <output id="silOut">500ms</output></label>
+        <input type="range" id="sil" min="200" max="1500" step="50" />
+      </div>
+
+      <div class="rule"></div>
+
+      <div class="field" id="screenPermField">
+        <label>Screen recording</label>
+        <div id="permBox" class="permbox"></div>
+      </div>
+
+      <div class="meta" id="metaBox"></div>
+    </div>
+  </aside>
+
+  <audio id="remoteAudio" autoplay></audio>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

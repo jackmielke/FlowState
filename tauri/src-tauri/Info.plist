@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Vibe Voice needs your microphone so you can talk to the realtime voice model.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Vibe Voice does not use the camera, but WebKit requires this key alongside microphone capture.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Vibe Voice captures your screen so the model can see and talk about what you are looking at.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Vibe Voice transcribes your speech through OpenAI's realtime API.</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>

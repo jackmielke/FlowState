@@ -1,0 +1,32 @@
+{
+  "name": "vibe-voice",
+  "productName": "Vibe Voice",
+  "version": "0.1.0",
+  "description": "Local macOS voice chat client for OpenAI's realtime model, with screen vision.",
+  "main": "src/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --enable-logging",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^43.0.0"
+  },
+  "build": {
+    "appId": "com.jackmielke.vibevoice",
+    "productName": "Vibe Voice",
+    "files": ["src/**/*", "renderer/**/*", "package.json"],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": ["dir"],
+      "identity": null,
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Vibe Voice needs your microphone to talk with the realtime model.",
+        "NSCameraUsageDescription": "Not used.",
+        "NSAppleEventsUsageDescription": "Not used."
+      }
+    }
+  }
+}
