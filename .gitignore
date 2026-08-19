@@ -1,0 +1,15 @@
+node_modules/
+dist/
+out/
+build/
+target/
+.DS_Store
+*.log
+.env
+.env.*
+config.json
+!**/config.example.json
+DerivedData/
+*.xcuserstate
+xcuserdata/
+.build/
