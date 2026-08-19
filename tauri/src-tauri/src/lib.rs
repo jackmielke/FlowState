@@ -291,7 +291,7 @@ fn backend_info() -> serde_json::Value {
         "config_path": config_path().display().to_string(),
         "config_exists": config_path().exists(),
         "screen_permission": screen_permission_ok(),
-        "selftest": std::env::var("VIBE_SELFTEST").is_ok(),
+        "no_connect": std::env::var("VIBE_NO_CONNECT").is_ok(),
     })
 }
 

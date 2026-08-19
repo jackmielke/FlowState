@@ -27,6 +27,9 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
     @Published private(set) var running = false
     @Published private(set) var lastError: String?
     @Published private(set) var formatDescription: String = "—"
+    /// True when the OS voice-processing unit (acoustic echo cancellation) is active.
+    /// When false the model hears itself through the speakers — use headphones.
+    @Published private(set) var echoCancellation = false
 
     /// Called on the audio thread with a chunk of mono PCM16 @ 24 kHz.
     var onMicPCM: ((Data) -> Void)?
@@ -69,6 +72,27 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
         guard !running else { return }
 
         let input = engine.inputNode
+
+        // Acoustic echo cancellation. Without this the model's own voice comes back
+        // in through the mic, server VAD reads it as the user interrupting, and the
+        // app talks to itself in a loop ("Hi again. Hi again.").
+        //
+        // Order matters: this must be enabled BEFORE the engine starts, before the
+        // converter is built, and before the tap is installed — switching the input
+        // to the voice-processing unit CHANGES its format, so the format has to be
+        // read afterwards or the converter is built against a stale rate.
+        var aec = false
+        do {
+            try input.setVoiceProcessingEnabled(true)
+            try engine.outputNode.setVoiceProcessingEnabled(true)
+            aec = true
+        } catch {
+            FileHandle.standardError.write(Data(
+                ("[audio] voice processing unavailable (\(error.localizedDescription)) — "
+                 + "echo cancellation OFF, use headphones\n").utf8))
+        }
+
+        // Read the format AFTER enabling voice processing, not before.
         let hwFormat = input.outputFormat(forBus: 0)
         guard hwFormat.sampleRate > 0 else {
             throw NSError(domain: "VibeVoice", code: 1, userInfo: [
@@ -80,6 +104,14 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
                 NSLocalizedDescriptionKey: "Could not build a converter from \(hwFormat) to 24 kHz PCM16."])
         }
         conv.sampleRateConverterQuality = .max
+        // The voice-processing unit reports a 9-channel input on this hardware (the
+        // mic array), with its processed mono signal duplicated across every channel.
+        // AVAudioConverter cannot derive a downmix matrix for that layout and silently
+        // produces SILENCE, so pick channel 0 explicitly. Measured: without this the
+        // converted stream is digital zero while the tap itself is at -55 dBFS.
+        if hwFormat.channelCount > 1 {
+            conv.channelMap = [0]
+        }
         converter = conv
 
         engine.attach(player)
@@ -98,13 +130,15 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
         try engine.start()
         player.play()
 
-        let desc = String(format: "in %.0f Hz × %d ch → wire 24000 Hz mono PCM16 · out %.0f Hz",
+        let desc = String(format: "in %.0f Hz × %d ch → wire 24000 Hz mono PCM16 · out %.0f Hz · AEC %@",
                           hwFormat.sampleRate, hwFormat.channelCount,
-                          engine.mainMixerNode.outputFormat(forBus: 0).sampleRate)
+                          engine.mainMixerNode.outputFormat(forBus: 0).sampleRate,
+                          aec ? "on" : "OFF (use headphones)")
         FileHandle.standardError.write(Data(("[audio] " + desc + "\n").utf8))
 
         DispatchQueue.main.async {
             self.formatDescription = desc
+            self.echoCancellation = aec
             self.running = true
             self.lastError = nil
         }

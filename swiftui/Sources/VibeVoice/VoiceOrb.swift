@@ -5,7 +5,9 @@ enum OrbMode {
 
     var palette: [Color] {
         switch self {
-        case .idle:       return [Color(red: 0.30, green: 0.34, blue: 0.42), Color(red: 0.20, green: 0.23, blue: 0.30)]
+        case .idle:       return [Color(red: 0.52, green: 0.50, blue: 0.55),
+                                  Color(red: 0.30, green: 0.28, blue: 0.34),
+                                  Color(red: 0.38, green: 0.28, blue: 0.22)]
         case .listening:  return [Theme.accentSoft, Theme.accent, Theme.accentDeep]
         case .speaking:   return [Theme.voice, Theme.voiceDeep, Color(red: 0.30, green: 0.55, blue: 0.95)]
         case .connecting: return [Color(red: 0.65, green: 0.68, blue: 0.78), Color(red: 0.36, green: 0.40, blue: 0.52)]
@@ -45,7 +47,7 @@ struct VoiceOrb: View {
         ctx.fill(
             Path(ellipseIn: CGRect(x: c.x - bloomR, y: c.y - bloomR, width: bloomR * 2, height: bloomR * 2)),
             with: .radialGradient(
-                Gradient(colors: [colors[0].opacity(0.30 + 0.32 * lv), colors[min(1, colors.count - 1)].opacity(0.06), .clear]),
+                Gradient(colors: [colors[0].opacity(0.34 + 0.30 * lv), colors[min(1, colors.count - 1)].opacity(0.08), .clear]),
                 center: c, startRadius: 0, endRadius: bloomR))
 
         // 2 — soft harmonic blobs, additively blended
@@ -61,7 +63,7 @@ struct VoiceOrb: View {
             let p = blob(center: c,
                          radius: base * s.scale * breathe,
                          lobes: s.lobes,
-                         amp: s.amp * (0.65 + 1.4 * lv),
+                         amp: s.amp * (0.30 + 1.7 * lv),
                          phase: t * s.speed)
             layer.fill(p, with: .radialGradient(
                 Gradient(colors: [colors[s.ci].opacity(0.55), colors[s.ci].opacity(0.05)]),
@@ -72,7 +74,7 @@ struct VoiceOrb: View {
         var edge = ctx
         edge.blendMode = .plusLighter
         let ring = blob(center: c, radius: base * 1.16 * breathe, lobes: 3,
-                        amp: 0.10 * (0.75 + 1.3 * lv), phase: t * 0.31)
+                        amp: 0.10 * (0.30 + 1.7 * lv), phase: t * 0.31)
         edge.stroke(ring, with: .linearGradient(
             Gradient(colors: [colors[0].opacity(0.85), colors[colors.count - 1].opacity(0.15)]),
             startPoint: CGPoint(x: c.x - base, y: c.y - base),
@@ -104,7 +106,7 @@ struct VoiceOrb: View {
         core.fill(
             Path(ellipseIn: CGRect(x: c.x - coreR, y: c.y - coreR, width: coreR * 2, height: coreR * 2)),
             with: .radialGradient(
-                Gradient(colors: [.white.opacity(0.92), colors[0].opacity(0.75), colors[colors.count - 1].opacity(0.0)]),
+                Gradient(colors: [.white.opacity(0.72 + 0.24 * lv), colors[0].opacity(0.75), colors[colors.count - 1].opacity(0.0)]),
                 center: CGPoint(x: c.x - coreR * 0.18, y: c.y - coreR * 0.22),
                 startRadius: 0, endRadius: coreR * 1.5))
 

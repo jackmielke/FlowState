@@ -570,9 +570,6 @@ function buildSettingsUI() {
       'Screen Recording permission is not granted yet — screenshots will fail until you allow it in System Settings (see Settings ▸ Screen recording).',
       { label: 'heads up' });
   }
-  // dev flag: `npm start -- --auto-connect` connects on launch (used for smoke tests)
-  if (S.boot.autoConnect && S.boot.keyState === 'ok') setTimeout(connect, 400);
-
   window.addEventListener('error', (e) => fail('renderer: ' + e.message));
   window.addEventListener('unhandledrejection', (e) => fail('renderer: ' + (e.reason?.message || e.reason)));
 })();

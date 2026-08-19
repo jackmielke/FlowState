@@ -269,6 +269,7 @@ async function connect() {
 }
 
 function teardown() {
+  $("footer-line").textContent = "webrtc · gpt-realtime · idle";
   try { S.dc && S.dc.close(); } catch (_) {}
   try { S.pc && S.pc.close(); } catch (_) {}
   try { S.micStream && S.micStream.getTracks().forEach((t) => t.stop()); } catch (_) {}
@@ -326,6 +327,8 @@ function handleEvent(m) {
   switch (m.type) {
     case "session.created":
       setConn("live", "Live");
+      $("footer-line").textContent =
+        `${S.settings.model} · ${S.settings.voice} · webrtc · pcm16 24 kHz`;
       $("who").dataset.who = "none";
       $("who").textContent = "Listening";
       $("hint").textContent = "Just talk — server VAD handles the turns. Interrupt any time.";
@@ -514,7 +517,7 @@ window.addEventListener("resize", sizeCanvas);
 
 const ACCENT = [255, 122, 69];
 const USER = [108, 198, 255];
-const IDLE = [120, 120, 135];
+const IDLE = [124, 118, 126];
 let mixed = IDLE.slice();
 
 const lerp = (a, b, k) => a + (b - a) * k;
@@ -535,7 +538,7 @@ function draw() {
 
   const assistantActive = S.outLevel > 0.012 || S.assistantSpeaking;
   const userActive = !assistantActive && S.micLevel > 0.02;
-  const target = assistantActive ? ACCENT : userActive ? USER : S.conn === "live" ? [150, 150, 165] : IDLE;
+  const target = assistantActive ? ACCENT : userActive ? USER : S.conn === "live" ? [186, 158, 148] : IDLE;
   for (let i = 0; i < 3; i++) mixed[i] = lerp(mixed[i], target[i], 0.06);
 
   // energy 0..1 driving the whole thing
@@ -650,7 +653,12 @@ draw();
 
 // ----------------------------------------------------------------- wire ----
 
-$("btn-connect").onclick = connect;
+$("btn-connect").addEventListener("click", (e) => {
+  rlog("info", `connect-click trusted=${e.isTrusted} screen=${e.screenX},${e.screenY} ` +
+    `detail=${e.detail} pointerType=${e.pointerType || "?"}`);
+  if (window.__VV_NO_CONNECT__) { rlog("warn", "connect blocked by VIBE_NO_CONNECT"); return; }
+  connect();
+});
 $("btn-shot").onclick = () => sendScreenshot(false);
 $("btn-watch").onclick = () => {
   S.settings.continuous = !S.settings.continuous;
@@ -671,31 +679,17 @@ document.addEventListener("keydown", (e) => {
   bindSettings();
   setConn("idle");
   const info = await invoke("backend_info");
+  window.__VV_NO_CONNECT__ = !!info.no_connect;
   rlog("info", "backend_info " + JSON.stringify(info));
   if (!info.config_exists) {
     showError(`No API key found at ${info.config_path}. Create it with {"OPENAI_API_KEY": "sk-proj-…"} and chmod 600.`);
   } else if (!info.screen_permission) {
     addTurn("system", "Screen Recording permission not granted yet — screenshots will fail until you allow it in Settings.");
   }
-  rlog("info", "frontend ready");
-
-  // Headless verification path: VIBE_SELFTEST=1 npx tauri dev
-  if (info.selftest) {
-    rlog("info", "SELFTEST: auto-connecting");
-    await connect();
-    setTimeout(() => {
-      rlog("info", "SELFTEST: conn=" + S.conn);
-      if (S.conn === "live") {
-        rlog("info", "SELFTEST: sending screenshot");
-        sendScreenshot(false);
-      }
-    }, 5000);
-    setTimeout(() => {
-      const turns = [...document.querySelectorAll('#transcript .turn')]
-        .map((n) => (n.querySelector('.role')?.textContent || 'sys') + ': ' +
-                    (n.querySelector('.body')?.textContent || '').slice(0, 220));
-      rlog("info", "SELFTEST: final conn=" + S.conn + " turns=" + turns.length);
-      turns.forEach((t2) => rlog("info", "SELFTEST| " + t2));
-    }, 20000);
-  }
+  // Passive capability report (no capture is started — the app is idle until
+  // the user presses Connect).
+  rlog("info", `env: url=${location.href} secureContext=${window.isSecureContext} ` +
+    `mediaDevices=${!!navigator.mediaDevices} getUserMedia=${!!navigator.mediaDevices?.getUserMedia} ` +
+    `RTCPeerConnection=${!!window.RTCPeerConnection}`);
+  rlog("info", "frontend ready — idle, no mic, no session until Connect");
 })();

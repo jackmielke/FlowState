@@ -41,12 +41,24 @@ struct WindowConfigurator: NSViewRepresentable {
         let v = NSView()
         DispatchQueue.main.async {
             guard let w = v.window else { return }
+            // Keep .titled — dropping it (or going borderless) is what loses the
+            // system corner rounding and the traffic lights.
+            w.styleMask.insert(.titled)
+            w.styleMask.insert(.fullSizeContentView)
             w.titlebarAppearsTransparent = true
             w.titleVisibility = .hidden
-            w.styleMask.insert(.fullSizeContentView)
             w.isMovableByWindowBackground = true
+            w.isOpaque = false
             w.backgroundColor = .clear
             w.appearance = NSAppearance(named: .darkAqua)
+            // Belt and braces: clip our own content to the same radius the
+            // system uses, so no child view paints square past the corner.
+            if let cv = w.contentView {
+                cv.wantsLayer = true
+                cv.layer?.cornerRadius = 12
+                cv.layer?.cornerCurve = .continuous
+                cv.layer?.masksToBounds = true
+            }
             w.standardWindowButton(.zoomButton)?.isHidden = false
             w.minSize = NSSize(width: 940, height: 620)
             w.makeKeyAndOrderFront(nil)

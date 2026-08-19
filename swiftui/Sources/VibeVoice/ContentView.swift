@@ -154,14 +154,12 @@ struct ContentView: View {
             if state.screenPermissionDenied { screenPermissionCard }
             if case .error(let msg) = state.connection { banner(msg) }
 
-            Spacer(minLength: 8)
+            Spacer(minLength: 16)
 
             VoiceOrb(mode: mode, level: orbLevel)
                 .frame(width: 340, height: 340)
 
-            Spacer(minLength: 0)
-
-            VStack(spacing: 10) {
+            VStack(spacing: 9) {
                 Text(headline)
                     .font(.system(size: 21, weight: .semibold, design: .rounded))
                     .foregroundStyle(Theme.text)
@@ -170,13 +168,15 @@ struct ContentView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.textDim)
                     .multilineTextAlignment(.center)
+                    .frame(height: 16)
             }
+            .padding(.top, 6)
 
             LevelMeter(history: state.audio.micHistory, tint: mode == .speaking ? Theme.voice : Theme.accent)
-                .padding(.top, 22)
-                .opacity(state.audio.running ? 1 : 0.35)
+                .padding(.top, 20)
+                .opacity(state.audio.running ? 1 : 0.32)
 
-            Spacer(minLength: 12)
+            Spacer(minLength: 20)
 
             HStack(spacing: 10) {
                 Button(connectLabel) { state.toggleConnection() }
@@ -206,7 +206,7 @@ struct ContentView: View {
                 .buttonStyle(GhostButtonStyle(tint: state.settings.continuousScreen ? Theme.accent : Theme.text))
             }
 
-            Text(state.audio.running ? state.audio.formatDescription : "audio idle")
+            Text(state.audio.running ? state.audio.formatDescription : "audio idle · nothing is captured until you connect")
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(Theme.textFaint.opacity(0.8))
                 .padding(.top, 14)
@@ -304,7 +304,25 @@ struct ContentView: View {
 
             Divider().overlay(Theme.hairline)
 
-            TranscriptView(items: state.transcript)
+            ZStack {
+                TranscriptView(items: state.transcript)
+                if state.transcript.count <= 1 {
+                    VStack(spacing: 7) {
+                        Image(systemName: "waveform")
+                            .font(.system(size: 19, weight: .light))
+                            .foregroundStyle(Theme.textFaint.opacity(0.5))
+                        Text("Nothing said yet")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Theme.textFaint)
+                        Text("Your words and Vibe's replies land here\nas you talk.")
+                            .font(.system(size: 11))
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(Theme.textFaint.opacity(0.7))
+                    }
+                    .allowsHitTesting(false)
+                    .padding(.bottom, 40)
+                }
+            }
         }
         .frame(width: 372)
         .background(Color.black.opacity(0.22))

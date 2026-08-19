@@ -22,6 +22,7 @@
 
   --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
   --dur: 200ms;
+  --radius: 12px;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -29,10 +30,10 @@
 html, body {
   height: 100%;
   overflow: hidden;
+  background: transparent;
 }
 
 body {
-  background: var(--bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
   font-size: 13.5px;
@@ -49,10 +50,16 @@ button { background: none; border: 0; cursor: pointer; }
 
 /* ---------------------------------------------------------------- shell -- */
 
+/* Decoration-free-ish window: WKWebView will happily paint into the native
+   corner mask, so the radius has to be enforced on our own root too. */
 #app {
   display: grid;
   grid-template-rows: 46px 1fr;
   height: 100%;
+  background: var(--bg);
+  border-radius: var(--radius);
+  overflow: hidden;
+  -webkit-mask-image: -webkit-radial-gradient(white, black); /* forces Safari to clip children */
 }
 
 header {
@@ -213,6 +220,13 @@ main {
 .btn.primary:hover:not(:disabled) { background: #ff8a5b; }
 .btn.danger { color: var(--bad); border-color: rgba(255,95,87,.3); }
 .btn.on { border-color: rgba(255,122,69,.45); background: var(--accent-soft); color: var(--accent); }
+
+.footer-line {
+  font: 400 10.5px ui-monospace, "SF Mono", Menlo, monospace;
+  letter-spacing: .04em;
+  color: var(--dimmer);
+  opacity: .8;
+}
 
 /* watching indicator */
 .watching {

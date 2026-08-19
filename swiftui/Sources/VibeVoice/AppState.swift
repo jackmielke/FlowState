@@ -57,18 +57,6 @@ final class AppState: ObservableObject {
 
         note("Ready. Hit Connect and just talk. ⌘⇧2 shows me your screen.")
 
-        // Headless verification hook: VIBEVOICE_SELFTEST=1 auto-connects at launch
-        // so the socket + audio pipeline can be proven from a terminal.
-        if ProcessInfo.processInfo.environment["VIBEVOICE_SELFTEST"] == "1" {
-            Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 900_000_000)
-                await self?.connect()
-                if ProcessInfo.processInfo.environment["VIBEVOICE_SELFTEST_SCREEN"] == "1" {
-                    try? await Task.sleep(nanoseconds: 2_500_000_000)
-                    await self?.selfTestCapture()
-                }
-            }
-        }
     }
 
     // MARK: - Connect
@@ -227,17 +215,6 @@ final class AppState: ObservableObject {
         } catch {
             banner = "Capture failed: \(error.localizedDescription)"
         }
-    }
-
-    /// Verification helper — proves the ScreenCaptureKit path end to end.
-    func selfTestCapture() async {
-        do {
-            let f = try await ScreenCapture.capture()
-            note("screen capture OK — \(f.bytes / 1024) KB JPEG, thumb \(Int(f.thumbnail.size.width))x\(Int(f.thumbnail.size.height))")
-        } catch {
-            note("screen capture FAILED — \(error.localizedDescription)")
-        }
-        await captureAndSend(auto: false)
     }
 
     func syncScreenTimer() {

@@ -174,9 +174,12 @@ function createWindow() {
     minWidth: 900,
     minHeight: 620,
     show: false,
-    frame: false,
+    // NOT `frame:false` and NOT `transparent:true` — either one costs us the
+    // system corner rounding on macOS. hiddenInset gives the frameless look
+    // while AppKit keeps the rounded window shape + shadow.
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 18, y: 18 },
+    roundedCorners: true,
     vibrancy: 'under-window',
     visualEffectState: 'active',
     backgroundColor: '#00000000',
@@ -229,6 +232,7 @@ function createWindow() {
         fs.writeFileSync(out.replace(/\.png$/, '.jpg'), img.toJPEG(92));
         log('shot', 'wrote ' + out);
       } catch (e) { log('shot', 'FAILED ' + e.message); }
+      if (process.argv.includes('--shot-quit')) { log('shot', 'quitting'); app.quit(); }
     }, delay);
   }
 
@@ -252,7 +256,6 @@ function wireIpc() {
         try { return systemPreferences.getMediaAccessStatus('microphone'); } catch { return 'unknown'; }
       })(),
       hotkey: '⌘⇧2',
-      autoConnect: process.argv.includes('--auto-connect'),
       versions: {
         electron: process.versions.electron,
         chrome: process.versions.chrome,
@@ -321,6 +324,14 @@ app.whenReady().then(() => {
   log('boot', `config: ${CONFIG_PATH} (exists: ${fs.existsSync(CONFIG_PATH)})`);
   log('boot', `screen recording permission: ${screenAccess()}`);
   log('boot', `settings: ${settingsPath()}`);
+
+  if (process.argv.includes('--test-capture')) {
+    captureScreen({})
+      .then((r) => log('test-capture', `OK ${r.width}x${r.height} q${r.quality} ` +
+        `${(r.bytes / 1024).toFixed(0)}KB dataUrl=${r.dataUrl.length}B thumb=${r.thumbUrl.length}B ` +
+        `source="${r.sourceName}" (budget ok: ${r.dataUrl.length < 240 * 1024})`))
+      .catch((e) => log('test-capture', 'FAILED ' + e.message));
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
