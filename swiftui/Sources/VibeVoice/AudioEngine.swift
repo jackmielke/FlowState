@@ -73,6 +73,13 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
 
         let input = engine.inputNode
 
+        // Instantiate the main mixer BEFORE touching voice processing. Lazily creating
+        // it afterwards makes the engine reconfigure into a state where start() fails
+        // with -10875 (kAudioUnitErr_FormatNotSupported), and no connect format avoids
+        // it — measured across a full format x destination matrix. This one line is
+        // the difference between the engine starting and not.
+        _ = engine.mainMixerNode
+
         // Acoustic echo cancellation. Without this the model's own voice comes back
         // in through the mic, server VAD reads it as the user interrupting, and the
         // app talks to itself in a loop ("Hi again. Hi again.").

@@ -71,11 +71,12 @@ in `Cargo.toml` from the pre-flight (harmless, but they can be dropped).
 
 Caveats worth knowing:
 
-* `tauri dev` serves the frontend from `http://127.0.0.1:1430/`, which is a
-  *potentially trustworthy* origin, so `isSecureContext` is `true` for free.
-  A packaged build serves from the `tauri://localhost` custom scheme. WebKit
-  treats that as secure too, but **the packaged build's mic path was not
-  exercised** here — see "Not verified" below.
+* `tauri dev` serves the frontend from `http://127.0.0.1:1430/`; the packaged
+  build serves from `tauri://localhost`. **Both were checked**, and the packaged
+  origin reports `isSecureContext=true`, `mediaDevices=true`,
+  `getUserMedia=true`, `RTCPeerConnection=true`. So the custom scheme is not a
+  blocker. What was *not* exercised in the packaged build is an actual
+  `getUserMedia` call, i.e. the first-run TCC prompt against the `.app`.
 * WKWebView shows no permission prompt of its own; it delegates to the host
   process's TCC state. In `tauri dev` the mic grant lands on the bare
   `target/debug/tauri` binary, not on an `.app`. `src-tauri/Info.plist`
@@ -133,7 +134,13 @@ by `response.create`.
 * Settings load/save round-trip; UI renders with no console errors.
 * App boots **idle**: no `getUserMedia`, no `AudioContext`, no session until a
   human clicks Connect. Verified with click instrumentation (`isTrusted`).
-* Release `.app` bundle builds.
+* Release `.app` bundle builds, launches, and renders identically
+  (`screenshot-packaged.png`). Its `Info.plist` carries
+  `NSMicrophoneUsageDescription`, `NSCameraUsageDescription`,
+  `NSScreenCaptureUsageDescription`, and the webview there reports
+  `tauri://localhost` as a secure context with `getUserMedia` available.
+* Rounded window corners, checked by compositing a window-only capture over a
+  light background (`screenshot.png`) — dark-on-dark hides square corners.
 
 ## Not verified / known gaps
 
@@ -141,11 +148,12 @@ by `response.create`.
   tracks were negotiated in both directions, but no one spoke into the mic, so
   turn-taking, barge-in and VAD tuning are implemented-to-contract but untested
   by ear.
-* **The packaged `.app`'s mic path is untested.** Only the `tauri dev` origin
-  (`http://127.0.0.1:1430`) was exercised with a real `getUserMedia` call.
-  The packaged app serves from `tauri://localhost`; if the mic ever fails there,
-  the fix is `app.security.dangerousUseHttpScheme`-style origin work, or the
-  Rust/`cpal` WebSocket fallback whose dependencies are already vendored in.
+* **The packaged `.app` has never actually opened the mic.** The capability
+  surface is there under `tauri://localhost`, but the real `getUserMedia` call —
+  and therefore the first-run TCC prompt attributed to the `.app` — was only
+  exercised in `tauri dev`. If it ever fails there, the escape hatch is the
+  Rust/`cpal` + `tokio-tungstenite` WebSocket transport, whose dependencies are
+  already vendored in `Cargo.toml`.
 * **Continuous screen mode** is wired (timer, indicator, interval slider) but was
   only exercised for a single manual frame, not over a long auto-send run.
 * Voice changes mid-session are pushed via `session.update`; the API may reject a
