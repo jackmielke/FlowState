@@ -255,12 +255,12 @@ struct SettingsView: View {
                         } else if state.screenPermission == .denied {
                             Button("Open Privacy Settings") { state.openScreenPrivacySettings() }
                                 .buttonStyle(GhostButtonStyle(tint: Theme.accentInk))
-                            caption("Allow Vibe Voice under Privacy & Security › Screen & System Audio Recording. If it is already checked, this build was re-signed since then — toggle it off and back on.")
+                            caption("Allow Vantage under Privacy & Security › Screen & System Audio Recording. If it is already checked, this build was re-signed since then — toggle it off and back on.")
                         }
 
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
-                                Text("Screen Vibe sees")
+                                Text("Screen Vantage sees")
                                     .font(.system(size: 12.5)).foregroundStyle(Theme.text)
                                 Spacer()
                                 Button("Rescan") { Task { await state.refreshDisplays() } }
@@ -277,7 +277,7 @@ struct SettingsView: View {
                                               onSelect: { state.selectDisplay($0) })
                                 caption(state.displays.count == 1
                                         ? "Only one display attached. Plug in another and it appears here — one is shared at a time, and the choice applies to single shots and continuous mode alike."
-                                        : "One screen at a time, for single shots and continuous mode alike. Pinning a display keeps it in view even when you move this window to another one; if that display is unplugged, Vibe falls back to the active one instead of failing.")
+                                        : "One screen at a time, for single shots and continuous mode alike. Pinning a display keeps it in view even when you move this window to another one; if that display is unplugged, Vantage falls back to the active one instead of failing.")
                             }
                         }
 

@@ -77,9 +77,9 @@ enum ScreenPermission: Equatable {
     /// One line for the banner. The card in ContentView says more.
     var bannerText: String {
         switch self {
-        case .granted:      return "Screen Recording is on for Vibe Voice."
-        case .denied:       return "Screen Recording is off for Vibe Voice — turn it on in System Settings."
-        case .needsRestart: return "Screen Recording is granted, but Vibe Voice must be relaunched to pick it up."
+        case .granted:      return "Screen Recording is on for Vantage."
+        case .denied:       return "Screen Recording is off for Vantage — turn it on in System Settings."
+        case .needsRestart: return "Screen Recording is granted, but Vantage must be relaunched to pick it up."
         case .unknown:      return "Could not determine Screen Recording permission."
         }
     }
@@ -184,7 +184,7 @@ enum ScreenCapture {
     /// `CGRequestScreenCaptureAccess()` matters even when it returns false: it is
     /// what registers the app in Privacy & Security › Screen & System Audio
     /// Recording. Without it a first-run user opens that pane and finds no
-    /// "Vibe Voice" row to toggle at all.
+    /// "Vantage" row to toggle at all.
     static func ensureAccess(reason: String) async -> ScreenPermission {
         var state = refresh(reason: reason)
         guard state != .granted else { return state }
@@ -317,7 +317,7 @@ enum ScreenCapture {
         return out
     }
 
-    /// Every display Vibe Voice is allowed to look at, in a stable order.
+    /// Every display Vantage is allowed to look at, in a stable order.
     ///
     /// Returns `[]` rather than throwing when permission is missing: the caller is a UI
     /// refresh that runs on launch and on every activation, and a blocked permission is

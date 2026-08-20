@@ -200,7 +200,7 @@ struct ScreenPicker: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .help(helpText)
-        .accessibilityLabel("Screen shown to Vibe: \(label)")
+        .accessibilityLabel("Screen shown to Vantage: \(label)")
     }
 
     private var label: String {
@@ -210,7 +210,7 @@ struct ScreenPicker: View {
 
     private var helpText: String {
         guard let active else { return "No display is available to capture." }
-        let what = "Vibe sees \(active.name) — \(active.resolution)."
+        let what = "Vantage sees \(active.name) — \(active.resolution)."
         return followsActive
             ? what + " Following whichever display this window is on; pick one to pin it."
             : what + " Pinned, so moving this window does not change what it sees."
@@ -228,7 +228,7 @@ struct DisplayPicker: View {
     var body: some View {
         VStack(spacing: 6) {
             row(title: "Active display",
-                detail: followsActive ? followDetail : "Follow whichever display Vibe Voice is on",
+                detail: followsActive ? followDetail : "Follow whichever display Vantage is on",
                 symbol: "display",
                 on: followsActive) { onSelect(nil) }
 

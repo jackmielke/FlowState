@@ -27,9 +27,9 @@
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Not used.</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>
-	<string>Vibe Voice reads your calendar so you can ask what is coming up.</string>
+	<string>Vantage reads your calendar so you can ask what is coming up.</string>
 	<key>NSCalendarsUsageDescription</key>
-	<string>Vibe Voice reads your calendar so you can ask what is coming up.</string>
+	<string>Vantage reads your calendar so you can ask what is coming up.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Not used.</string>
 	<key>NSHighResolutionCapable</key>
@@ -37,9 +37,9 @@
 	<key>NSHumanReadableCopyright</key>
 	<string>Local-only. No telemetry.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Vibe Voice uses your microphone so you can talk to the realtime model.</string>
+	<string>Vantage uses your microphone so you can talk to it.</string>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>Vibe Voice captures your screen so the model can see what you are looking at.</string>
+	<string>Vantage captures your screen so it can see what you are looking at.</string>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
 </dict>

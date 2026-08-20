@@ -1,4 +1,4 @@
-# Vibe Voice — SwiftUI / native macOS
+# Vantage — SwiftUI / native macOS
 
 Native SwiftUI + AppKit client for OpenAI's realtime voice model, with screen vision.
 No Xcode project: a Swift Package Manager executable plus a build script that assembles
@@ -28,8 +28,8 @@ saying "off" for both:
 
 | What you see | What is actually true | Fix |
 |---|---|---|
-| **Screen Recording is off** | TCC has no grant for this app | Allow **Vibe Voice** under Privacy & Security › Screen & System Audio Recording |
-| **Screen Recording is on — relaunch to use it** | The grant exists, but macOS latched the *old* answer into this running process | Hit **Relaunch Vibe Voice** |
+| **Screen Recording is off** | TCC has no grant for this app | Allow **Vantage** under Privacy & Security › Screen & System Audio Recording |
+| **Screen Recording is on — relaunch to use it** | The grant exists, but macOS latched the *old* answer into this running process | Hit **Relaunch Vantage** |
 
 macOS hands the screen-recording decision to a process once, at first use. Flipping
 the toggle while the app is running does **not** reach that process — which is why
@@ -182,14 +182,14 @@ Pick it from either place:
 
 - the **Showing …** pill under the buttons on the main window — it names the display
   currently being shared, so the answer is on screen without opening anything;
-- **Settings › Screen › Screen Vibe sees** — every attached display as a row, with its
+- **Settings › Screen › Screen Vantage sees** — every attached display as a row, with its
   resolution and a `(main)` marker so two identical monitors are still tellable apart.
 
 Two modes:
 
 | Choice | Behaviour |
 |---|---|
-| **Active display** (default) | Whichever display the Vibe Voice window is on. Drag the window to another monitor and the capture follows it. |
+| **Active display** (default) | Whichever display the Vantage window is on. Drag the window to another monitor and the capture follows it. |
 | A specific display | Pinned. Moving the window does not change what is shared. |
 
 Details worth knowing:

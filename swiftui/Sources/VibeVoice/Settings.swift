@@ -6,11 +6,24 @@ let kVoices = ["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "ve
 let kModels = ["gpt-realtime-2.1", "gpt-realtime-2.1-mini", "gpt-realtime-2", "gpt-realtime-1.5", "gpt-realtime", "gpt-realtime-mini"]
 
 let kDefaultPrompt = """
-You are Vibe, a warm and quick voice companion living on this Mac. \
+You are Vantage, a warm and quick voice companion living on this Mac. \
 Keep replies short and conversational — a sentence or two unless asked for more. \
 When you are shown a screenshot, describe what actually matters on it, concretely, \
 and never pretend to see something you cannot.
 """
+
+/// Prompts shipped by earlier builds, under earlier names.
+///
+/// The personality prompt is stored in the user's settings, so renaming the app cannot
+/// reach a prompt already on disk — it would keep introducing itself as Vibe or Flow
+/// forever. Any of these, untouched, is silently upgraded to the current default; a
+/// prompt the user has actually edited is left completely alone.
+let kSupersededPrompts: [String] = [
+    kDefaultPrompt
+        .replacingOccurrences(of: "You are Vantage,", with: "You are Vibe,"),
+    kDefaultPrompt
+        .replacingOccurrences(of: "You are Vantage,", with: "You are Flow,"),
+]
 
 struct AppSettings: Codable, Equatable {
     var voice: String = "marin"
@@ -53,7 +66,7 @@ struct AppSettings: Codable, Equatable {
     var devNarrateMax: Int = 8
 
     /// Which display the assistant looks at. `0` — the sentinel, since no real display
-    /// has id 0 — means "whichever display Vibe Voice is on right now", which is the
+    /// has id 0 — means "whichever display Vantage is on right now", which is the
     /// behaviour every build before this one had.
     ///
     /// Persisted, but never trusted on its own: CoreGraphics display ids do not survive
@@ -203,8 +216,16 @@ final class SettingsStore: ObservableObject {
 
     init() {
         if let d = try? Data(contentsOf: Self.fileURL),
-           let s = try? JSONDecoder().decode(AppSettings.self, from: d) {
+           var s = try? JSONDecoder().decode(AppSettings.self, from: d) {
+            // Carry an untouched older prompt forward under the new name.
+            let migrated = kSupersededPrompts.contains(s.systemPrompt)
+            if migrated { s.systemPrompt = kDefaultPrompt }
             settings = s
+            // Property observers do NOT fire for assignments inside init, so didSet never
+            // runs here and the migration would live only in memory — correct behaviour,
+            // but the file on disk would still say Flow until some unrelated setting
+            // happened to change. Write it now.
+            if migrated { save() }
         } else {
             settings = AppSettings()
         }

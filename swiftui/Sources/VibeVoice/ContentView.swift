@@ -70,7 +70,7 @@ struct ContentView: View {
                              daylight: state.currentDaylight,
                              energy: Double(orbLevel),
                              rotationIndex: photoIndex)
-                // Keep the mode tint, so the room still shifts colour when Vibe speaks.
+                // Keep the mode tint, so the room still shifts colour when Vantage speaks.
                 RadialGradient(colors: [accentForMode.opacity(0.14), .clear],
                                center: .init(x: 0.28, y: 0.18), startRadius: 0, endRadius: 620)
                     .animation(.easeInOut(duration: 0.6), value: mode)
@@ -295,7 +295,7 @@ struct ContentView: View {
             return "A reply is already queued — it goes out as soon as the current one finishes."
         }
         if state.isResponding {
-            return "Send a screenshot (⌘⇧2). Vibe is mid-reply, so the frame is filed now and answered next."
+            return "Send a screenshot (⌘⇧2). Vantage is mid-reply, so the frame is filed now and answered next."
         }
         return "Send a screenshot (⌘⇧2)"
     }
@@ -457,7 +457,7 @@ struct ContentView: View {
             if state.bannerAction == .usageLimits { return "Rate limited" }
             return "Couldn't connect"
         case .live:
-            if mode == .speaking { return "Vibe is speaking" }
+            if mode == .speaking { return "Vantage is speaking" }
             if state.userSpeaking { return "Listening…" }
             return "Just talk"
         }
@@ -524,17 +524,17 @@ struct ContentView: View {
                 .font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.text)
 
             if state.screenPermission == .needsRestart {
-                Text("You've allowed it — macOS just won't hand the permission to an app that was already running when you granted it. Relaunch Vibe Voice and screen capture works immediately. Nothing else to change.")
+                Text("You've allowed it — macOS just won't hand the permission to an app that was already running when you granted it. Relaunch Vantage and screen capture works immediately. Nothing else to change.")
                     .font(.system(size: 11.5)).foregroundStyle(Theme.textDim)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
-                    Button("Relaunch Vibe Voice") { state.relaunchForScreenPermission() }
+                    Button("Relaunch Vantage") { state.relaunchForScreenPermission() }
                         .buttonStyle(GhostButtonStyle(tint: Theme.accentInk))
                     Button("Check again") { Task { await state.recheckScreenPermission() } }
                         .buttonStyle(GhostButtonStyle())
                 }
             } else {
-                Text("Allow Vibe Voice under Privacy & Security › Screen & System Audio Recording, then come back — the app re-checks every time you switch to it, and will tell you if a relaunch is needed.")
+                Text("Allow Vantage under Privacy & Security › Screen & System Audio Recording, then come back — the app re-checks every time you switch to it, and will tell you if a relaunch is needed.")
                     .font(.system(size: 11.5)).foregroundStyle(Theme.textDim)
                     .fixedSize(horizontal: false, vertical: true)
                 Text("Already checked in that list? This build was re-signed since you granted it, so macOS sees a different app. Toggle Vibe Voice off and back on, or run:  tccutil reset ScreenCapture com.jackmielke.vibevoice")
@@ -593,7 +593,7 @@ struct ContentView: View {
                         Text("Nothing said yet")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(Theme.textFaint)
-                        Text("Your words and Vibe's replies land here\nas you talk.")
+                        Text("Your words and Vantage's replies land here\nas you talk.")
                             .font(.system(size: 11))
                             .multilineTextAlignment(.center)
                             .foregroundStyle(Theme.textFaint.opacity(0.7))

@@ -3,7 +3,7 @@ import AppKit
 import EventKit
 import VibeVoiceCore
 
-/// Tools Vibe Voice answers itself, in milliseconds, without spinning up Claude Code.
+/// Tools Vantage answers itself, in milliseconds, without spinning up Claude Code.
 ///
 /// Everything here returns a short plain-language string, because the result is about to
 /// be spoken. No JSON, no file paths, no code — if a tool wants to return a table, it is

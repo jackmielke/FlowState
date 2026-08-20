@@ -45,7 +45,7 @@ final class AppState: ObservableObject {
     /// before every capture, and on demand — never assumed from a past failure.
     @Published var screenPermission: ScreenPermission = .unknown
     @Published var showSettings = false
-    /// Every display Vibe Voice could look at. Re-read on launch, on activation, and
+    /// Every display Vantage could look at. Re-read on launch, on activation, and
     /// whenever macOS reports a display arriving or leaving.
     @Published var displays: [DisplayOption] = []
     /// The display the last frame actually came from — not the one that was requested.
@@ -902,7 +902,7 @@ final class AppState: ObservableObject {
         if let d = displays.first(where: { $0.displayID == target }) {
             note("Now showing \(d.name) (\(d.resolution)) when you ask about my screen.")
         } else {
-            note("Now following whichever display Vibe Voice is on.")
+            note("Now following whichever display Vantage is on.")
         }
     }
 
@@ -935,7 +935,7 @@ final class AppState: ObservableObject {
 
     func captureAndSend(auto: Bool) async {
         // Permission FIRST, connection second. ensureAccess() is what fires
-        // CGRequestScreenCaptureAccess() and therefore what puts Vibe Voice in the
+        // CGRequestScreenCaptureAccess() and therefore what puts Vantage in the
         // Screen & System Audio Recording list at all. Gating it behind "must be
         // connected" created a deadlock: you cannot grant screen access until you
         // connect, but you naturally want to fix permissions before connecting, and
