@@ -13,3 +13,8 @@ DerivedData/
 *.xcuserstate
 xcuserdata/
 .build/
+
+# Build caches — regenerable, and enormous
+tauri/src-tauri/target/
+swiftui/.build/
+swiftui/VibeVoice.app/
