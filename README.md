@@ -35,17 +35,32 @@ you: "the spacing on that button is off, tighten it up"
 
 ## Install
 
+**If someone sent you a `Vantage.dmg`** — open it, drag Vantage to Applications, and
+double-click. That's it. It's signed and notarized by Apple, so there's no security
+warning and nothing to do in Terminal.
+
+**If you'd rather build it** — you need Xcode's command line tools:
+
 ```bash
-git clone <this repo> && cd vantage/swiftui
+git clone https://github.com/jackmielke/vantage && cd vantage/swiftui
 ./build.sh && open VibeVoice.app
 ```
 
-On first launch a setup sheet asks for your OpenAI key and verifies it by minting a real
-token, so a bad key fails there rather than confusingly at Connect.
+Either way, on first launch a setup sheet asks for your OpenAI key and verifies it by
+minting a real token — so a bad key fails right there rather than confusingly at Connect.
 
-> **Not notarized yet.** Building it yourself is the supported path today. A downloadable
-> build needs an Apple Developer ID; without one macOS shows *"Apple could not verify this
-> app is free of malware"*.
+### Why it isn't on the Mac App Store
+
+App Store apps must be sandboxed, and Vantage can't be. Dev Mode spawns *your* `claude`
+binary, the tools run `/usr/bin/shortcuts`, and undo runs `git` against whatever repo you
+name — none of which a sandboxed process may do. Shipping on the App Store would mean
+deleting the feature the app exists for.
+
+Developer ID + notarization is what Mac apps needing real system access actually use;
+Wispr Flow, Raycast and Cursor all ship this way. For the person installing it the
+experience is identical: double-click, drag, open.
+
+Maintainers: `swiftui/release.sh` builds the notarized DMG.
 
 ## Your keys stay yours
 
