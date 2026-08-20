@@ -210,7 +210,7 @@ struct ContentView: View {
     private var stage: some View {
         VStack(spacing: 0) {
             if let b = state.banner { banner(b) }
-            if state.screenPermissionDenied { screenPermissionCard }
+            if state.screenPermission.blocksCapture { screenPermissionCard }
             if case .error(let msg) = state.connection { banner(msg) }
 
             Spacer(minLength: 16)
@@ -327,15 +327,39 @@ struct ContentView: View {
         .padding(.top, 14)
     }
 
+    /// Two genuinely different problems, so two genuinely different cards.
+    /// Telling a user who has already granted the permission that it is "off" is
+    /// the bug this exists to avoid.
     private var screenPermissionCard: some View {
         VStack(alignment: .leading, spacing: 9) {
-            Text("Screen Recording is off")
+            Text(state.screenPermission.title)
                 .font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.text)
-            Text("macOS needs you to allow Vibe Voice under Privacy & Security › Screen & System Audio Recording. Toggle it on, then relaunch the app.")
-                .font(.system(size: 11.5)).foregroundStyle(Theme.textDim)
-                .fixedSize(horizontal: false, vertical: true)
-            Button("Open Privacy Settings") { ScreenCapture.openPrivacySettings() }
-                .buttonStyle(GhostButtonStyle(tint: Theme.accentInk))
+
+            if state.screenPermission == .needsRestart {
+                Text("You've allowed it — macOS just won't hand the permission to an app that was already running when you granted it. Relaunch Vibe Voice and screen capture works immediately. Nothing else to change.")
+                    .font(.system(size: 11.5)).foregroundStyle(Theme.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    Button("Relaunch Vibe Voice") { state.relaunchForScreenPermission() }
+                        .buttonStyle(GhostButtonStyle(tint: Theme.accentInk))
+                    Button("Check again") { Task { await state.recheckScreenPermission() } }
+                        .buttonStyle(GhostButtonStyle())
+                }
+            } else {
+                Text("Allow Vibe Voice under Privacy & Security › Screen & System Audio Recording, then come back — the app re-checks every time you switch to it, and will tell you if a relaunch is needed.")
+                    .font(.system(size: 11.5)).foregroundStyle(Theme.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Already checked in that list? This build was re-signed since you granted it, so macOS sees a different app. Toggle Vibe Voice off and back on, or run:  tccutil reset ScreenCapture com.jackmielke.vibevoice")
+                    .font(.system(size: 10.5)).foregroundStyle(Theme.textFaint)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    Button("Open Privacy Settings") { state.openScreenPrivacySettings() }
+                        .buttonStyle(GhostButtonStyle(tint: Theme.accentInk))
+                    Button("Check again") { Task { await state.recheckScreenPermission() } }
+                        .buttonStyle(GhostButtonStyle())
+                }
+            }
         }
         .padding(13)
         .frame(maxWidth: .infinity, alignment: .leading)

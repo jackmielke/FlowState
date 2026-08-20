@@ -21,7 +21,9 @@ final class AppState: ObservableObject {
     @Published var transcript: [TranscriptItem] = []
     @Published var userSpeaking = false
     @Published var banner: String?
-    @Published var screenPermissionDenied = false
+    /// Live macOS Screen Recording state. Refreshed on launch, on app activation,
+    /// before every capture, and on demand — never assumed from a past failure.
+    @Published var screenPermission: ScreenPermission = .unknown
     @Published var showSettings = false
     @Published var lastCaptureNote: String?
     @Published var sessionID: String?
@@ -64,6 +66,17 @@ final class AppState: ObservableObject {
             Task { await self?.captureAndSend(auto: false) }
         }
 
+        // Returning from System Settings is the moment the answer most often
+        // changes, and macOS gives us no TCC change notification — so re-read on
+        // every activation rather than trusting whatever we concluded last time.
+        NotificationCenter.default
+            .publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.refreshScreenPermission(reason: "app-activated") }
+            }
+            .store(in: &bag)
+
+        refreshScreenPermission(reason: "launch")
         note("Ready. Hit Connect and just talk. ⌘⇧2 shows me your screen.")
 
     }
@@ -309,14 +322,71 @@ final class AppState: ObservableObject {
 
     // MARK: - Screen
 
+    /// Cheap, non-prompting re-read of the live TCC state.
+    @discardableResult
+    func refreshScreenPermission(reason: String) -> ScreenPermission {
+        let before = screenPermission
+        let now = ScreenCapture.refresh(reason: reason)
+        screenPermission = now
+        if now.canCapture, before.blocksCapture {
+            // The block cleared — drop its banner and resume watching if it was on.
+            if banner == before.bannerText { banner = nil }
+            note("Screen Recording permission is now granted.")
+            syncScreenTimer()
+        }
+        return now
+    }
+
+    /// The "Check again" button: asks ScreenCaptureKit itself, not just TCC, so a
+    /// process that is stale despite an on toggle is correctly named as such.
+    func recheckScreenPermission() async {
+        note("Re-checking Screen Recording permission…")
+        let before = screenPermission
+        let now = await ScreenCapture.probe(reason: "user-recheck")
+        screenPermission = now
+        switch now {
+        case .granted:
+            if banner == before.bannerText { banner = nil }
+            note("Screen Recording is granted and this process can capture.")
+            syncScreenTimer()
+        case .needsRestart:
+            banner = now.bannerText
+            note("Screen Recording is granted, but this process was launched before the grant — relaunch to use it.")
+        case .denied, .unknown:
+            banner = now.bannerText
+            note("Screen Recording is still \(now.logToken).")
+        }
+    }
+
+    func openScreenPrivacySettings() { ScreenCapture.openPrivacySettings() }
+
+    func relaunchForScreenPermission() { ScreenCapture.relaunch() }
+
     func captureAndSend(auto: Bool) async {
         guard case .live = connection else {
             banner = "Connect first — then I can look at your screen."
             return
         }
+
+        // Check before capturing rather than inferring permission from a failure.
+        // On an explicit request this also fires the one-time system prompt, which
+        // is what puts Vibe Voice in the Screen & System Audio Recording list at
+        // all — without it the user opens that pane and finds nothing to toggle.
+        let pre: ScreenPermission
+        if auto {
+            pre = refreshScreenPermission(reason: "pre-capture(auto)")
+        } else {
+            pre = await ScreenCapture.ensureAccess(reason: "pre-capture(manual)")
+            screenPermission = pre
+        }
+        if pre.blocksCapture {
+            handleScreenBlock(pre, auto: auto)
+            return
+        }
+
         do {
             let frame = try await ScreenCapture.capture(maxWidth: CGFloat(settings.screenshotSize))
-            screenPermissionDenied = false
+            screenPermission = .granted
             // Auto frames are context, not questions. They are filed silently so the
             // model simply knows what is on screen when you next speak to it.
             let prompt = auto
@@ -328,17 +398,41 @@ final class AppState: ObservableObject {
                 text: auto ? "Screen frame (auto)" : "Sent a screenshot",
                 image: frame.thumbnail))
             lastCaptureNote = String(format: "%.0f KB", Double(frame.bytes) / 1024)
-        } catch ScreenCaptureError.permissionDenied {
-            screenPermissionDenied = true
-            banner = "Screen Recording permission is off for Vibe Voice."
+        } catch ScreenCaptureError.permissionDenied(let p) {
+            screenPermission = p
+            handleScreenBlock(p, auto: auto)
         } catch {
             banner = "Capture failed: \(error.localizedDescription)"
         }
     }
 
+    /// Reports a permission block ONCE and stops the watch loop.
+    ///
+    /// The old code let the continuous-screen timer re-stamp "Screen Recording is
+    /// off" every few seconds forever, which is what made the message keep coming
+    /// back after the user had already fixed it. Nothing here re-fires on a timer:
+    /// the state only changes on an explicit re-check, on app activation, or on a
+    /// relaunch.
+    private func handleScreenBlock(_ p: ScreenPermission, auto: Bool) {
+        let wasWatching = screenTimer != nil
+        if wasWatching {
+            stopScreenTimer()
+            note("Paused continuous screen — \(p.logToken). It resumes on its own once permission is usable.")
+        }
+        guard banner != p.bannerText else { return }   // don't re-stamp the same line
+        banner = p.bannerText
+        if !auto || !wasWatching { note("Screen Recording: \(p.logToken).") }
+    }
+
     func syncScreenTimer() {
         stopScreenTimer()
         guard settings.continuousScreen, case .live = connection else { return }
+        // Never start a loop that is only going to fail: a blocked permission would
+        // just re-raise the same error on every tick.
+        guard !screenPermission.blocksCapture else {
+            note("Continuous screen stays paused until Screen Recording is usable (\(screenPermission.logToken)).")
+            return
+        }
         let t = Timer(timeInterval: settings.screenInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.captureAndSend(auto: true) }
         }

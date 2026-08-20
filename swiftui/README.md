@@ -20,6 +20,37 @@ Plain compile check: `swift build -c release`.
 > screen-recording access. `build.sh` copies `Resources/Info.plist` in and runs
 > `codesign --force --deep --sign -` so TCC sees a stable identity across launches.
 
+### Screen Recording permission
+
+Two separate things can go wrong, and the app now distinguishes them instead of
+saying "off" for both:
+
+| What you see | What is actually true | Fix |
+|---|---|---|
+| **Screen Recording is off** | TCC has no grant for this app | Allow **Vibe Voice** under Privacy & Security › Screen & System Audio Recording |
+| **Screen Recording is on — relaunch to use it** | The grant exists, but macOS latched the *old* answer into this running process | Hit **Relaunch Vibe Voice** |
+
+macOS hands the screen-recording decision to a process once, at first use. Flipping
+the toggle while the app is running does **not** reach that process — which is why
+a permission that is visibly on could keep producing "permission is off". The app
+re-reads `CGPreflightScreenCaptureAccess()` on launch, on every activation, and
+before every capture, and reports `needs-restart` when TCC and ScreenCaptureKit
+disagree.
+
+> **Re-running `./build.sh` can revoke the grant.** The bundle is ad-hoc signed
+> (`--sign -`), so it has no Team ID and TCC pins the entry by `cdhash` — which
+> changes on every rebuild. The toggle stays visibly checked while macOS treats the
+> new binary as a different app. Toggle it off and back on, or:
+> ```
+> tccutil reset ScreenCapture com.jackmielke.vibevoice
+> ```
+
+Permission activity is logged to stderr with a `[screen]` prefix and to
+`os.Logger(subsystem: "com.jackmielke.vibevoice", category: "screen-permission")`:
+```
+log stream --predicate 'subsystem == "com.jackmielke.vibevoice"' --info
+```
+
 The app **boots idle**. Nothing is captured and no socket opens until you click
 **Connect**. There is deliberately no auto-connect flag — three of these running at
 once will otherwise talk to each other through your speakers.
@@ -149,9 +180,10 @@ resuming the same session id would race.
   (`Scripts/verify-full-duplex.swift`). Whether it actually stops the model hearing
   itself over open speakers is a listening test that has not been run. Three silent
   traps had to be cleared to get here — see the comments in `AudioEngine.start()`.
-- Screen Recording permission was already granted for this bundle ID on the dev machine;
-  the **denied → explainer card → Open Privacy Settings** path is coded but was not
-  exercised against an actual denial.
+- Screen Recording permission was already granted for this bundle ID on the dev machine.
+  The **denied** and **needs-restart** cards, the `CGRequestScreenCaptureAccess()` prompt,
+  and the Relaunch button are coded and logged but were not exercised against a real
+  denial — reproduce one with `tccutil reset ScreenCapture com.jackmielke.vibevoice`.
 - Continuous screen mode is wired to a `Timer` and the WATCHING badge renders, but a long
   multi-frame run was not soak-tested.
 - Mic permission prompt: not observed first-hand (already granted). If the bundle ID

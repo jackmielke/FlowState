@@ -83,6 +83,26 @@ struct SettingsView: View {
                     }
 
                     section("Screen") {
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(state.screenPermission.canCapture ? Theme.good : Theme.bad)
+                                .frame(width: 7, height: 7)
+                            Text(state.screenPermission.title)
+                                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                            Spacer()
+                            Button("Check") { Task { await state.recheckScreenPermission() } }
+                                .buttonStyle(GhostButtonStyle())
+                        }
+                        if state.screenPermission == .needsRestart {
+                            Button("Relaunch to apply") { state.relaunchForScreenPermission() }
+                                .buttonStyle(GhostButtonStyle(tint: Theme.accentInk))
+                            caption("Permission is granted. macOS only hands it to a process that started after the grant, so one relaunch finishes the job.")
+                        } else if state.screenPermission == .denied {
+                            Button("Open Privacy Settings") { state.openScreenPrivacySettings() }
+                                .buttonStyle(GhostButtonStyle(tint: Theme.accentInk))
+                            caption("Allow Vibe Voice under Privacy & Security › Screen & System Audio Recording. If it is already checked, this build was re-signed since then — toggle it off and back on.")
+                        }
+
                         HStack {
                             Text("Continuous screen mode")
                                 .font(.system(size: 12.5)).foregroundStyle(Theme.text)
