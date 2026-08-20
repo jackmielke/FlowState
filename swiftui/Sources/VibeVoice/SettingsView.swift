@@ -4,6 +4,20 @@ struct SettingsView: View {
     @ObservedObject var state: AppState
     @Environment(\.dismiss) private var dismiss
 
+    /// Names the chosen photo, or says how many are in the chosen folder.
+    private var photoNote: String {
+        guard state.settings.backdrop == .custom else { return "" }
+        let path = state.settings.backdropImagePath
+        guard !path.isEmpty else { return "" }
+        let name = (path as NSString).lastPathComponent
+        if PhotoBackdrop.isFolder(path) {
+            let n = PhotoBackdrop.images(at: path).count
+            return n == 0 ? " — no images found in \(name)"
+                          : " — \(n) photo\(n == 1 ? "" : "s") in \(name)"
+        }
+        return " — " + name
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -36,7 +50,7 @@ struct SettingsView: View {
                             ForEach(Backdrop.allCases) { b in
                                 Button {
                                     if b == .custom {
-                                        if let path = BackdropPicker.chooseImage() {
+                                        if let path = BackdropPicker.choose() {
                                             state.settings.backdropImagePath = path
                                             state.settings.backdrop = .custom
                                         }
@@ -74,10 +88,18 @@ struct SettingsView: View {
                                 .buttonStyle(.plain)
                             }
                         }
-                        caption(state.settings.backdrop.blurb
-                                + (state.settings.backdrop == .custom && !state.settings.backdropImagePath.isEmpty
-                                   ? " — " + ((state.settings.backdropImagePath as NSString).lastPathComponent)
-                                   : ""))
+                        caption(state.settings.backdrop.blurb + photoNote)
+
+                        if state.settings.backdrop == .custom,
+                           PhotoBackdrop.isFolder(state.settings.backdropImagePath) {
+                            sliderRow(Binding(
+                                get: { state.settings.photoRotateSeconds },
+                                set: { state.settings.photoRotateSeconds = $0 }),
+                                0...600,
+                                state.settings.photoRotateSeconds < 1
+                                    ? "no rotation"
+                                    : String(format: "every %.0fs", state.settings.photoRotateSeconds))
+                        }
                         caption("The places are painted rather than photographed, so they stay sharp at any size and add nothing to the app's two megabytes.")
 
                         if state.settings.backdrop.place != nil {

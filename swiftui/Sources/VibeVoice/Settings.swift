@@ -79,6 +79,8 @@ struct AppSettings: Codable, Equatable {
     var backdropImagePath: String = ""
     /// "auto" follows the local clock; otherwise a pinned Daylight raw value.
     var daylightMode: String = "auto"
+    /// Seconds between photos when the backdrop points at a folder. 0 = never rotate.
+    var photoRotateSeconds: Double = 120
     /// Fade the chrome away when nothing has happened for a while, leaving the scene.
     var ambientMode: Bool = true
 
@@ -88,6 +90,7 @@ struct AppSettings: Codable, Equatable {
         case maxScreenFrames, screenshotSize, qualityMode, appearance, screenDisplayID
         case devNarrate, devNarrateInterval, devNarrateMax, devPermissionMode
         case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
+        case photoRotateSeconds
     }
 }
 
@@ -132,6 +135,7 @@ extension AppSettings {
         backdrop          = v(.backdrop, d.backdrop)
         backdropImagePath = v(.backdropImagePath, d.backdropImagePath)
         daylightMode      = v(.daylightMode, d.daylightMode)
+        photoRotateSeconds = v(.photoRotateSeconds, d.photoRotateSeconds)
         ambientMode       = v(.ambientMode, d.ambientMode)
     }
 }

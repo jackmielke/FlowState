@@ -68,13 +68,30 @@ enum Backdrop: String, Codable, CaseIterable, Identifiable {
     /// enough at the top that the existing light-on-dark type keeps working.
     var prefersDarkText: Bool { self == .paper }
 
-    /// How strongly to veil the scene behind the reading area. A photograph needs more
-    /// help than a gradient before small type is comfortable on it.
-    var scrim: Double {
+    /// How strongly to veil the scene behind the reading area.
+    ///
+    /// This is the fix for the obvious bug in the first version: at dusk a light veil was
+    /// plenty, but a midday sky is bright, and light text on bright sky is unreadable
+    /// however the chrome is themed. So the veil tracks the hour — heavy at noon, barely
+    /// there at night — which keeps contrast constant while letting the scene keep its
+    /// colour. A photograph gets more than a painting, because it has detail to fight.
+    func scrim(_ t: Daylight) -> Double {
         switch self {
         case .midnight, .paper: return 0.0
-        case .custom:           return 0.55
-        default:                return 0.28
+        case .custom:
+            switch t {
+            case .day:   return 0.68
+            case .dawn:  return 0.60
+            case .dusk:  return 0.56
+            case .night: return 0.50
+            }
+        default:
+            switch t {
+            case .day:   return 0.52
+            case .dawn:  return 0.38
+            case .dusk:  return 0.30
+            case .night: return 0.20
+            }
         }
     }
 
@@ -97,6 +114,8 @@ struct BackdropView: View {
     /// Drifts the light slightly with the voice, so the scene feels alive without
     /// competing with the orb for attention.
     var energy: Double = 0
+    /// Which photo to show when `imagePath` points at a folder.
+    var rotationIndex: Int = 0
 
     var body: some View {
         ZStack {
@@ -108,11 +127,20 @@ struct BackdropView: View {
                               energy: energy,
                               phase: tl.date.timeIntervalSinceReferenceDate)
                 }
-            } else if backdrop == .custom, let img = loadImage() {
-                Image(nsImage: img)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .clipped()
+            } else if backdrop == .custom {
+                // Ticks once a second so a rotating folder actually advances; the decoded
+                // image is cached, so a tick that changes nothing costs nothing.
+                TimelineView(.periodic(from: .now, by: 1)) { _ in
+                    if let img = loadImage() {
+                        Image(nsImage: img)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .clipped()
+                    } else {
+                        LinearGradient(colors: backdrop.colors,
+                                       startPoint: .topLeading, endPoint: .bottomTrailing)
+                    }
+                }
             } else if backdrop != .custom {
                 LinearGradient(colors: backdrop.colors,
                                startPoint: .topLeading, endPoint: .bottomTrailing)
@@ -125,10 +153,15 @@ struct BackdropView: View {
                     .animation(.easeInOut(duration: 0.9), value: energy)
             }
 
-            if backdrop.scrim > 0 {
+            let scrim = backdrop.scrim(daylight)
+            if scrim > 0 {
+                // Slightly heavier at the top and bottom, where the header, the transcript
+                // and the buttons live. The middle, where the orb is, stays clearest.
                 LinearGradient(
-                    colors: [Color.black.opacity(backdrop.scrim * 0.85),
-                             Color.black.opacity(backdrop.scrim * 1.15)],
+                    stops: [.init(color: .black.opacity(scrim * 1.25), location: 0.00),
+                            .init(color: .black.opacity(scrim * 0.70), location: 0.35),
+                            .init(color: .black.opacity(scrim * 0.70), location: 0.62),
+                            .init(color: .black.opacity(scrim * 1.30), location: 1.00)],
                     startPoint: .top, endPoint: .bottom)
             }
         }
@@ -136,21 +169,65 @@ struct BackdropView: View {
     }
 
     private func loadImage() -> NSImage? {
-        guard !imagePath.isEmpty else { return nil }
-        return NSImage(contentsOfFile: (imagePath as NSString).expandingTildeInPath)
+        PhotoBackdrop.image(for: imagePath, rotationIndex: rotationIndex)
     }
 }
 
 enum BackdropPicker {
-    /// Asks for an image file. Returns nil if the user cancels.
+    /// Asks for a photo, or a folder of them.
+    ///
+    /// A folder is the interesting case: point this at your Cape Town album and Flow
+    /// rotates through it. Your own photographs of a place beat any stock image of it,
+    /// and they are the only ones anybody has the right to ship.
     @MainActor
-    static func chooseImage() -> String? {
+    static func choose() -> String? {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image]
         panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
         panel.prompt = "Use as backdrop"
-        panel.message = "Pick a photo for the background"
+        panel.message = "Pick a photo, or a folder of photos to rotate through"
         return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+}
+
+/// Resolves a backdrop path that may be a single image or a folder of them.
+enum PhotoBackdrop {
+    private static let extensions: Set<String> = ["jpg", "jpeg", "png", "heic", "heif", "tiff", "webp"]
+
+    /// Every usable image at `path`, sorted so the order is stable between launches.
+    static func images(at path: String) -> [String] {
+        let expanded = (path as NSString).expandingTildeInPath
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir) else { return [] }
+        guard isDir.boolValue else { return [expanded] }
+
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: expanded)) ?? []
+        return names
+            .filter { extensions.contains(($0 as NSString).pathExtension.lowercased()) }
+            .sorted()
+            .map { expanded + "/" + $0 }
+    }
+
+    static func isFolder(_ path: String) -> Bool {
+        var isDir: ObjCBool = false
+        let expanded = (path as NSString).expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir) else { return false }
+        return isDir.boolValue
+    }
+
+    /// Decoding a full-resolution photo on every redraw would be absurd, and this view
+    /// redraws whenever the voice level moves — so exactly one decoded image is kept.
+    private static var cache: (path: String, image: NSImage)?
+
+    static func image(for path: String, rotationIndex: Int) -> NSImage? {
+        let all = images(at: path)
+        guard !all.isEmpty else { return nil }
+        let chosen = all[((rotationIndex % all.count) + all.count) % all.count]
+        if let c = cache, c.path == chosen { return c.image }
+        guard let img = NSImage(contentsOfFile: chosen) else { return nil }
+        cache = (chosen, img)
+        return img
     }
 }

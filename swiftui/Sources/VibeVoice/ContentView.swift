@@ -24,6 +24,14 @@ struct ContentView: View {
     /// light/dark setting, which goes back to governing Midnight and Paper.
     private var sceneIsDark: Bool { state.settings.backdrop.place != nil }
 
+    /// Which photo a rotating folder is on. Derived from the clock rather than a timer,
+    /// so it advances on its own and survives a redraw without extra state.
+    private var photoIndex: Int {
+        let every = state.settings.photoRotateSeconds
+        guard every >= 1 else { return 0 }
+        return Int(Date().timeIntervalSinceReferenceDate / every)
+    }
+
     /// True once the app has been left alone long enough to get out of its own way.
     private var ambientHidden: Bool {
         state.settings.ambientMode
@@ -60,7 +68,8 @@ struct ContentView: View {
                 BackdropView(backdrop: state.settings.backdrop,
                              imagePath: state.settings.backdropImagePath,
                              daylight: state.currentDaylight,
-                             energy: Double(orbLevel))
+                             energy: Double(orbLevel),
+                             rotationIndex: photoIndex)
                 // Keep the mode tint, so the room still shifts colour when Vibe speaks.
                 RadialGradient(colors: [accentForMode.opacity(0.14), .clear],
                                center: .init(x: 0.28, y: 0.18), startRadius: 0, endRadius: 620)
