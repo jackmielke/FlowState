@@ -124,7 +124,7 @@ struct ContentView: View {
                                              startPoint: .top, endPoint: .bottom))
                         .frame(width: 9, height: 9)
                         .shadow(color: Theme.accent.opacity(0.7), radius: 6)
-                    Text("FLOW")
+                    Text("VANTAGE")
                         .font(.system(size: 11.5, weight: .bold, design: .rounded))
                         .tracking(2.0)
                         .foregroundStyle(Theme.text.opacity(0.92))

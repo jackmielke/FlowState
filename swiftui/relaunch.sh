@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build, install and relaunch Flow — without touching anything else.
+# Build, install and relaunch Vantage — without touching anything else.
 #
 # WHY THIS SCRIPT EXISTS
 # The obvious command is wrong and quietly harmful:
@@ -17,7 +17,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP_BINARY="VibeVoice"                 # executable name inside the bundle
-INSTALLED="/Applications/Flow.app"
+INSTALLED="/Applications/Vantage.app"
 SIGN_ID="Vibe Voice Dev"
 SIGN_KC="$HOME/Library/Keychains/vibevoice.keychain-db"
 
