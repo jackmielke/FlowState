@@ -19,6 +19,18 @@ struct ContentView: View {
 
     private var orbLevel: Float { max(state.audio.micLevel, state.audio.outLevel * 1.15) }
 
+    /// The painted scenes are all dusk-to-night rooms. Light chrome on top of one is not
+    /// a style choice, it is unreadable — so a scene pins the UI dark regardless of the
+    /// light/dark setting, which goes back to governing Midnight and Paper.
+    private var sceneIsDark: Bool { state.settings.backdrop.place != nil }
+
+    /// True once the app has been left alone long enough to get out of its own way.
+    private var ambientHidden: Bool {
+        state.settings.ambientMode
+            && state.isAmbient
+            && state.settings.backdrop.place != nil
+    }
+
     private var accentForMode: Color {
         switch mode {
         case .speaking: return Theme.voice
@@ -47,6 +59,7 @@ struct ContentView: View {
             } else {
                 BackdropView(backdrop: state.settings.backdrop,
                              imagePath: state.settings.backdropImagePath,
+                             daylight: state.currentDaylight,
                              energy: Double(orbLevel))
                 // Keep the mode tint, so the room still shifts colour when Vibe speaks.
                 RadialGradient(colors: [accentForMode.opacity(0.14), .clear],
@@ -63,11 +76,28 @@ struct ContentView: View {
                     sidebar
                 }
             }
+            // Ambient: the chrome fades, the scene and the orb stay. Everything is still
+            // live underneath — this hides the furniture, it does not stop the session.
+            .opacity(ambientHidden ? 0 : 1)
+            .allowsHitTesting(!ambientHidden)
+            .animation(.easeInOut(duration: 1.1), value: ambientHidden)
+
+            if ambientHidden {
+                VStack {
+                    Spacer()
+                    Text("move the mouse to come back")
+                        .font(.system(size: 10.5)).foregroundStyle(.white.opacity(0.35))
+                        .padding(.bottom, 22)
+                }
+            }
             WindowConfigurator(appearance: state.settings.appearance).frame(width: 0, height: 0)
         }
+        .onContinuousHover { _ in state.noteActivity() }
         .frame(minWidth: 940, minHeight: 620)
-        .preferredColorScheme(state.settings.appearance.colorScheme)
-        .onAppear { state.settings.appearance.applyToApp() }
+        .preferredColorScheme(sceneIsDark ? .dark : state.settings.appearance.colorScheme)
+        .onAppear { state.applyEffectiveAppearance() }
+        .onChange(of: state.settings.backdrop) { _, _ in state.applyEffectiveAppearance() }
+        .onChange(of: state.settings.appearance) { _, _ in state.applyEffectiveAppearance() }
         .sheet(isPresented: $state.showSettings) { SettingsView(state: state) }
     }
 

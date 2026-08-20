@@ -79,6 +79,40 @@ struct SettingsView: View {
                                    ? " — " + ((state.settings.backdropImagePath as NSString).lastPathComponent)
                                    : ""))
                         caption("The places are painted rather than photographed, so they stay sharp at any size and add nothing to the app's two megabytes.")
+
+                        if state.settings.backdrop.place != nil {
+                            HStack(spacing: 6) {
+                                ForEach(["auto"] + Daylight.allCases.map(\.rawValue), id: \.self) { m in
+                                    Button {
+                                        state.settings.daylightMode = m
+                                    } label: {
+                                        Text(m == "auto" ? "Auto" : m.prefix(1).uppercased() + m.dropFirst())
+                                            .font(.system(size: 11, weight: .medium))
+                                            .frame(maxWidth: .infinity)
+                                            .padding(.vertical, 5)
+                                            .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                                .fill(state.settings.daylightMode == m
+                                                      ? Theme.accent.opacity(0.9) : Theme.fill))
+                                            .foregroundStyle(state.settings.daylightMode == m
+                                                             ? Theme.onAccent : Theme.text)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            caption(state.settings.daylightMode == "auto"
+                                    ? "Following your clock — right now it's \(Daylight.now().label.lowercased()). The scene changes as the day does."
+                                    : "Pinned to \(state.settings.daylightMode).")
+
+                            HStack {
+                                Text("Ambient mode")
+                                    .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                                Spacer()
+                                NeatToggle(isOn: Binding(
+                                    get: { state.settings.ambientMode },
+                                    set: { state.settings.ambientMode = $0; state.noteActivity() }))
+                            }
+                            caption("After 45 seconds of quiet the panels fade out and leave the scene and the orb. The session keeps running — move the mouse to bring it back.")
+                        }
                     }
 
                     section("Voice") {

@@ -79,6 +79,48 @@ final class AppState: ObservableObject {
     /// Several Claude Code jobs at once. The rules about how many, and what may run
     /// beside what, live in VibeVoiceCore where they are tested.
     let devTasks = DevTaskRegistry(maxConcurrent: 3)
+    /// Ambient: goes true when nothing has happened for a while, so the UI can step out
+    /// of the way and leave the scene. Any hover, any speech, any state change resets it.
+    @Published private(set) var isAmbient = false
+    private var lastActivity = Date()
+    private var ambientTimer: Timer?
+
+    /// Which light to paint the scene in — the local clock, or a pinned choice.
+    var currentDaylight: Daylight {
+        Daylight(rawValue: settings.daylightMode) ?? .now()
+    }
+
+    /// Applies the appearance the UI should actually be in: a painted backdrop forces
+    /// dark, otherwise the user's own choice.
+    func applyEffectiveAppearance() {
+        if settings.backdrop.place != nil {
+            AppearanceMode.dark.applyToApp()
+        } else {
+            settings.appearance.applyToApp()
+        }
+    }
+
+    func noteActivity() {
+        lastActivity = Date()
+        if isAmbient { isAmbient = false }
+    }
+
+    private func startAmbientClock() {
+        ambientTimer?.invalidate()
+        let t = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.settings.ambientMode else { return }
+                // Never fade out mid-sentence — silence is the whole signal here.
+                let busy = self.userSpeaking || self.audio.isPlayingAudio || self.devTaskRunning
+                if busy { self.lastActivity = Date() }
+                let idle = Date().timeIntervalSince(self.lastActivity) > 45
+                if idle != self.isAmbient { self.isAmbient = idle }
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        ambientTimer = t
+    }
+
     /// Tools answered natively, in-process, without Claude Code.
     let tools = ToolRegistry(specs: NativeTools.specs + NativeTools.taskControlSpecs)
 
@@ -199,6 +241,8 @@ final class AppState: ObservableObject {
             .store(in: &bag)
 
         for name in settings.disabledTools { tools.setEnabled(false, for: name) }
+
+        startAmbientClock()
 
         refreshScreenPermission(reason: "launch")
         // Get listed in Privacy & Security > Screen & System Audio Recording.

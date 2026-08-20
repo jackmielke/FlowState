@@ -8,7 +8,7 @@ import AppKit
 /// ships nothing with a licence attached, and scales to any window size without going
 /// soft. If you want the real thing, `custom` takes your own photo.
 enum Backdrop: String, Codable, CaseIterable, Identifiable {
-    case midnight, paper, bali, capeTown, sanFrancisco, europe, custom
+    case midnight, paper, bali, capeTown, sanFrancisco, alps, tokyo, sahara, custom
 
     var id: String { rawValue }
 
@@ -19,7 +19,9 @@ enum Backdrop: String, Codable, CaseIterable, Identifiable {
         case .bali:          return "Bali"
         case .capeTown:      return "Cape Town"
         case .sanFrancisco:  return "San Francisco"
-        case .europe:        return "Alps"
+        case .alps:          return "Alps"
+        case .tokyo:         return "Tokyo"
+        case .sahara:        return "Sahara"
         case .custom:        return "Your photo"
         }
     }
@@ -28,11 +30,26 @@ enum Backdrop: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .midnight:     return "Near-black. The default."
         case .paper:        return "Warm off-white."
-        case .bali:         return "Teal water into a gold sunset."
-        case .capeTown:     return "Indigo dusk behind the mountain."
-        case .sanFrancisco: return "Fog over the bay, peach at the edges."
-        case .europe:       return "Cold blue and snow light."
+        case .bali:         return Place.bali.blurb
+        case .capeTown:     return Place.capeTown.blurb
+        case .sanFrancisco: return Place.sanFrancisco.blurb
+        case .alps:         return Place.alps.blurb
+        case .tokyo:        return Place.tokyo.blurb
+        case .sahara:       return Place.sahara.blurb
         case .custom:       return "Any image on this Mac."
+        }
+    }
+
+    /// The painted place behind this backdrop, if it is one.
+    var place: Place? {
+        switch self {
+        case .bali:         return .bali
+        case .capeTown:     return .capeTown
+        case .sanFrancisco: return .sanFrancisco
+        case .alps:         return .alps
+        case .tokyo:        return .tokyo
+        case .sahara:       return .sahara
+        default:            return nil
         }
     }
 
@@ -41,10 +58,8 @@ enum Backdrop: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .midnight:     return [hex(0x0B0B0F), hex(0x131722), hex(0x0A0A0E)]
         case .paper:        return [hex(0xFBF7F0), hex(0xF3ECE1), hex(0xEDE4D6)]
-        case .bali:         return [hex(0x0B3B49), hex(0x14707F), hex(0xE9A05C), hex(0xF2C078)]
-        case .capeTown:     return [hex(0x161A3A), hex(0x3B2A5A), hex(0xC85C4A), hex(0xF0A05A)]
-        case .sanFrancisco: return [hex(0x2B3A4A), hex(0x6E8598), hex(0xC9A48C), hex(0xF0CDB4)]
-        case .europe:       return [hex(0x0E2233), hex(0x2E5A78), hex(0x8FB8D0), hex(0xE8F1F6)]
+        case .bali, .capeTown, .sanFrancisco, .alps, .tokyo, .sahara:
+            return place?.spec(Daylight.now()).sky ?? [hex(0x0B0B0F)]
         case .custom:       return [hex(0x0B0B0F), hex(0x131722)]
         }
     }
@@ -76,18 +91,29 @@ enum Backdrop: String, Codable, CaseIterable, Identifiable {
 struct BackdropView: View {
     let backdrop: Backdrop
     let imagePath: String
+    /// Which light to paint the place in.
+    var daylight: Daylight = .now()
+    /// Slow drift for shimmer and twinkle. Driven internally so callers stay simple.
     /// Drifts the light slightly with the voice, so the scene feels alive without
     /// competing with the orb for attention.
     var energy: Double = 0
 
     var body: some View {
         ZStack {
-            if backdrop == .custom, let img = loadImage() {
+            if let place = backdrop.place {
+                // 8 fps is plenty for water and starlight, and costs a fraction of what
+                // redrawing on every display refresh would.
+                TimelineView(.periodic(from: .now, by: 1.0 / 8.0)) { tl in
+                    SceneView(spec: place.spec(daylight),
+                              energy: energy,
+                              phase: tl.date.timeIntervalSinceReferenceDate)
+                }
+            } else if backdrop == .custom, let img = loadImage() {
                 Image(nsImage: img)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
                     .clipped()
-            } else {
+            } else if backdrop != .custom {
                 LinearGradient(colors: backdrop.colors,
                                startPoint: .topLeading, endPoint: .bottomTrailing)
 

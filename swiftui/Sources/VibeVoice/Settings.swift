@@ -77,13 +77,17 @@ struct AppSettings: Codable, Equatable {
     /// presets and a custom photo are painted by `BackdropView`.
     var backdrop: Backdrop = .midnight
     var backdropImagePath: String = ""
+    /// "auto" follows the local clock; otherwise a pinned Daylight raw value.
+    var daylightMode: String = "auto"
+    /// Fade the chrome away when nothing has happened for a while, leaving the scene.
+    var ambientMode: Bool = true
 
     enum CodingKeys: String, CodingKey {
         case voice, model, systemPrompt, speed, continuousScreen, screenInterval
         case vadThreshold, silenceDurationMs, transcribeUser, devMode, devRepo
         case maxScreenFrames, screenshotSize, qualityMode, appearance, screenDisplayID
         case devNarrate, devNarrateInterval, devNarrateMax, devPermissionMode
-        case disabledTools, backdrop, backdropImagePath
+        case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
     }
 }
 
@@ -127,6 +131,8 @@ extension AppSettings {
         appearance        = v(.appearance, d.appearance)
         backdrop          = v(.backdrop, d.backdrop)
         backdropImagePath = v(.backdropImagePath, d.backdropImagePath)
+        daylightMode      = v(.daylightMode, d.daylightMode)
+        ambientMode       = v(.ambientMode, d.ambientMode)
     }
 }
 
