@@ -77,10 +77,24 @@ final class AppState: ObservableObject {
             .store(in: &bag)
 
         refreshScreenPermission(reason: "launch")
-        // Register with TCC on first launch so the Screen & System Audio Recording
-        // list has a Vibe Voice row to toggle. No-op once granted.
+        // Get listed in Privacy & Security > Screen & System Audio Recording.
+        //
+        // On current macOS there is no "Allow" button for screen recording: the system
+        // dialog only offers Open System Settings or Deny. An app appears in that list
+        // once it has ATTEMPTED a capture and been refused — and it is the real
+        // ScreenCaptureKit attempt that creates the record, not
+        // CGRequestScreenCaptureAccess(), which returns false in ~10ms without
+        // prompting. Measured on a never-before-seen bundle id: CGRequest returned
+        // false instantly, while SCShareableContent returned -3801 "declined", which
+        // is the refusal that registers the app.
+        //
+        // So: ask first (harmless, and correct if this Mac ever does prompt), then
+        // make a genuine attempt so the row exists when the user goes looking for it.
         Task { @MainActor in
-            let s = await ScreenCapture.ensureAccess(reason: "launch")
+            var s = await ScreenCapture.ensureAccess(reason: "launch")
+            if s != .granted {
+                s = await ScreenCapture.probe(reason: "launch-register")
+            }
             self.screenPermission = s
         }
         note("Ready. Hit Connect and just talk. ⌘⇧2 shows me your screen.")
