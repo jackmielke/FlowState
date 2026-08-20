@@ -137,6 +137,8 @@ final class AppState: ObservableObject {
                 if busy { self.lastActivity = Date() }
                 let idle = Date().timeIntervalSince(self.lastActivity) > 45
                 if idle != self.isAmbient { self.isAmbient = idle }
+                // Cheap, and keeps "Showing <screen>" honest as the pointer moves.
+                if self.isFollowingActiveDisplay { self.refreshActiveDisplay() }
             }
         }
         RunLoop.main.add(t, forMode: .common)
@@ -957,6 +959,10 @@ final class AppState: ObservableObject {
             handleScreenBlock(pre, auto: auto)
             return
         }
+
+        // Re-read which screen the pointer is on immediately before capturing, so a frame
+        // can never come from the screen you just left. Polling alone can lag a move.
+        if isFollowingActiveDisplay { refreshActiveDisplay() }
 
         do {
             let frame = try await ScreenCapture.capture(

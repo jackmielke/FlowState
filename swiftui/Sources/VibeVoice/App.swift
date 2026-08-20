@@ -22,15 +22,6 @@ struct VibeVoiceApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
         .defaultSize(width: 1080, height: 700)
-        // Flow in the menu bar: reachable without finding its window, and a glance at
-        // whether it is live. Deliberately not `.menuBarExtraStyle(.window)` — a menu is
-        // what people expect here, and it stays keyboard-navigable.
-        MenuBarExtra(isInserted: .constant(true)) {
-            MenuBarMenu(state: state)
-        } label: {
-            Image(systemName: state.menuBarSymbol)
-        }
-
         .commands {
             CommandGroup(replacing: .newItem) {}
             CommandMenu("View") {
@@ -53,6 +44,15 @@ struct VibeVoiceApp: App {
                 Button("Settings…") { state.showSettings = true }
                     .keyboardShortcut(",", modifiers: .command)
             }
+        }
+
+        // Flow in the menu bar. A separate Scene, placed AFTER the Window and its
+        // .commands — chained onto them instead, it silently attaches the command menus
+        // to the wrong scene and no status item appears.
+        MenuBarExtra("Flow", systemImage: state.menuBarSymbol,
+                     isInserted: Binding(get: { state.settings.menuBarEnabled },
+                                         set: { state.settings.menuBarEnabled = $0 })) {
+            MenuBarMenu(state: state)
         }
     }
 }
@@ -101,5 +101,6 @@ struct MenuBarMenu: View {
         Divider()
         Button("Quit Flow") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q", modifiers: .command)
+
     }
 }

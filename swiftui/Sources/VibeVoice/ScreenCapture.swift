@@ -283,6 +283,21 @@ enum ScreenCapture {
 
     /// The display the app itself is on, i.e. what "follow the active display" resolves to.
     static func activeDisplayID() -> CGDirectDisplayID? {
+        // Follow the POINTER, not the window.
+        //
+        // `NSScreen.main` is the screen holding the key window — i.e. Flow's own. That
+        // makes "follow the active display" mean "follow me", which is the opposite of
+        // what it should mean: the interesting screen is the one being worked on, and
+        // Flow is usually parked somewhere else while that happens.
+        //
+        // NSEvent.mouseLocation and NSScreen.frame share the same bottom-left origin
+        // global space, so this is a straight containment test.
+        let mouse = NSEvent.mouseLocation
+        if let under = NSScreen.screens.first(where: { $0.frame.contains(mouse) }),
+           let num = under.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+            return num.uint32Value
+        }
+        // Pointer off every screen (it happens mid-transition) — fall back to the window.
         guard let main = NSScreen.main,
               let num = main.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
         else { return nil }
