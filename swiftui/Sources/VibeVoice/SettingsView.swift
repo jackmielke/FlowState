@@ -44,6 +44,54 @@ struct SettingsView: View {
                                 : "Pinned to \(state.settings.appearance.label.lowercased()), whatever macOS is set to. Saved with the rest of your settings.")
                     }
 
+                    section("Anywhere") {
+                        HStack {
+                            Text("Show in the menu bar")
+                                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                            Spacer()
+                            NeatToggle(isOn: Binding(
+                                get: { state.settings.menuBarEnabled },
+                                set: { state.settings.menuBarEnabled = $0 }))
+                        }
+                        caption("Connect, send a screenshot or stop a task without finding the window.")
+
+                        HStack(spacing: 6) {
+                            ForEach(HotkeyCombo.all) { c in
+                                Button {
+                                    state.settings.summonHotkey = c.id
+                                    state.applySummonHotkey()
+                                } label: {
+                                    Text(c.label)
+                                        .font(.system(size: 11.5, weight: .medium, design: .rounded))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 6)
+                                        .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            .fill(state.settings.summonHotkey == c.id
+                                                  ? Theme.accent.opacity(0.9) : Theme.fill))
+                                        .foregroundStyle(state.settings.summonHotkey == c.id
+                                                         ? Theme.onAccent : Theme.text)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            Button {
+                                state.settings.summonHotkey = ""
+                                state.applySummonHotkey()
+                            } label: {
+                                Text("Off")
+                                    .font(.system(size: 11.5, weight: .medium, design: .rounded))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 6)
+                                    .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        .fill(state.settings.summonHotkey.isEmpty
+                                              ? Theme.accent.opacity(0.9) : Theme.fill))
+                                    .foregroundStyle(state.settings.summonHotkey.isEmpty
+                                                     ? Theme.onAccent : Theme.text)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        caption("Summons Flow from any app, and hides it again if it is already in front. ⌘⇧2 still sends a screenshot from anywhere. If a shortcut does nothing, another app already owns it — pick a different one.")
+                    }
+
                     section("Backdrop") {
                         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4),
                                   spacing: 8) {

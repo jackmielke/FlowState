@@ -92,6 +92,28 @@ final class AppState: ObservableObject {
 
     /// Applies the appearance the UI should actually be in: a painted backdrop forces
     /// dark, otherwise the user's own choice.
+    /// (Re)binds the summon hotkey to whatever Settings now says.
+    /// The menu-bar glyph. Says what Flow is doing at a glance, without colour, because
+    /// the menu bar renders it as a template image.
+    var menuBarSymbol: String {
+        switch connection {
+        case .live:       return devTaskRunning ? "waveform.badge.gearshape" : "waveform"
+        case .connecting: return "waveform.badge.plus"
+        case .error:      return "waveform.badge.exclamationmark"
+        case .idle:       return "waveform.slash"
+        }
+    }
+
+    func applySummonHotkey() {
+        guard !settings.summonHotkey.isEmpty else {
+            GlobalHotkey.shared.unregisterSummon()
+            return
+        }
+        GlobalHotkey.shared.registerSummon(HotkeyCombo.named(settings.summonHotkey)) {
+            Task { @MainActor in Summon.toggle() }
+        }
+    }
+
     func applyEffectiveAppearance() {
         if settings.backdrop.place != nil {
             AppearanceMode.dark.applyToApp()
@@ -242,6 +264,7 @@ final class AppState: ObservableObject {
 
         for name in settings.disabledTools { tools.setEnabled(false, for: name) }
 
+        applySummonHotkey()
         startAmbientClock()
 
         refreshScreenPermission(reason: "launch")

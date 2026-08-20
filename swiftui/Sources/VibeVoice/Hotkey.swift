@@ -2,22 +2,92 @@ import Foundation
 import Carbon.HIToolbox
 import AppKit
 
-/// Process-wide ⌘⇧2 via Carbon's RegisterEventHotKey (no Accessibility permission needed).
+/// A key combination Flow listens for everywhere, not just when it is in front.
+///
+/// Carbon's `RegisterEventHotKey` is used rather than an event tap because it needs no
+/// Accessibility permission — which matters here, since this app has already spent
+/// enough of the user's patience on macOS privacy dialogs.
+struct HotkeyCombo: Equatable, Identifiable {
+    let id: String
+    let label: String
+    let keyCode: UInt32
+    let modifiers: UInt32
+
+    static let cmdShiftSpace = HotkeyCombo(
+        id: "cmdShiftSpace", label: "⌘⇧Space",
+        keyCode: UInt32(kVK_Space), modifiers: UInt32(cmdKey | shiftKey))
+
+    static let optionSpace = HotkeyCombo(
+        id: "optionSpace", label: "⌥Space",
+        keyCode: UInt32(kVK_Space), modifiers: UInt32(optionKey))
+
+    static let cmdShiftF = HotkeyCombo(
+        id: "cmdShiftF", label: "⌘⇧F",
+        keyCode: UInt32(kVK_ANSI_F), modifiers: UInt32(cmdKey | shiftKey))
+
+    static let all = [cmdShiftSpace, optionSpace, cmdShiftF]
+
+    static func named(_ id: String) -> HotkeyCombo {
+        all.first { $0.id == id } ?? .cmdShiftSpace
+    }
+}
+
+/// Process-wide hotkeys. Several can be registered; each gets its own slot.
 final class GlobalHotkey {
     static let shared = GlobalHotkey()
 
-    private var ref: EventHotKeyRef?
+    private struct Slot {
+        var ref: EventHotKeyRef?
+        var action: () -> Void
+    }
+
+    private var slots: [UInt32: Slot] = [:]
     private var handler: EventHandlerRef?
-    private var action: (() -> Void)?
     private let signature: OSType = 0x56425643 // 'VBVC'
 
     private init() {}
 
-    /// ⌘⇧2
+    /// ⌘⇧2 — show the model your screen. Kept as its own entry point since it is wired
+    /// from several places.
     func register(_ action: @escaping () -> Void) {
-        guard ref == nil else { self.action = action; return }
-        self.action = action
+        bind(id: 1, keyCode: UInt32(kVK_ANSI_2), modifiers: UInt32(cmdKey | shiftKey), action: action)
+    }
 
+    /// The summon key. Rebinding replaces whatever was there, so switching combos in
+    /// Settings does not leave the old one live.
+    func registerSummon(_ combo: HotkeyCombo, action: @escaping () -> Void) {
+        bind(id: 2, keyCode: combo.keyCode, modifiers: combo.modifiers, action: action)
+    }
+
+    func unregisterSummon() { unbind(id: 2) }
+
+    // MARK: -
+
+    private func bind(id: UInt32, keyCode: UInt32, modifiers: UInt32, action: @escaping () -> Void) {
+        installHandlerIfNeeded()
+        unbind(id: id)
+
+        var ref: EventHotKeyRef?
+        let hkID = EventHotKeyID(signature: signature, id: id)
+        let status = RegisterEventHotKey(keyCode, modifiers, hkID,
+                                         GetApplicationEventTarget(), 0, &ref)
+        // A combo another app already owns fails here rather than silently doing nothing,
+        // which is worth knowing about when a key "doesn't work".
+        guard status == noErr else {
+            FileHandle.standardError.write(Data(
+                "[hotkey] could not register id \(id) (OSStatus \(status)) — another app may own it\n".utf8))
+            return
+        }
+        slots[id] = Slot(ref: ref, action: action)
+    }
+
+    private func unbind(id: UInt32) {
+        if let slot = slots[id], let ref = slot.ref { UnregisterEventHotKey(ref) }
+        slots[id] = nil
+    }
+
+    private func installHandlerIfNeeded() {
+        guard handler == nil else { return }
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                  eventKind: UInt32(kEventHotKeyPressed))
         InstallEventHandler(GetApplicationEventTarget(), { _, event, _ -> OSStatus in
@@ -25,21 +95,37 @@ final class GlobalHotkey {
             GetEventParameter(event, EventParamName(kEventParamDirectObject),
                               EventParamType(typeEventHotKeyID), nil,
                               MemoryLayout<EventHotKeyID>.size, nil, &hkID)
-            if hkID.id == 1 {
-                DispatchQueue.main.async { GlobalHotkey.shared.action?() }
-            }
+            let id = hkID.id
+            DispatchQueue.main.async { GlobalHotkey.shared.fire(id) }
             return noErr
         }, 1, &spec, nil, &handler)
-
-        let hkID = EventHotKeyID(signature: signature, id: 1)
-        let mods = UInt32(cmdKey | shiftKey)
-        RegisterEventHotKey(UInt32(kVK_ANSI_2), mods, hkID, GetApplicationEventTarget(), 0, &ref)
     }
 
+    fileprivate func fire(_ id: UInt32) { slots[id]?.action() }
+
     func unregister() {
-        if let ref { UnregisterEventHotKey(ref) }
-        ref = nil
+        for id in slots.keys { unbind(id: id) }
         if let handler { RemoveEventHandler(handler) }
         handler = nil
+    }
+}
+
+/// Bringing Flow forward from anywhere.
+enum Summon {
+    /// Raises the window and focuses the app. If it is already front and focused, this
+    /// hides it instead — so the same key both summons and dismisses, which is what
+    /// people expect of a launcher-style shortcut.
+    @MainActor
+    static func toggle() {
+        let app = NSApplication.shared
+        if app.isActive, app.keyWindow != nil {
+            app.hide(nil)
+            return
+        }
+        app.activate(ignoringOtherApps: true)
+        for w in app.windows where w.canBecomeMain {
+            w.makeKeyAndOrderFront(nil)
+            break
+        }
     }
 }

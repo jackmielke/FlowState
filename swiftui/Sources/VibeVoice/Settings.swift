@@ -84,13 +84,18 @@ struct AppSettings: Codable, Equatable {
     /// Fade the chrome away when nothing has happened for a while, leaving the scene.
     var ambientMode: Bool = true
 
+    /// Show Flow in the menu bar, so it is reachable without hunting for its window.
+    var menuBarEnabled: Bool = true
+    /// Summon hotkey. Empty string = off.
+    var summonHotkey: String = "cmdShiftSpace"
+
     enum CodingKeys: String, CodingKey {
         case voice, model, systemPrompt, speed, continuousScreen, screenInterval
         case vadThreshold, silenceDurationMs, transcribeUser, devMode, devRepo
         case maxScreenFrames, screenshotSize, qualityMode, appearance, screenDisplayID
         case devNarrate, devNarrateInterval, devNarrateMax, devPermissionMode
         case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
-        case photoRotateSeconds
+        case photoRotateSeconds, menuBarEnabled, summonHotkey
     }
 }
 
@@ -136,6 +141,8 @@ extension AppSettings {
         backdropImagePath = v(.backdropImagePath, d.backdropImagePath)
         daylightMode      = v(.daylightMode, d.daylightMode)
         photoRotateSeconds = v(.photoRotateSeconds, d.photoRotateSeconds)
+        menuBarEnabled    = v(.menuBarEnabled, d.menuBarEnabled)
+        summonHotkey      = v(.summonHotkey, d.summonHotkey)
         ambientMode       = v(.ambientMode, d.ambientMode)
     }
 }

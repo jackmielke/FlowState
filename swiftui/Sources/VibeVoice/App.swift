@@ -22,6 +22,15 @@ struct VibeVoiceApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
         .defaultSize(width: 1080, height: 700)
+        // Flow in the menu bar: reachable without finding its window, and a glance at
+        // whether it is live. Deliberately not `.menuBarExtraStyle(.window)` — a menu is
+        // what people expect here, and it stays keyboard-navigable.
+        MenuBarExtra(isInserted: .constant(true)) {
+            MenuBarMenu(state: state)
+        } label: {
+            Image(systemName: state.menuBarSymbol)
+        }
+
         .commands {
             CommandGroup(replacing: .newItem) {}
             CommandMenu("View") {
@@ -45,5 +54,52 @@ struct VibeVoiceApp: App {
                     .keyboardShortcut(",", modifiers: .command)
             }
         }
+    }
+}
+
+/// The menu behind the menu-bar icon.
+///
+/// Everything here is something you would want without the window in front: whether a
+/// session is live, what it is costing, whether a task is running, and the two actions
+/// worth reaching for blind — connect, and show it your screen.
+struct MenuBarMenu: View {
+    @ObservedObject var state: AppState
+
+    var body: some View {
+        Text(state.connection.label + (state.sessionID == nil ? "" : " · session open"))
+
+        if state.cost.turns > 0 {
+            Text("$" + state.cost.formatted + " this session")
+        }
+
+        Divider()
+
+        Button(state.connection == .live ? "Disconnect" : "Connect") {
+            state.toggleConnection()
+        }
+        .keyboardShortcut("k", modifiers: .command)
+
+        Button("Show it my screen") {
+            Task { @MainActor in await state.captureAndSend(auto: false) }
+        }
+        .disabled(state.connection != .live)
+
+        if state.devTasks.running.isEmpty == false {
+            Divider()
+            ForEach(state.devTasks.running) { t in
+                Button("Stop \(t.id) — \(t.label)") {
+                    Task { @MainActor in await state.cancelTask(t.id) }
+                }
+            }
+        }
+
+        Divider()
+
+        Button("Open Flow") { Summon.toggle() }
+        Button("Settings…") { Summon.toggle(); state.showSettings = true }
+
+        Divider()
+        Button("Quit Flow") { NSApplication.shared.terminate(nil) }
+            .keyboardShortcut("q", modifiers: .command)
     }
 }
