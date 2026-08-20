@@ -6,29 +6,33 @@ import Foundation
 /// OpenAI credit. The API says only "you exceeded your current quota", which is true
 /// but useless when your hands are busy and the fix is a specific page you now have to
 /// go find. So we recognise those errors and put the button right on the banner.
-struct BannerAction: Equatable {
-    var label: String
-    var url: URL
+public struct BannerAction: Equatable {
+    public var label: String
+    public var url: URL
 
     /// OpenAI's billing page — where credit is actually added.
-    static let addCredits = BannerAction(
+    public static let addCredits = BannerAction(
         label: "Add credits",
         url: URL(string: "https://platform.openai.com/settings/organization/billing/overview")!)
 
-    static let usageLimits = BannerAction(
+    public static let usageLimits = BannerAction(
         label: "Check limits",
         url: URL(string: "https://platform.openai.com/settings/organization/limits")!)
 
     /// Matches on the API's own vocabulary for "you have no money left" and its
     /// neighbours. Deliberately broad: a false positive costs the user a stray button,
     /// a false negative costs them the one moment they needed the link.
-    static func forAPIError(_ message: String) -> BannerAction? {
+    public static func forAPIError(_ message: String) -> BannerAction? {
         let m = message.lowercased()
 
         let outOfCredit = [
             "insufficient_quota", "insufficient quota",
             "exceeded your current quota", "billing", "payment",
             "credit balance", "out of credits", "hard limit",
+            // Verbatim from the live API, seen 2026-08-20:
+            //   "You have no credits remaining. Add credits to continue using the API
+            //    at https://platform.openai.com/settings/organization/billing/."
+            "no credits remaining", "add credits", "quota",
         ]
         if outOfCredit.contains(where: m.contains) { return .addCredits }
 
@@ -41,7 +45,7 @@ struct BannerAction: Equatable {
     }
 
     /// A plain-language sentence to show instead of the raw API text.
-    static func explanation(for message: String) -> String? {
+    public static func explanation(for message: String) -> String? {
         guard let a = forAPIError(message) else { return nil }
         return a == .addCredits
             ? "Your OpenAI account is out of credit, so the voice session can't continue."

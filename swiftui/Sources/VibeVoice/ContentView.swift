@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import VibeVoiceCore
 
 struct ContentView: View {
     @ObservedObject var state: AppState
@@ -282,6 +283,12 @@ struct ContentView: View {
                     .foregroundStyle(Theme.textDim)
                     .multilineTextAlignment(.center)
                     .frame(height: 16)
+
+                if case .error = state.connection, let a = state.bannerAction {
+                    Button(a.label) { NSWorkspace.shared.open(a.url) }
+                        .buttonStyle(GhostButtonStyle(tint: Theme.accentInk))
+                        .padding(.top, 2)
+                }
             }
             .padding(.top, 6)
 
@@ -359,7 +366,12 @@ struct ContentView: View {
         switch state.connection {
         case .idle: return "Ready when you are"
         case .connecting: return "Waking up…"
-        case .error: return "Something broke"
+        case .error:
+            // Name the actual problem. "Something broke" is true of everything and
+            // useful for nothing.
+            if state.bannerAction == .addCredits { return "Out of credits" }
+            if state.bannerAction == .usageLimits { return "Rate limited" }
+            return "Couldn't connect"
         case .live:
             if mode == .speaking { return "Vibe is speaking" }
             if state.userSpeaking { return "Listening…" }
@@ -371,7 +383,14 @@ struct ContentView: View {
         switch state.connection {
         case .idle: return "Voice-first. Server VAD handles turn-taking — no push-to-talk."
         case .connecting: return "Minting an ephemeral token and opening the socket."
-        case .error: return "The exact API message is above."
+        case .error:
+            if state.bannerAction == .addCredits {
+                return "Add credit to your OpenAI account, then hit Connect again."
+            }
+            if state.bannerAction == .usageLimits {
+                return "OpenAI is throttling this account — wait a moment, then reconnect."
+            }
+            return "The exact API message is above."
         case .live: return state.settings.voice + " · " + state.settings.model + (state.sessionID.map { " · \($0)" } ?? "")
         }
     }

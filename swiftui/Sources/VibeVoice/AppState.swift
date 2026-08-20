@@ -24,6 +24,23 @@ final class AppState: ObservableObject {
     @Published var banner: String?
     /// Optional one-click fix rendered on the banner (e.g. "Add credits").
     @Published var bannerAction: BannerAction?
+    /// The first error that actually explained something this session.
+    ///
+    /// Running out of credit kills the socket, so the real cause ("no credits
+    /// remaining") is immediately followed by "send failed: socket is not connected"
+    /// and "could not connect". Those arrive last, so naively they win the banner and
+    /// the user is told the least useful thing — which is exactly what happened.
+    private var terminalCause: (message: String, action: BannerAction?)?
+
+    /// Transport symptoms of an earlier, real failure. Never worth showing on their own
+    /// once something better is known.
+    private static func isTransportNoise(_ m: String) -> Bool {
+        let l = m.lowercased()
+        return l.contains("socket is not connected")
+            || l.contains("send failed")
+            || l.contains("software caused connection abort")
+            || l.contains("connection reset")
+    }
     /// Live macOS Screen Recording state. Refreshed on launch, on app activation,
     /// before every capture, and on demand — never assumed from a past failure.
     @Published var screenPermission: ScreenPermission = .unknown
@@ -146,6 +163,8 @@ final class AppState: ObservableObject {
     func connect() async {
         connection = .connecting
         banner = nil
+        bannerAction = nil
+        terminalCause = nil
 
         guard await AudioEngine.requestMicAccess() else {
             connection = .error("Microphone access denied. Enable it in System Settings › Privacy & Security › Microphone.")
@@ -340,18 +359,34 @@ final class AppState: ObservableObject {
             if responses.apiError(msg) {
                 note("Handled a response-lifecycle error: \(msg)")
             } else {
+                note("API error: \(msg)")
+                let action = BannerAction.forAPIError(msg)
+                // Don't let the socket dying on top of a real cause overwrite it.
+                if terminalCause != nil && action == nil && Self.isTransportNoise(msg) {
+                    break
+                }
                 // Out-of-credit is the error that actually stops a session, and the raw
                 // API text does not tell you where to fix it. Offer the page directly.
-                bannerAction = BannerAction.forAPIError(msg)
-                banner = BannerAction.explanation(for: msg) ?? msg
-                note("API error: \(msg)")
+                let friendly = BannerAction.explanation(for: msg) ?? msg
+                if action != nil || terminalCause == nil {
+                    terminalCause = (friendly, action)
+                }
+                bannerAction = action ?? bannerAction
+                banner = friendly
             }
 
         case .closed(let why):
+            // Prefer the cause we already know over the symptom the socket reports.
+            let reason = terminalCause?.message
+                ?? (Self.isTransportNoise(why) ? "The connection dropped." : why)
+            if let c = terminalCause {
+                banner = c.message
+                bannerAction = c.action ?? bannerAction
+            }
             if case .live = connection {
-                connection = .error("Disconnected: \(why)")
+                connection = .error(reason)
             } else if case .connecting = connection {
-                connection = .error("Could not connect: \(why)")
+                connection = .error(reason)
             }
             audio.stop()
             stopScreenTimer()
