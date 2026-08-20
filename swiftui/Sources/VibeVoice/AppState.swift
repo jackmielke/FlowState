@@ -22,6 +22,8 @@ final class AppState: ObservableObject {
     @Published var transcript: [TranscriptItem] = []
     @Published var userSpeaking = false
     @Published var banner: String?
+    /// Optional one-click fix rendered on the banner (e.g. "Add credits").
+    @Published var bannerAction: BannerAction?
     /// Live macOS Screen Recording state. Refreshed on launch, on app activation,
     /// before every capture, and on demand — never assumed from a past failure.
     @Published var screenPermission: ScreenPermission = .unknown
@@ -338,7 +340,10 @@ final class AppState: ObservableObject {
             if responses.apiError(msg) {
                 note("Handled a response-lifecycle error: \(msg)")
             } else {
-                banner = msg
+                // Out-of-credit is the error that actually stops a session, and the raw
+                // API text does not tell you where to fix it. Offer the page directly.
+                bannerAction = BannerAction.forAPIError(msg)
+                banner = BannerAction.explanation(for: msg) ?? msg
                 note("API error: \(msg)")
             }
 
@@ -389,6 +394,7 @@ final class AppState: ObservableObject {
         }
 
         let repo = settings.devRepo
+        let mode = settings.devPermissionMode
         devTaskRunning = true
         devTaskSummary = String(task.prefix(120))
         startDevNarration()
@@ -407,7 +413,8 @@ final class AppState: ObservableObject {
 
         Task { [weak self] in
             guard let self else { return }
-            let r = await self.claude.run(task: task, repo: repo) { label in
+            let r = await self.claude.run(task: task, repo: repo,
+                                          permissionMode: mode) { label in
                 // Fires on a background executor as Claude Code works.
                 Task { @MainActor [weak self] in self?.appendDevStep(label) }
             }
@@ -417,15 +424,30 @@ final class AppState: ObservableObject {
                 self.stopDevNarration()
                 self.devStepBuffer.removeAll()
                 if let c = r.costUSD { self.cost.addClaudeCode(c) }
-                // "~$X sub" not "$X": claude runs on the Max subscription here, so this
-                // is subscription usage at list-price equivalent, not money charged.
-                let cost = r.costUSD.map { String(format: " (~$%.2f sub)", $0) } ?? ""
+                // Deliberately not shown. Claude Code runs on the Max subscription here,
+                // so its list-price-equivalent figure is not money the user is billed,
+                // and putting a dollar sign next to it only invites confusion with the
+                // OpenAI meter, which is real spend.
+                let cost = ""
                 self.transcript.append(TranscriptItem(
                     speaker: .system,
                     text: (r.ok ? "✓ Claude Code" : "✗ Claude Code") + cost + ": " + r.text))
-                let note = r.ok
-                    ? "[Claude Code finished the task. Result: \(r.text)] Tell the user what changed, in one or two sentences."
-                    : "[Claude Code FAILED. Error: \(r.text)] Tell the user it failed and why, briefly."
+                // A blocked tool is the difference between "it got stuck" and a question
+                // the user can answer out loud, so it is reported as its own outcome.
+                var note: String
+                if !r.deniedTools.isEmpty {
+                    let tools = r.deniedTools.joined(separator: ", ")
+                    self.transcript.append(TranscriptItem(
+                        speaker: .system, text: "⚠︎ permission blocked: \(tools)"))
+                    note = "[Claude Code was BLOCKED from using: \(tools). It could not finish. "
+                        + "Tell the user which tool was blocked and that they can turn on "
+                        + "auto-allow in Settings under Dev Mode, then ask if they want you to retry.] "
+                        + "Partial result: \(r.text)"
+                } else if r.ok {
+                    note = "[Claude Code finished the task. Result: \(r.text)] Tell the user what changed, in one or two sentences."
+                } else {
+                    note = "[Claude Code FAILED. Error: \(r.text)] Tell the user it failed and why, briefly."
+                }
                 self.client.sendSystemNote(note)
                 self.requestResponse("claude-code-\(r.ok ? "finished" : "failed")")
             }

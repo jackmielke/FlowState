@@ -16,6 +16,11 @@ actor ClaudeCode {
         var text: String
         var costUSD: Double?
         var turns: Int?
+        /// Tools Claude Code wanted but was not allowed to use. In headless mode there
+        /// is nobody to answer a permission prompt, so a blocked tool silently derails
+        /// the task — surfacing it is the difference between "it got stuck" and
+        /// "Notion access was blocked, want me to allow it?".
+        var deniedTools: [String] = []
     }
 
     private var sessionID: String?
@@ -92,6 +97,7 @@ actor ClaudeCode {
     ///   something. Fires on a background executor; hop to the main actor to display.
     func run(task: String,
              repo: String,
+             permissionMode: String = "acceptEdits",
              onProgress: @escaping @Sendable (String) -> Void) async -> Result {
 
         if busy {
@@ -106,8 +112,12 @@ actor ClaudeCode {
         busy = true
         defer { busy = false }
 
+        // acceptEdits only auto-approves FILE EDITS. MCP tools (Notion, Slack…) and
+        // shell commands still prompt, and a prompt in headless mode has nobody to
+        // answer it — which is how a task appears to hang. bypassPermissions is the
+        // "just do it" mode.
         var args = ["-p", "--output-format", "stream-json", "--verbose",
-                    "--permission-mode", "acceptEdits"]
+                    "--permission-mode", permissionMode]
         if let sid = sessionID { args += ["--resume", sid] }
         args.append(task)
 
@@ -163,9 +173,20 @@ actor ClaudeCode {
         let isError = (obj["is_error"] as? Bool) ?? false
         let text = (obj["result"] as? String) ?? ""
 
+        // permission_denials entries are dictionaries; pull whatever names them.
+        var denied: [String] = []
+        if let raw = obj["permission_denials"] as? [[String: Any]] {
+            denied = raw.compactMap { d in
+                (d["tool_name"] as? String) ?? (d["tool"] as? String) ?? (d["name"] as? String)
+            }
+        } else if let raw = obj["permission_denials"] as? [String] {
+            denied = raw
+        }
+
         return Result(ok: !isError,
                       text: String(text.prefix(1500)),
                       costUSD: obj["total_cost_usd"] as? Double,
-                      turns: obj["num_turns"] as? Int)
+                      turns: obj["num_turns"] as? Int,
+                      deniedTools: Array(Set(denied)).sorted())
     }
 }

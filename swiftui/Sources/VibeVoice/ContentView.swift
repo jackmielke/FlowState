@@ -185,11 +185,7 @@ struct ContentView: View {
         text in \(c.textIn) · out \(c.textOut) · cached \(c.cachedIn)
         images \(c.imageIn) tokens (\(String(format: "$%.3f", c.imageUSD)))
 
-        OpenAI API — real spend. Claude Code runs on your Max
-        subscription, so it is counted separately below.
-        \(c.claudeCodeRuns > 0
-          ? "Claude Code: \(c.claudeCodeRuns) run(s), ~$\(c.claudeCodeFormatted) of subscription usage (not billed)"
-          : "")
+        OpenAI API only — this is what you are billed for.
         """
     }
 
@@ -399,8 +395,14 @@ struct ContentView: View {
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 4)
-            Button { state.banner = nil } label: { Image(systemName: "xmark").font(.system(size: 9)) }
-                .buttonStyle(.plain).foregroundStyle(Theme.textFaint)
+            if let a = state.bannerAction {
+                Button(a.label) { NSWorkspace.shared.open(a.url) }
+                    .buttonStyle(GhostButtonStyle(tint: Theme.accent))
+            }
+            Button { state.banner = nil; state.bannerAction = nil } label: {
+                Image(systemName: "xmark").font(.system(size: 9))
+            }
+            .buttonStyle(.plain).foregroundStyle(Theme.textFaint)
         }
         .padding(11)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous)

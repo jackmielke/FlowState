@@ -141,6 +141,17 @@ struct SettingsView: View {
                         caption("Runs claude -p in that folder with --permission-mode acceptEdits, so it writes files without asking. Keep it on a repo you can git checkout.")
 
                         HStack {
+                            Text("Auto-allow everything")
+                                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                            Spacer()
+                            NeatToggle(isOn: Binding(
+                                get: { state.settings.devPermissionMode == "bypassPermissions" },
+                                set: { state.settings.devPermissionMode = $0 ? "bypassPermissions" : "acceptEdits" }),
+                                tint: Theme.bad)
+                        }
+                        caption("Off, only file edits are auto-approved — Notion, Slack and shell commands still ask, and since nothing can answer a prompt in the background, the task just stalls. On, nothing asks, which is what makes connectors work by voice. It also means a misheard sentence can run anything.")
+
+                        HStack {
                             Text("Narrate progress out loud")
                                 .font(.system(size: 12.5)).foregroundStyle(Theme.text)
                             Spacer()

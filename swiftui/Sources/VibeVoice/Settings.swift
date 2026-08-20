@@ -28,6 +28,14 @@ struct AppSettings: Codable, Equatable {
     var devMode: Bool = false
     var devRepo: String = "~/dev/vibe-voice"
 
+    /// How much Claude Code is allowed to do without asking.
+    ///
+    /// `acceptEdits` auto-approves file edits only — MCP tools (Notion, Slack) and shell
+    /// commands still prompt, and in headless mode nobody can answer, so the task stalls.
+    /// `bypassPermissions` approves everything, which is what makes connectors usable by
+    /// voice, and also means a misheard sentence can run anything.
+    var devPermissionMode: String = "acceptEdits"
+
     /// Speak progress aloud while Claude Code works, instead of going quiet until it
     /// finishes. Steps are always filed silently so the model can answer "what are you
     /// doing?" — this only controls whether it volunteers updates unprompted.
@@ -54,7 +62,7 @@ struct AppSettings: Codable, Equatable {
         case voice, model, systemPrompt, speed, continuousScreen, screenInterval
         case vadThreshold, silenceDurationMs, transcribeUser, devMode, devRepo
         case maxScreenFrames, screenshotSize, qualityMode, appearance
-        case devNarrate, devNarrateInterval, devNarrateMax
+        case devNarrate, devNarrateInterval, devNarrateMax, devPermissionMode
     }
 }
 
@@ -87,6 +95,7 @@ extension AppSettings {
         devMode           = v(.devMode, d.devMode)
         devRepo           = v(.devRepo, d.devRepo)
         devNarrate        = v(.devNarrate, d.devNarrate)
+        devPermissionMode = v(.devPermissionMode, d.devPermissionMode)
         devNarrateInterval = v(.devNarrateInterval, d.devNarrateInterval)
         devNarrateMax     = v(.devNarrateMax, d.devNarrateMax)
         maxScreenFrames   = v(.maxScreenFrames, d.maxScreenFrames)
