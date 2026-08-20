@@ -59,8 +59,10 @@ extension AppSettings {
         // Missing key OR a value of the wrong shape both fall back, so one bad field
         // can never cost the user the other fourteen.
         func v<T: Decodable>(_ k: CodingKeys, _ fallback: T) -> T {
+            // `try?` flattens decodeIfPresent's own optional, so nil here already
+            // covers both "key absent" and "value was the wrong shape".
             guard let found = try? c.decodeIfPresent(T.self, forKey: k) else { return fallback }
-            return found ?? fallback
+            return found
         }
         voice             = v(.voice, d.voice)
         model             = v(.model, d.model)

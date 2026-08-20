@@ -77,6 +77,12 @@ final class AppState: ObservableObject {
             .store(in: &bag)
 
         refreshScreenPermission(reason: "launch")
+        // Register with TCC on first launch so the Screen & System Audio Recording
+        // list has a Vibe Voice row to toggle. No-op once granted.
+        Task { @MainActor in
+            let s = await ScreenCapture.ensureAccess(reason: "launch")
+            self.screenPermission = s
+        }
         note("Ready. Hit Connect and just talk. ⌘⇧2 shows me your screen.")
 
     }
@@ -342,6 +348,9 @@ final class AppState: ObservableObject {
     func recheckScreenPermission() async {
         note("Re-checking Screen Recording permission…")
         let before = screenPermission
+        // ensureAccess before probing: probing only reads state, while this is what
+        // actually registers the app in the privacy list if it is not there yet.
+        _ = await ScreenCapture.ensureAccess(reason: "user-recheck")
         let now = await ScreenCapture.probe(reason: "user-recheck")
         screenPermission = now
         switch now {
@@ -363,21 +372,26 @@ final class AppState: ObservableObject {
     func relaunchForScreenPermission() { ScreenCapture.relaunch() }
 
     func captureAndSend(auto: Bool) async {
-        guard case .live = connection else {
-            banner = "Connect first — then I can look at your screen."
-            return
-        }
-
-        // Check before capturing rather than inferring permission from a failure.
-        // On an explicit request this also fires the one-time system prompt, which
-        // is what puts Vibe Voice in the Screen & System Audio Recording list at
-        // all — without it the user opens that pane and finds nothing to toggle.
+        // Permission FIRST, connection second. ensureAccess() is what fires
+        // CGRequestScreenCaptureAccess() and therefore what puts Vibe Voice in the
+        // Screen & System Audio Recording list at all. Gating it behind "must be
+        // connected" created a deadlock: you cannot grant screen access until you
+        // connect, but you naturally want to fix permissions before connecting, and
+        // pressing Show screen while idle silently did nothing.
         let pre: ScreenPermission
         if auto {
             pre = refreshScreenPermission(reason: "pre-capture(auto)")
         } else {
             pre = await ScreenCapture.ensureAccess(reason: "pre-capture(manual)")
             screenPermission = pre
+        }
+
+        guard case .live = connection else {
+            banner = pre.blocksCapture
+                ? pre.bannerText
+                : "Screen access is ready — hit Connect and I can look at your screen."
+            if pre.blocksCapture { handleScreenBlock(pre, auto: auto) }
+            return
         }
         if pre.blocksCapture {
             handleScreenBlock(pre, auto: auto)
