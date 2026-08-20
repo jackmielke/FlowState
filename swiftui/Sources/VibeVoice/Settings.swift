@@ -27,6 +27,44 @@ struct AppSettings: Codable, Equatable {
     /// misheard sentence can change your code.
     var devMode: Bool = false
     var devRepo: String = "~/dev/vibe-voice"
+
+    /// How many screen frames stay in context. Older ones are deleted so their image
+    /// tokens stop being re-billed every turn. 0 = keep everything (expensive).
+    var maxScreenFrames: Int = 3
+    /// Long edge of a screenshot in pixels. Fewer pixels = fewer image tokens.
+    var screenshotSize: Int = 1280
+
+    var qualityMode: QualityMode = .quality
+}
+
+enum QualityMode: String, Codable, CaseIterable {
+    case budget, quality
+
+    var label: String { self == .budget ? "Budget" : "Quality" }
+
+    var blurb: String {
+        self == .budget
+            ? "Mini model, smaller frames, tighter history. Roughly a third the cost."
+            : "Full model, full-size frames. Best listening and vision."
+    }
+
+    /// Applied on top of whatever else is set, so switching modes is one control.
+    func apply(to s: inout AppSettings) {
+        s.qualityMode = self
+        switch self {
+        case .budget:
+            s.model = "gpt-realtime-2.1-mini"
+            s.screenshotSize = 960
+            s.maxScreenFrames = 2
+            s.screenInterval = max(s.screenInterval, 10)
+            s.transcribeUser = false      // a second model per user turn, billed separately
+        case .quality:
+            s.model = "gpt-realtime-2.1"
+            s.screenshotSize = 1280
+            s.maxScreenFrames = 3
+            s.transcribeUser = true
+        }
+    }
 }
 
 @MainActor

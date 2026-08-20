@@ -29,6 +29,9 @@ enum RealtimeEvent {
     case apiError(String)
     case closed(String)
     case toolCall(callID: String, name: String, argumentsJSON: String)
+    case usage([String: Any])
+    /// An image item the server accepted, so old frames can be pruned from context.
+    case imageItemCreated(String)
 }
 
 /// WebSocket transport for the realtime API (API-CONTRACT §2b).
@@ -210,6 +213,12 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
 
     func cancelResponse() { send(json: ["type": "response.cancel"]) }
 
+    /// Drops an item from the conversation. Used to evict stale screen frames so their
+    /// image tokens stop being re-billed on every subsequent turn.
+    func deleteItem(id: String) {
+        send(json: ["type": "conversation.item.delete", "item_id": id])
+    }
+
     // MARK: - Inbound
 
     private func receiveLoop() {
@@ -273,7 +282,24 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
                                argumentsJSON: (obj["arguments"] as? String) ?? "{}"))
             }
 
+        // The event is `conversation.item.added` — `conversation.item.created` never
+        // fires on this API version, which silently made frame pruning dead code.
+        case "conversation.item.added":
+            // Track image items so continuous mode can delete old frames. Without this
+            // every frame stays in context forever and per-turn image tokens grow
+            // linearly with session length — measured: 323 tokens for one frame, 646
+            // once a second was sent.
+            if let item = obj["item"] as? [String: Any],
+               let id = item["id"] as? String,
+               let content = item["content"] as? [[String: Any]],
+               content.contains(where: { ($0["type"] as? String) == "input_image" }) {
+                emit(.imageItemCreated(id))
+            }
+
         case "response.done":
+            if let r = obj["response"] as? [String: Any], let u = r["usage"] as? [String: Any] {
+                emit(.usage(u))
+            }
             if let r = obj["response"] as? [String: Any],
                (r["status"] as? String) == "failed",
                let d = r["status_details"] as? [String: Any],

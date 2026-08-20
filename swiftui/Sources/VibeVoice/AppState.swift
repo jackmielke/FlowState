@@ -29,9 +29,11 @@ final class AppState: ObservableObject {
     @Published var devTaskSummary: String?
 
     let audio = AudioEngine()
+    let cost = CostMeter()
     let settingsStore = SettingsStore()
     private let client = RealtimeClient()
     private let claude = ClaudeCode()
+    private var frameItemIDs: [String] = []
     private var screenTimer: Timer?
     private var assistantIndex: Int?
     private var responseActive = false
@@ -120,6 +122,8 @@ final class AppState: ObservableObject {
         case .sessionCreated(let id):
             sessionID = id
             connection = .live
+            frameItemIDs.removeAll()
+            cost.startSession()
             client.sendSessionUpdate(settings)
             note("Live · session \(id)")
             syncScreenTimer()
@@ -166,6 +170,20 @@ final class AppState: ObservableObject {
         case .toolCall(let callID, let name, let argumentsJSON):
             handleToolCall(callID: callID, name: name, argumentsJSON: argumentsJSON)
 
+        case .usage(let u):
+            cost.add(usage: u, rates: Rates.of(settings.model))
+
+        case .imageItemCreated(let id):
+            frameItemIDs.append(id)
+            let keep = settings.maxScreenFrames
+            guard keep > 0 else { break }
+            // Evict oldest frames. Every frame left in context is re-billed as image
+            // tokens on EVERY later turn, so an unbounded history makes a long session
+            // cost far more than the frame count suggests.
+            while frameItemIDs.count > keep {
+                client.deleteItem(id: frameItemIDs.removeFirst())
+            }
+
         case .apiError(let msg):
             banner = msg
             note("API error: \(msg)")
@@ -178,6 +196,7 @@ final class AppState: ObservableObject {
             }
             audio.stop()
             stopScreenTimer()
+            cost.endSession()
         }
     }
 
@@ -225,6 +244,7 @@ final class AppState: ObservableObject {
             await MainActor.run {
                 self.devTaskRunning = false
                 self.devTaskSummary = nil
+                if let c = r.costUSD { self.cost.addClaudeCode(c) }
                 let cost = r.costUSD.map { String(format: " ($%.2f)", $0) } ?? ""
                 self.transcript.append(TranscriptItem(
                     speaker: .system,
@@ -260,7 +280,7 @@ final class AppState: ObservableObject {
             return
         }
         do {
-            let frame = try await ScreenCapture.capture()
+            let frame = try await ScreenCapture.capture(maxWidth: CGFloat(settings.screenshotSize))
             screenPermissionDenied = false
             // Auto frames are context, not questions. They are filed silently so the
             // model simply knows what is on screen when you next speak to it.

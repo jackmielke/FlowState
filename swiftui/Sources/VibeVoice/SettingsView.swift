@@ -41,6 +41,34 @@ struct SettingsView: View {
                             .surface(10)
                     }
 
+                    section("Cost mode") {
+                        HStack(spacing: 8) {
+                            ForEach(QualityMode.allCases, id: \.self) { m in
+                                Button {
+                                    var s = state.settings
+                                    m.apply(to: &s)
+                                    state.settings = s
+                                    state.applySettingsLive()
+                                } label: {
+                                    Text(m.label)
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 7)
+                                        .background(
+                                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                                .fill(state.settings.qualityMode == m
+                                                      ? Theme.accent.opacity(0.9)
+                                                      : Color.white.opacity(0.06)))
+                                        .foregroundStyle(state.settings.qualityMode == m
+                                                         ? Color.black.opacity(0.85) : Theme.text)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        caption(state.settings.qualityMode.blurb)
+                        caption("Frames kept in context: \(state.settings.maxScreenFrames). Each one still in context is re-billed on every turn, so a short history is much cheaper than it looks.")
+                    }
+
                     section("Speaking speed") {
                         sliderRow(binding(\.speed), 0.5...1.5, String(format: "%.2f×", state.settings.speed))
                     }

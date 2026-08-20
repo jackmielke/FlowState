@@ -87,6 +87,8 @@ struct ContentView: View {
                         .foregroundStyle(Theme.textFaint)
                 }
 
+                costReadout
+
                 Button { Task { await state.captureAndSend(auto: false) } } label: {
                     Image(systemName: "rectangle.dashed.badge.record")
                 }
@@ -129,6 +131,37 @@ struct ContentView: View {
         .padding(.horizontal, 8).padding(.vertical, 4)
         .background(Capsule().fill(Theme.accent.opacity(0.92)))
         .modifier(PulseIf(active: true))
+    }
+
+    /// Live spend for this session. Token counts come from response.done.usage, so the
+    /// only estimated part is the per-million rate table in Cost.swift.
+    @ViewBuilder
+    private var costReadout: some View {
+        if state.cost.turns > 0 {
+            HStack(spacing: 5) {
+                Text("$" + state.cost.formatted)
+                    .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Theme.text)
+                if let pm = state.cost.usdPerMinute {
+                    Text(String(format: "%.2f/min", pm))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(Theme.textFaint)
+                }
+            }
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .surface(8)
+            .help(costBreakdown)
+        }
+    }
+
+    private var costBreakdown: String {
+        let c = state.cost
+        return """
+        \(c.turns) turns · \(state.settings.qualityMode.label) mode
+        audio in \(c.audioIn) · out \(c.audioOut)
+        text in \(c.textIn) · out \(c.textOut) · cached \(c.cachedIn)
+        images \(c.imageIn) tokens (\(String(format: "$%.3f", c.imageUSD)))
+        """
     }
 
     /// Claude Code runs for minutes with the voice loop idle, so this is the only
