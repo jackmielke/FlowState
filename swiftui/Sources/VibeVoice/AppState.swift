@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import AppKit
 import Combine
+import VibeVoiceCore
 
 enum Speaker { case user, assistant, system }
 
@@ -30,19 +31,30 @@ final class AppState: ObservableObject {
     @Published var devTaskRunning = false
     @Published var devTaskSummary: String?
 
+    /// Mirrors of the response lifecycle, for the views. See `ResponseCoordinator`.
+    @Published private(set) var responsePhase: ResponseCoordinator.Phase = .idle
+    @Published private(set) var queuedResponses: Int = 0
+
     let audio = AudioEngine()
     let cost = CostMeter()
     let settingsStore = SettingsStore()
     private let client = RealtimeClient()
     private let claude = ClaudeCode()
     private var frameItemIDs: [String] = []
-    /// A response.create sent while one is already running is rejected outright
-    /// ("Conversation already has an active response in progress"). Requests made
-    /// during a live response are deferred to response.done instead of dropped.
-    private var pendingResponse = false
+    /// The single owner of `response.create` / `response.cancel`. A create sent while a
+    /// response is already running is rejected outright ("Conversation already has an
+    /// active response in progress"), and this app can want a turn from four places at
+    /// once — server VAD, a screenshot, a tool result, a Claude Code progress note — so
+    /// the decision lives in exactly one place instead of at each call site.
+    private let responses = ResponseCoordinator()
+    /// Drives the coordinator's deadlines while a session is live.
+    private var responseWatchdog: Timer?
+    private var devStepBuffer: [String] = []
+    private var devNarrateTimer: Timer?
+    private var devSpokenUpdates = 0
+    private var lastNarrationAt = Date.distantPast
     private var screenTimer: Timer?
     private var assistantIndex: Int?
-    private var responseActive = false
     private var bag = Set<AnyCancellable>()
 
     var settings: AppSettings {
@@ -57,13 +69,33 @@ final class AppState: ObservableObject {
 
         client.onEvent = { [weak self] ev in self?.handle(ev) }
 
+        // The coordinator decides; the client is only ever the messenger.
+        responses.send = { [weak self] out in
+            guard let self else { return }
+            switch out {
+            case .create: self.client.createResponse()
+            case .cancel: self.client.cancelResponse()
+            }
+        }
+        responses.log = { [weak self] ev in self?.logResponse(ev) }
+        responses.onChange = { [weak self] in self?.syncResponseState() }
+
         audio.onMicPCM = { [weak self] data in
             guard let self, self.client.isConnected else { return }
             self.client.appendAudio(data)
         }
 
+        // Same gate as the on-screen button, so ⌘⇧2 and the button never disagree about
+        // whether the app is accepting a new question.
         GlobalHotkey.shared.register { [weak self] in
-            Task { await self?.captureAndSend(auto: false) }
+            Task { @MainActor in
+                guard let self else { return }
+                guard !self.hasQueuedResponse else {
+                    self.note("A reply is already queued — ⌘⇧2 ignored until it goes out.")
+                    return
+                }
+                await self.captureAndSend(auto: false)
+            }
         }
 
         // Returning from System Settings is the moment the answer most often
@@ -139,17 +171,83 @@ final class AppState: ObservableObject {
 
     func disconnect() {
         stopScreenTimer()
+        stopResponseWatchdog()
         client.disconnect()
         audio.stop()
         connection = .idle
         sessionID = nil
         assistantIndex = nil
-        responseActive = false
+        // Local-only: the socket is gone, so nothing may be sent — and a request left
+        // queued here would otherwise fire into the NEXT session.
+        responses.reset(reason: "disconnect")
     }
 
     func applySettingsLive() {
         guard case .live = connection else { return }
         client.sendSessionUpdate(settings)
+    }
+
+    // MARK: - Response lifecycle
+
+    /// True while a turn is being generated — the window in which a second
+    /// `response.create` would be rejected by the API.
+    var isResponding: Bool { responsePhase == .requested || responsePhase == .active }
+
+    /// True while a cancel is in flight and has not been acknowledged.
+    var isCancellingResponse: Bool { responsePhase == .cancelling }
+
+    /// True when a turn has already been asked for and is waiting its turn to be sent.
+    var hasQueuedResponse: Bool { queuedResponses > 0 }
+
+    /// The user-facing Stop. Interrupts whatever is being generated and abandons
+    /// anything queued behind it. Pressing it again while the cancel is unacknowledged
+    /// forces the state back to idle, so the app can always be talked out of a stuck
+    /// "busy" state without disconnecting.
+    func stopResponse() {
+        guard case .live = connection else {
+            responses.reset(reason: "stop pressed while not live")
+            return
+        }
+        responses.cancel(reason: "user pressed Stop")
+    }
+
+    /// Asks for a spoken turn. The ONLY way this app requests one.
+    private func requestResponse(_ reason: String) {
+        responses.request(reason: reason)
+    }
+
+    private func syncResponseState() {
+        // Assign only on change: this runs from a 1 Hz watchdog, and an unconditional
+        // write would republish (and redraw) every second for nothing.
+        if responsePhase != responses.phase { responsePhase = responses.phase }
+        if queuedResponses != responses.queuedCount { queuedResponses = responses.queuedCount }
+    }
+
+    /// Every start, finish, cancel, timeout and recovery lands on stderr; the ones a
+    /// user could otherwise mistake for the app going silent also land in the
+    /// transcript. Routine chatter (queued/sent/started/finished) stays out of the UI.
+    private func logResponse(_ ev: ResponseCoordinator.Event) {
+        FileHandle.standardError.write(Data("[response] \(ev.line)\n".utf8))
+        switch ev.kind {
+        case .cancelRequested, .timedOut, .dropped, .recovered:
+            transcript.append(TranscriptItem(speaker: .system, text: "Response \(ev.kind.rawValue): \(ev.detail)"))
+        case .sent, .queued, .held, .started, .finished, .reset, .ignored:
+            break
+        }
+    }
+
+    private func startResponseWatchdog() {
+        stopResponseWatchdog()
+        let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.responses.tick() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        responseWatchdog = t
+    }
+
+    private func stopResponseWatchdog() {
+        responseWatchdog?.invalidate()
+        responseWatchdog = nil
     }
 
     // MARK: - Events
@@ -162,11 +260,16 @@ final class AppState: ObservableObject {
             frameItemIDs.removeAll()
             cost.startSession()
             client.sendSessionUpdate(settings)
+            // A fresh conversation has no response running, whatever the last one left
+            // behind — and this is the point where a stale queued request must not
+            // survive into the new session.
+            responses.reset(reason: "session \(id) created")
+            startResponseWatchdog()
             note("Live · session \(id)")
             syncScreenTimer()
 
-        case .responseStarted:
-            responseActive = true
+        case .responseStarted(let id):
+            responses.responseCreated(id: id)
 
         case .sessionUpdated:
             break
@@ -181,9 +284,13 @@ final class AppState: ObservableObject {
                 audio.flushPlayback()
                 closeAssistantTurn()
             }
+            // Server VAD is about to open a turn of its own for this utterance, so
+            // nothing we have queued may go out until that has been and gone.
+            responses.userSpeechStarted()
 
         case .speechStopped:
             userSpeaking = false
+            responses.userSpeechStopped()
 
         case .userTranscript(let t):
             let clean = t.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -197,13 +304,12 @@ final class AppState: ObservableObject {
                 assistantIndex = transcript.count - 1
             }
 
-        case .assistantDone:
-            responseActive = false
+        case .responseDone(let status):
             closeAssistantTurn()
-            if pendingResponse {
-                pendingResponse = false
-                client.createResponse()
-            }
+            // Releases the lock and flushes at most one deferred request. Runs for every
+            // status, including cancelled and failed — a response that ends badly still
+            // ends, and treating it as still-running is what leaves the app mute.
+            responses.responseFinished(status: status)
 
         case .audio(let pcm):
             audio.enqueue(pcm16: pcm)
@@ -226,8 +332,15 @@ final class AppState: ObservableObject {
             }
 
         case .apiError(let msg):
-            banner = msg
-            note("API error: \(msg)")
+            // Response-lifecycle errors are ours to repair, not the user's to read. The
+            // coordinator re-takes the lock (or releases it) and re-queues whatever was
+            // rejected; only errors it does not recognise reach the banner.
+            if responses.apiError(msg) {
+                note("Handled a response-lifecycle error: \(msg)")
+            } else {
+                banner = msg
+                note("API error: \(msg)")
+            }
 
         case .closed(let why):
             if case .live = connection {
@@ -237,16 +350,14 @@ final class AppState: ObservableObject {
             }
             audio.stop()
             stopScreenTimer()
+            stopDevNarration()
+            stopResponseWatchdog()
+            responses.reset(reason: "socket closed: \(why)")
             cost.endSession()
         }
     }
 
     // MARK: - Dev Mode
-
-    /// Asks for a spoken turn, waiting for any in-flight response to finish first.
-    private func requestResponseSoon() {
-        if responseActive { pendingResponse = true } else { client.createResponse() }
-    }
 
     /// Answers the tool call IMMEDIATELY, then does the work in the background.
     ///
@@ -257,16 +368,14 @@ final class AppState: ObservableObject {
     private func handleToolCall(callID: String, name: String, argumentsJSON: String) {
         guard settings.devMode else {
             client.sendToolOutput(callID: callID,
-                                  output: ["status": "refused", "reason": "Dev Mode is off."],
-                                  requestResponse: false)
-            requestResponseSoon()
+                                  output: ["status": "refused", "reason": "Dev Mode is off."])
+            requestResponse("tool-refused")
             return
         }
         guard name == "dispatch_to_claude_code" else {
             client.sendToolOutput(callID: callID,
-                                  output: ["status": "error", "reason": "Unknown tool \(name)."],
-                                  requestResponse: false)
-            requestResponseSoon()
+                                  output: ["status": "error", "reason": "Unknown tool \(name)."])
+            requestResponse("tool-unknown")
             return
         }
 
@@ -274,24 +383,27 @@ final class AppState: ObservableObject {
         let task = (args?["task"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !task.isEmpty else {
             client.sendToolOutput(callID: callID,
-                                  output: ["status": "error", "reason": "Empty task."],
-                                  requestResponse: false)
-            requestResponseSoon()
+                                  output: ["status": "error", "reason": "Empty task."])
+            requestResponse("tool-empty-task")
             return
         }
 
         let repo = settings.devRepo
         devTaskRunning = true
         devTaskSummary = String(task.prefix(120))
+        startDevNarration()
         transcript.append(TranscriptItem(speaker: .system, text: "→ Claude Code: \(task)"))
 
-        // The response that produced this tool call is still active, so the reply must
-        // be queued rather than requested now.
+        // The response that produced this tool call is still running, so the spoken
+        // reply gets deferred to its response.done rather than sent now.
         client.sendToolOutput(callID: callID, output: [
             "status": "dispatched",
-            "note": "Work has started in \(repo). Tell the user you're on it in a few words, then wait for the result."
-        ], requestResponse: false)
-        requestResponseSoon()
+            "note": "A Claude Code task is now RUNNING in \(repo). It keeps running until you "
+                  + "receive a message saying it finished or failed. While it runs you will get "
+                  + "progress notes; if the user asks what is happening, answer from the most "
+                  + "recent note. Tell the user you're on it in a few words now."
+        ])
+        requestResponse("tool-dispatched")
 
         Task { [weak self] in
             guard let self else { return }
@@ -302,16 +414,20 @@ final class AppState: ObservableObject {
             await MainActor.run {
                 self.devTaskRunning = false
                 self.devTaskSummary = nil
+                self.stopDevNarration()
+                self.devStepBuffer.removeAll()
                 if let c = r.costUSD { self.cost.addClaudeCode(c) }
-                let cost = r.costUSD.map { String(format: " ($%.2f)", $0) } ?? ""
+                // "~$X sub" not "$X": claude runs on the Max subscription here, so this
+                // is subscription usage at list-price equivalent, not money charged.
+                let cost = r.costUSD.map { String(format: " (~$%.2f sub)", $0) } ?? ""
                 self.transcript.append(TranscriptItem(
                     speaker: .system,
                     text: (r.ok ? "✓ Claude Code" : "✗ Claude Code") + cost + ": " + r.text))
                 let note = r.ok
                     ? "[Claude Code finished the task. Result: \(r.text)] Tell the user what changed, in one or two sentences."
                     : "[Claude Code FAILED. Error: \(r.text)] Tell the user it failed and why, briefly."
-                self.client.sendSystemNote(note, requestResponse: false)
-                self.requestResponseSoon()
+                self.client.sendSystemNote(note)
+                self.requestResponse("claude-code-\(r.ok ? "finished" : "failed")")
             }
         }
     }
@@ -323,6 +439,74 @@ final class AppState: ObservableObject {
         let line = "   · " + label
         if let last = transcript.last, last.speaker == .system, last.text == line { return }
         transcript.append(TranscriptItem(speaker: .system, text: line))
+        // Buffered rather than sent per-step: Claude Code emits steps in bursts, and one
+        // conversation item per step would flood the session for no benefit.
+        devStepBuffer.append(label)
+    }
+
+    /// Starts the progress feed for a Claude Code run.
+    ///
+    /// Two separate things happen here, and keeping them separate is the point:
+    ///
+    /// - Every step is filed into the conversation as SILENT context (no response
+    ///   requested). That costs a handful of text tokens and means the model can answer
+    ///   "what are you doing?" at any moment, instead of knowing nothing until the run
+    ///   ends.
+    /// - Only every `devNarrateInterval` does it additionally ask for a spoken turn.
+    ///   Each spoken update is real audio output, so this is the cost dial, and
+    ///   `devNarrateMax` caps how many a single long task can produce.
+    private func startDevNarration() {
+        stopDevNarration()
+        devStepBuffer.removeAll()
+        devSpokenUpdates = 0
+        lastNarrationAt = Date()
+
+        let t = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.flushDevSteps() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        devNarrateTimer = t
+    }
+
+    private func stopDevNarration() {
+        devNarrateTimer?.invalidate()
+        devNarrateTimer = nil
+    }
+
+    private func flushDevSteps() {
+        guard devTaskRunning, case .live = connection, !devStepBuffer.isEmpty else { return }
+
+        // Keep the note short — the last few steps are what matter, not the whole log.
+        let steps = devStepBuffer.suffix(6).joined(separator: "; ")
+        devStepBuffer.removeAll()
+
+        let elapsed = Date().timeIntervalSince(lastNarrationAt)
+        // A progress update is the least important thing on this socket, so unlike a
+        // finished result it is NOT queued behind a running response — if the model is
+        // already talking, this update simply becomes silent context and the next one
+        // gets its chance. `responses.isBusy` covers the create-in-flight window too,
+        // which a plain "is a response streaming" flag does not.
+        let maySpeak = settings.devNarrate
+            && devSpokenUpdates < settings.devNarrateMax
+            && elapsed >= settings.devNarrateInterval
+            && !userSpeaking          // never talk over the user
+            && !responses.isBusy
+            && !responses.hasQueuedRequest
+
+        if maySpeak {
+            devSpokenUpdates += 1
+            lastNarrationAt = Date()
+            client.sendSystemNote(
+                "[Claude Code is STILL RUNNING. Latest steps: \(steps)] Give the user a "
+                + "one-sentence update on what it is doing right now. Plain language, no file "
+                + "paths, no code. Do not repeat an earlier update.")
+            requestResponse("claude-code-progress")
+        } else {
+            // Context only. The model now knows, and will say so if asked.
+            client.sendSystemNote(
+                "[Claude Code is STILL RUNNING. Latest steps: \(steps)] "
+                + "Context only — do not reply to this message.")
+        }
     }
 
     private func closeAssistantTurn() {
@@ -420,7 +604,13 @@ final class AppState: ObservableObject {
             let prompt = auto
                 ? "[Screen update — context only. Do not reply to this.]"
                 : "Here's my screen. What do you see?"
-            client.sendImage(dataURI: frame.dataURI, prompt: prompt, requestResponse: !auto)
+            client.sendImage(dataURI: frame.dataURI, prompt: prompt)
+            // The frame lands in the conversation either way. Only a MANUAL capture is
+            // a question, and even then the turn is requested through the coordinator —
+            // pressing ⌘⇧2 while the model is mid-sentence used to put a second
+            // response.create straight on the wire, which is the exact rejection this
+            // whole path now avoids.
+            if !auto { requestResponse("screenshot") }
             transcript.append(TranscriptItem(
                 speaker: .user,
                 text: auto ? "Screen frame (auto)" : "Sent a screenshot",

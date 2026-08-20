@@ -44,6 +44,18 @@ Dark, modern, "state-of-the-art". Think Linear / Raycast / Arc.
 - Must look intentional, not bootstrap-y. No default-looking form controls.
 
 ## Hard constraints
+- **One response at a time, and never a collision.** The API allows a single response
+  per conversation and refuses a second `response.create` with "Conversation already
+  has an active response in progress". Every request for a spoken turn must go through
+  one gate that knows whether a response is running — counting from the moment the
+  create is SENT, not from `response.created`. A request made while busy is deferred to
+  `response.done` and coalesced, never dropped and never stacked. This one error is
+  therefore exempt from rule 6 above: it means the app got its own bookkeeping wrong,
+  so it is repaired silently and logged, not shown to the user. Every other API error
+  still surfaces verbatim.
+- **The app can always get unstuck.** If a response never finishes, the client must
+  recover on its own (deadline → cancel → force idle) and offer the user an explicit
+  Stop that works without disconnecting. Going permanently mute is a failure.
 - **Boots IDLE. Never auto-connect.** The app must open disconnected, with no mic
   capture and no audio output, until a human explicitly clicks Connect. Learned the
   hard way: all three implementations auto-connected at once and started talking to

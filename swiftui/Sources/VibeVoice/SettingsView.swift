@@ -139,6 +139,21 @@ struct SettingsView: View {
                             .padding(9)
                             .surface(10)
                         caption("Runs claude -p in that folder with --permission-mode acceptEdits, so it writes files without asking. Keep it on a repo you can git checkout.")
+
+                        HStack {
+                            Text("Narrate progress out loud")
+                                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                            Spacer()
+                            NeatToggle(isOn: Binding(
+                                get: { state.settings.devNarrate },
+                                set: { state.settings.devNarrate = $0 }), tint: Theme.voice)
+                        }
+                        sliderRow(Binding(
+                            get: { state.settings.devNarrateInterval },
+                            set: { state.settings.devNarrateInterval = $0 }),
+                            10...60,
+                            String(format: "every %.0fs", state.settings.devNarrateInterval))
+                        caption("Steps are always fed to the model silently, so you can ask \"what are you doing?\" at any point. This only controls whether it volunteers updates — each spoken one costs audio, capped at \(state.settings.devNarrateMax) per task.")
                     }
 
                     section("Turn detection") {

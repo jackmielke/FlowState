@@ -18,13 +18,15 @@ enum ConnectionState: Equatable {
 
 enum RealtimeEvent {
     case sessionCreated(String)
-    case responseStarted
+    /// `response.created` — the server now has a response running.
+    case responseStarted(id: String?)
     case sessionUpdated
     case speechStarted
     case speechStopped
     case userTranscript(String)
     case assistantDelta(String)
-    case assistantDone
+    /// `response.done` — carries `response.status` (completed / cancelled / failed / incomplete).
+    case responseDone(status: String)
     case audio(Data)
     case apiError(String)
     case closed(String)
@@ -158,9 +160,17 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
         ]
     ]]
 
-    /// Answers a tool call. `requestResponse` false lets the model speak without
-    /// waiting for a second turn to be forced.
-    func sendToolOutput(callID: String, output: [String: Any], requestResponse: Bool = true) {
+    // MARK: - Conversation items
+    //
+    // None of these ask for a response. Every `response.create` in this app goes
+    // through ResponseCoordinator instead, because the API rejects a second create
+    // while one response is running ("Conversation already has an active response in
+    // progress") and only one place can safely know whether that is the case.
+
+    /// Answers a tool call. Filing the output is always safe; asking for the spoken
+    /// reply is not, since the response that produced the tool call is usually still
+    /// running when this lands.
+    func sendToolOutput(callID: String, output: [String: Any]) {
         let json = (try? JSONSerialization.data(withJSONObject: output)).flatMap {
             String(data: $0, encoding: .utf8)
         } ?? "{}"
@@ -168,12 +178,11 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
             "type": "conversation.item.create",
             "item": ["type": "function_call_output", "call_id": callID, "output": json]
         ])
-        if requestResponse { send(json: ["type": "response.create"]) }
     }
 
-    /// Files a note as context and asks the model to speak it. Used to announce a
-    /// long-running Claude Code task finishing, without blocking the voice loop.
-    func sendSystemNote(_ text: String, requestResponse: Bool = true) {
+    /// Files a note as context. Used to announce a long-running Claude Code task
+    /// finishing, without blocking the voice loop.
+    func sendSystemNote(_ text: String) {
         send(json: [
             "type": "conversation.item.create",
             "item": [
@@ -181,7 +190,6 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
                 "content": [["type": "input_text", "text": text]]
             ]
         ])
-        if requestResponse { send(json: ["type": "response.create"]) }
     }
 
     func appendAudio(_ pcm16: Data) {
@@ -189,12 +197,13 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
         sendRaw(#"{"type":"input_audio_buffer.append","audio":""# + pcm16.base64EncodedString() + #""}"#)
     }
 
-    /// API-CONTRACT §3 — image as a conversation item, then ask for a response.
-    /// - Parameter requestResponse: when false the frame is added as silent context and
-    ///   the model is NOT asked to reply. Continuous mode must use false: `response.create`
-    ///   compels a response, so asking the model to "only speak up if something changed"
-    ///   while also forcing a turn just makes it narrate "no meaningful change" forever.
-    func sendImage(dataURI: String, prompt: String, requestResponse: Bool = true) {
+    /// API-CONTRACT §3 — files an image as a conversation item.
+    ///
+    /// The frame is context only. Whether the model should then speak is the caller's
+    /// decision, made through ResponseCoordinator: continuous mode never asks (a forced
+    /// turn makes the model narrate "no meaningful change" forever), and a manual
+    /// screenshot does.
+    func sendImage(dataURI: String, prompt: String) {
         send(json: [
             "type": "conversation.item.create",
             "item": [
@@ -206,14 +215,20 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
                 ]
             ]
         ])
-        if requestResponse {
-            send(json: ["type": "response.create"])
-        }
     }
 
-    func cancelResponse() { send(json: ["type": "response.cancel"]) }
+    /// Asks for a spoken turn. CALL SITE RULE: only ResponseCoordinator may call this —
+    /// a create sent while a response is running is rejected outright.
+    func createResponse() {
+        FileHandle.standardError.write(Data("[realtime] -> response.create\n".utf8))
+        send(json: ["type": "response.create"])
+    }
 
-    func createResponse() { send(json: ["type": "response.create"]) }
+    /// Interrupts the running response. Same rule: only ResponseCoordinator calls it.
+    func cancelResponse() {
+        FileHandle.standardError.write(Data("[realtime] -> response.cancel\n".utf8))
+        send(json: ["type": "response.cancel"])
+    }
 
     /// Drops an item from the conversation. Used to evict stale screen frames so their
     /// image tokens stop being re-billed on every subsequent turn.
@@ -254,7 +269,9 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
             emit(.sessionCreated(sid))
 
         case "response.created":
-            emit(.responseStarted)
+            let rid = (obj["response"] as? [String: Any])?["id"] as? String
+            FileHandle.standardError.write(Data("[realtime] response.created id=\(rid ?? "?")\n".utf8))
+            emit(.responseStarted(id: rid))
 
         case "session.updated":
             FileHandle.standardError.write(Data("[realtime] session.updated\n".utf8))
@@ -299,16 +316,21 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
             }
 
         case "response.done":
-            if let r = obj["response"] as? [String: Any], let u = r["usage"] as? [String: Any] {
+            let r = obj["response"] as? [String: Any]
+            let status = (r?["status"] as? String) ?? "completed"
+            if let u = r?["usage"] as? [String: Any] {
                 emit(.usage(u))
             }
-            if let r = obj["response"] as? [String: Any],
-               (r["status"] as? String) == "failed",
-               let d = r["status_details"] as? [String: Any],
+            if status == "failed",
+               let d = r?["status_details"] as? [String: Any],
                let e = d["error"] as? [String: Any] {
                 emit(.apiError((e["message"] as? String) ?? "response failed"))
             }
-            emit(.assistantDone)
+            FileHandle.standardError.write(Data("[realtime] response.done status=\(status)\n".utf8))
+            // ALWAYS emitted, whatever the status — this is what releases the
+            // one-response-at-a-time lock, so swallowing it on a failed or cancelled
+            // response would wedge the app into permanent silence.
+            emit(.responseDone(status: status))
 
         case "error":
             let e = obj["error"] as? [String: Any]

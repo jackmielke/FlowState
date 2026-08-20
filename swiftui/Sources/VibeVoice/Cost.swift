@@ -59,6 +59,7 @@ final class CostMeter: ObservableObject {
     func startSession() {
         startedAt = Date()
         usd = 0; imageUSD = 0; turns = 0
+        claudeCodeUSD = 0; claudeCodeRuns = 0
         textIn = 0; audioIn = 0; imageIn = 0; cachedIn = 0; textOut = 0; audioOut = 0
     }
 
@@ -94,10 +95,31 @@ final class CostMeter: ObservableObject {
         textOut += oText; audioOut += oAudio
     }
 
-    /// Adds a Claude Code run, which is billed separately from OpenAI.
-    func addClaudeCode(_ dollars: Double) { usd += dollars }
+    /// Claude Code usage, tracked SEPARATELY from `usd` and deliberately not added to it.
+    ///
+    /// The `claude` CLI here authenticates by OAuth against a Claude Max subscription
+    /// (`billingType: stripe_subscription`), not an API key. The `total_cost_usd` it
+    /// reports is what the run *would* have cost at list API prices — an estimate of
+    /// usage, not a charge. Folding it into the OpenAI total would overstate real spend
+    /// by an order of magnitude on a heavy refactor.
+    ///
+    /// It is still worth showing: it is the honest measure of how much subscription
+    /// capacity a task consumed, and overage can be billed when extra usage is enabled.
+    @Published private(set) var claudeCodeUSD: Double = 0
+    @Published private(set) var claudeCodeRuns = 0
 
+    func addClaudeCode(_ dollars: Double) {
+        claudeCodeUSD += dollars
+        claudeCodeRuns += 1
+    }
+
+    /// Real money: OpenAI API only.
     var formatted: String {
         usd < 0.01 ? String(format: "%.3f", usd) : String(format: "%.2f", usd)
+    }
+
+    var claudeCodeFormatted: String {
+        claudeCodeUSD < 0.01 ? String(format: "%.3f", claudeCodeUSD)
+                             : String(format: "%.2f", claudeCodeUSD)
     }
 }

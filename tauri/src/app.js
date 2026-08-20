@@ -33,6 +33,12 @@ const S = {
   liveTurn: null,         // streaming assistant DOM node
   contTimer: null,
   shotsInFlight: 0,
+  // Response lifecycle. The API rejects a response.create sent while one is already
+  // running ("Conversation already has an active response in progress"), and the
+  // window opens when WE send, not when the server answers response.created — so
+  // "requested" is a distinct state from "active".
+  responsePhase: "idle",  // idle | requested | active
+  pendingResponse: null,  // reason string, coalesced; deferred rather than dropped
 };
 
 // ---------------------------------------------------------------- chrome ---
@@ -276,6 +282,7 @@ function teardown() {
   S.dc = S.pc = S.micStream = null;
   S.micAnalyser = S.outAnalyser = null;
   S.userSpeaking = S.assistantSpeaking = false;
+  resetResponses("teardown");
   $("watching").classList.remove("show");
 }
 
@@ -323,6 +330,50 @@ function send(obj) {
   return true;
 }
 
+// ------------------------------------------------- response lifecycle ------
+//
+// Exactly one response may be in flight. Everything that wants the model to speak
+// goes through requestResponse(); nothing else may send response.create. A request
+// made while one is running is deferred to response.done, not dropped — and not
+// stacked either, since a second create is what earns the "already has an active
+// response in progress" rejection.
+
+function requestResponse(reason) {
+  if (S.responsePhase !== "idle") {
+    S.pendingResponse = S.pendingResponse ? S.pendingResponse + " + " + reason : reason;
+    rlog("info", `response queued (${reason}) — ${S.responsePhase}`);
+    return false;
+  }
+  S.responsePhase = "requested";
+  rlog("info", `response.create sent (${reason})`);
+  if (!send({ type: "response.create" })) {
+    S.responsePhase = "idle";
+    rlog("warn", `response.create dropped, channel closed (${reason})`);
+    return false;
+  }
+  return true;
+}
+
+function responseStarted() {
+  S.responsePhase = "active";
+}
+
+function responseFinished(status) {
+  S.responsePhase = "idle";
+  rlog("info", `response.done status=${status || "?"}`);
+  const pending = S.pendingResponse;
+  S.pendingResponse = null;
+  if (pending) requestResponse(pending);
+}
+
+// Local only — for a socket that is gone or a session that is new. A create left
+// queued here would otherwise fire into the next session.
+function resetResponses(reason) {
+  if (S.responsePhase !== "idle" || S.pendingResponse) rlog("info", `response state reset (${reason})`);
+  S.responsePhase = "idle";
+  S.pendingResponse = null;
+}
+
 function handleEvent(m) {
   switch (m.type) {
     case "session.created":
@@ -335,6 +386,11 @@ function handleEvent(m) {
       $("watching").classList.toggle("show", S.settings.continuous);
       addTurn("system", `Session live · ${S.settings.model} · voice ${S.settings.voice}`);
       rlog("ok", "SESSION.CREATED — realtime session is live");
+      resetResponses("new session");
+      break;
+
+    case "response.created":
+      responseStarted();
       break;
 
     case "session.updated":
@@ -386,11 +442,23 @@ function handleEvent(m) {
         const err = m.response.status_details && m.response.status_details.error;
         showError("Response failed: " + (err ? `${err.type}: ${err.message}` : JSON.stringify(m.response.status_details)));
       }
+      // Runs for every status, including failed and cancelled: a response that ends
+      // badly still ends, and holding the lock open is what makes the app go mute.
+      responseFinished(m.response && m.response.status);
       break;
 
-    case "error":
-      showError(m.error ? `${m.error.type || "error"}: ${m.error.message}` : JSON.stringify(m));
+    case "error": {
+      const emsg = m.error ? `${m.error.type || "error"}: ${m.error.message}` : JSON.stringify(m);
+      // A duplicate create is ours to repair, not the user's to read: the server is
+      // telling us a response IS running, so take the lock and keep going.
+      if (/already has an active response/i.test(emsg)) {
+        S.responsePhase = "active";
+        rlog("warn", "create rejected as duplicate — adopting the server's active response");
+        break;
+      }
+      showError(emsg);
       break;
+    }
 
     default:
       break;
@@ -420,7 +488,10 @@ async function sendScreenshot(auto = false) {
       },
     });
     if (!ok) throw new Error("Data channel not open");
-    send({ type: "response.create" });
+    // Deferred, not dropped: if the model is mid-sentence the frame is filed now and
+    // answered on the next turn. Sending the create here regardless is what produced
+    // "Conversation already has an active response in progress".
+    requestResponse(auto ? "screen frame" : "screenshot");
     addTurn("user", `${shot.width}×${shot.height} · ${(shot.bytes / 1024).toFixed(0)} KB${auto ? " · auto" : ""}`, {
       image: shot.data_url,
       label: auto ? "Screen (auto)" : "Screen",

@@ -72,11 +72,41 @@ TESTED: model correctly described the image. Works over WebSocket and over the
 WebRTC `oai-events` data channel.
 Downscale to ~1280px wide JPEG q0.7 before sending — full retina PNGs are huge and slow.
 
+## One response at a time (VERIFIED — this is a hard rule, not a race)
+
+A conversation may have exactly ONE response in flight. A second `response.create`
+is refused:
+
+```
+{"type":"error","error":{"message":"Conversation already has an active response in progress"}}
+```
+
+The forbidden window opens when YOU send `response.create` — not when the server
+answers `response.created`. Tracking only the server's event leaves a round trip in
+which a second create looks legal, which is exactly how two land back to back.
+
+Responses start from more places than you send them from. With
+`turn_detection.create_response: true` the server opens a turn on its own every time
+the user stops speaking, so the app can be busy without having asked for anything.
+
+The rules that follow:
+
+- Route every `response.create` through ONE gate. Queue anything asked for while busy
+  and send it on `response.done` — deferred, coalesced into a single create, not dropped.
+- Release the lock on `response.done` for EVERY status (`completed`, `cancelled`,
+  `failed`, `incomplete`). Waiting for `completed` alone wedges the client.
+- Hold queued creates while the user is speaking, and briefly after they stop — that
+  is the window server VAD uses for its own turn.
+- `{"type":"response.cancel"}` with nothing running answers
+  `Cancellation failed: no active response found`. It is harmless, but it means a
+  cancel is not a reliable way to "make sure" the conversation is idle.
+
 ## Useful inbound events
 session.created / session.updated
 input_audio_buffer.speech_started | speech_stopped   -> mic VU / "listening" state
 conversation.item.input_audio_transcription.completed -> user transcript
 response.output_audio_transcript.delta               -> assistant transcript (streaming)
 response.output_text.delta                           -> text delta (text modality)
-response.done                                        -> check .response.status
+response.created                                     -> a response is now running (yours OR server VAD's)
+response.done                                        -> check .response.status; ALWAYS releases the lock
 error                                                -> ALWAYS log these, they're specific

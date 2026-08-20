@@ -28,6 +28,16 @@ struct AppSettings: Codable, Equatable {
     var devMode: Bool = false
     var devRepo: String = "~/dev/vibe-voice"
 
+    /// Speak progress aloud while Claude Code works, instead of going quiet until it
+    /// finishes. Steps are always filed silently so the model can answer "what are you
+    /// doing?" — this only controls whether it volunteers updates unprompted.
+    var devNarrate: Bool = true
+    /// Seconds between spoken updates. Each one is a real spoken turn, so this is a
+    /// direct cost dial.
+    var devNarrateInterval: Double = 25
+    /// Hard ceiling on spoken updates per task, so a long run cannot narrate forever.
+    var devNarrateMax: Int = 8
+
     /// How many screen frames stay in context. Older ones are deleted so their image
     /// tokens stop being re-billed every turn. 0 = keep everything (expensive).
     var maxScreenFrames: Int = 3
@@ -44,6 +54,7 @@ struct AppSettings: Codable, Equatable {
         case voice, model, systemPrompt, speed, continuousScreen, screenInterval
         case vadThreshold, silenceDurationMs, transcribeUser, devMode, devRepo
         case maxScreenFrames, screenshotSize, qualityMode, appearance
+        case devNarrate, devNarrateInterval, devNarrateMax
     }
 }
 
@@ -75,6 +86,9 @@ extension AppSettings {
         transcribeUser    = v(.transcribeUser, d.transcribeUser)
         devMode           = v(.devMode, d.devMode)
         devRepo           = v(.devRepo, d.devRepo)
+        devNarrate        = v(.devNarrate, d.devNarrate)
+        devNarrateInterval = v(.devNarrateInterval, d.devNarrateInterval)
+        devNarrateMax     = v(.devNarrateMax, d.devNarrateMax)
         maxScreenFrames   = v(.maxScreenFrames, d.maxScreenFrames)
         screenshotSize    = v(.screenshotSize, d.screenshotSize)
         qualityMode       = v(.qualityMode, d.qualityMode)

@@ -21,6 +21,12 @@ const S = {
   streamText: '',
   contTimer: null,
   capturing: false,
+  // Response lifecycle. A response.create sent while one is already running is
+  // rejected ("Conversation already has an active response in progress"), and the
+  // window opens when WE send — not when response.created comes back — so
+  // 'requested' has to be its own state.
+  responsePhase: 'idle',   // idle | requested | active
+  pendingResponse: null,   // reason string, coalesced; deferred rather than dropped
 };
 
 const orb = new Orb($('orb'));
@@ -301,6 +307,48 @@ function send(obj) {
   return true;
 }
 
+// ------------------------------------------------------- response lifecycle
+//
+// Exactly one response may be in flight. Everything that wants the model to speak
+// goes through requestResponse(); nothing else may send response.create. A request
+// made while one is running is deferred to response.done — not dropped, and not
+// stacked, since a second create is what earns the "already has an active response
+// in progress" rejection.
+
+function requestResponse(reason) {
+  if (S.responsePhase !== 'idle') {
+    S.pendingResponse = S.pendingResponse ? `${S.pendingResponse} + ${reason}` : reason;
+    say(`response queued (${reason}) — ${S.responsePhase}`);
+    return false;
+  }
+  S.responsePhase = 'requested';
+  say(`response.create sent (${reason})`);
+  if (!send({ type: 'response.create' })) {
+    S.responsePhase = 'idle';
+    say(`response.create dropped, channel closed (${reason})`);
+    return false;
+  }
+  return true;
+}
+
+function responseStarted() { S.responsePhase = 'active'; }
+
+function responseFinished(status) {
+  S.responsePhase = 'idle';
+  say(`response.done status=${status || '?'}`);
+  const pending = S.pendingResponse;
+  S.pendingResponse = null;
+  if (pending) requestResponse(pending);
+}
+
+// Local only — for a socket that is gone or a session that is new. A create left
+// queued here would otherwise fire into the next session.
+function resetResponses(reason) {
+  if (S.responsePhase !== 'idle' || S.pendingResponse) say(`response state reset (${reason})`);
+  S.responsePhase = 'idle';
+  S.pendingResponse = null;
+}
+
 function handleEvent(ev) {
   switch (ev.type) {
     case 'session.created':
@@ -309,7 +357,12 @@ function handleEvent(ev) {
       setSpeaker(null);
       $('subLabel').textContent = 'server VAD is on — just start talking';
       addMsg('system', `connected · ${ev.session?.model || S.settings.model} · voice ${S.settings.voice}`, { label: 'session' });
+      resetResponses('new session');
       startContinuous(S.settings.continuousScreen);
+      break;
+
+    case 'response.created':
+      responseStarted();
       break;
 
     case 'session.updated':
@@ -346,12 +399,22 @@ function handleEvent(ev) {
         say(`response.done status=${st} ${JSON.stringify(d || {})}`);
         if (st === 'failed') showError(d?.error?.message || `response ${st}`);
       }
+      // Runs for every status, including failed and cancelled: a response that ends
+      // badly still ends, and holding the lock open is what makes the app go mute.
+      responseFinished(st);
       break;
     }
 
     case 'error': {
       const m = ev.error?.message || JSON.stringify(ev);
       say('EVENT error: ' + m);
+      // A duplicate create is ours to repair, not the user's to read: the server is
+      // telling us a response IS running, so take the lock and carry on.
+      if (/already has an active response/i.test(m)) {
+        S.responsePhase = 'active';
+        say('create rejected as duplicate — adopting the server\'s active response');
+        break;
+      }
       showError(m);
       break;
     }
@@ -370,6 +433,7 @@ function teardown(phase) {
   S.micSpec = null; S.botSpec = null;
   $('remoteAudio').srcObject = null;
   endStream();
+  resetResponses('teardown');
   setPhase(phase || 'idle', phase === 'error' ? 'error' : 'idle');
   $('subLabel').textContent = 'press connect and just talk';
 }
@@ -420,7 +484,10 @@ async function doScreenshot(auto = false) {
       showError('not connected — hit Connect first');
       return;
     }
-    if (!auto) send({ type: 'response.create' });
+    // Deferred, not dropped: if the model is mid-sentence the frame is filed now and
+    // answered on the next turn. Sending the create here regardless is what produced
+    // "Conversation already has an active response in progress".
+    if (!auto) requestResponse('screenshot');
     say(`screenshot sent (${(shot.bytes / 1024).toFixed(0)} KB${auto ? ', silent context' : ''})`);
   } finally {
     S.capturing = false;

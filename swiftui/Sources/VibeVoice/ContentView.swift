@@ -86,6 +86,8 @@ struct ContentView: View {
 
                 if state.devTaskRunning { codingPill }
 
+                if responseLabel != nil { responsePill }
+
                 Spacer()
 
                 if let n = state.lastCaptureNote {
@@ -96,11 +98,23 @@ struct ContentView: View {
 
                 costReadout
 
+                if state.isResponding || state.isCancellingResponse {
+                    Button { state.stopResponse() } label: {
+                        Image(systemName: "stop.fill")
+                    }
+                    .buttonStyle(IconButtonStyle())
+                    .help(state.isCancellingResponse
+                          ? "Still stopping — click again to force the session back to idle"
+                          : "Stop this reply")
+                }
+
                 Button { Task { await state.captureAndSend(auto: false) } } label: {
                     Image(systemName: "rectangle.dashed.badge.record")
                 }
                 .buttonStyle(IconButtonStyle())
-                .help("Send a screenshot (⌘⇧2)")
+                .disabled(state.hasQueuedResponse)
+                .opacity(state.hasQueuedResponse ? 0.45 : 1)
+                .help(captureHelp)
 
                 AppearanceToggle(mode: appearance)
 
@@ -170,7 +184,51 @@ struct ContentView: View {
         audio in \(c.audioIn) · out \(c.audioOut)
         text in \(c.textIn) · out \(c.textOut) · cached \(c.cachedIn)
         images \(c.imageIn) tokens (\(String(format: "$%.3f", c.imageUSD)))
+
+        OpenAI API — real spend. Claude Code runs on your Max
+        subscription, so it is counted separately below.
+        \(c.claudeCodeRuns > 0
+          ? "Claude Code: \(c.claudeCodeRuns) run(s), ~$\(c.claudeCodeFormatted) of subscription usage (not billed)"
+          : "")
         """
+    }
+
+    /// The response lifecycle, made visible.
+    ///
+    /// Without this the one-response-at-a-time rule is invisible: a screenshot sent
+    /// mid-reply is answered a few seconds later, and there is nothing on screen to say
+    /// why. QUEUED is the honest version of that wait, and STOPPING says a cancel is
+    /// out but unacknowledged — the state the Stop button can force out of.
+    private var responseLabel: String? {
+        if state.isCancellingResponse { return "STOPPING" }
+        if state.hasQueuedResponse { return "QUEUED · \(state.queuedResponses)" }
+        if state.isResponding { return "REPLYING" }
+        return nil
+    }
+
+    private var responsePill: some View {
+        HStack(spacing: 5) {
+            Image(systemName: state.isCancellingResponse ? "stop.circle" : "waveform.circle")
+                .font(.system(size: 8.5))
+            Text(responseLabel ?? "")
+                .font(.system(size: 9.5, weight: .bold, design: .rounded)).tracking(0.8)
+        }
+        .foregroundStyle(Theme.textDim)
+        .padding(.horizontal, 8).padding(.vertical, 4)
+        .background(Capsule().fill(Theme.fill)
+            .overlay(Capsule().stroke(Theme.hairline, lineWidth: 1)))
+        .modifier(PulseIf(active: true))
+        .help(captureHelp)
+    }
+
+    private var captureHelp: String {
+        if state.hasQueuedResponse {
+            return "A reply is already queued — it goes out as soon as the current one finishes."
+        }
+        if state.isResponding {
+            return "Send a screenshot (⌘⇧2). Vibe is mid-reply, so the frame is filed now and answered next."
+        }
+        return "Send a screenshot (⌘⇧2)"
     }
 
     /// Claude Code runs for minutes with the voice loop idle, so this is the only
@@ -241,16 +299,41 @@ struct ContentView: View {
                 Button(connectLabel) { state.toggleConnection() }
                     .buttonStyle(PrimaryButtonStyle(tint: state.connection == .live ? Theme.bad : Theme.accent))
 
+                // Gated, not blocked. While a reply is streaming the frame is still worth
+                // filing — it is answered on the next turn — but a SECOND press would
+                // only be coalesced into the same queued turn, so the button says
+                // "Queued" and stops taking clicks until that turn goes out.
                 Button {
                     Task { await state.captureAndSend(auto: false) }
                 } label: {
                     HStack(spacing: 6) {
-                        Image(systemName: "camera.viewfinder").font(.system(size: 11.5))
-                        Text("Show screen")
-                        Text("⌘⇧2").foregroundStyle(Theme.textFaint)
+                        Image(systemName: state.hasQueuedResponse ? "clock" : "camera.viewfinder")
+                            .font(.system(size: 11.5))
+                        Text(state.hasQueuedResponse ? "Queued" : "Show screen")
+                        if !state.hasQueuedResponse {
+                            Text("⌘⇧2").foregroundStyle(Theme.textFaint)
+                        }
                     }
                 }
                 .buttonStyle(GhostButtonStyle())
+                .disabled(state.hasQueuedResponse)
+                .opacity(state.hasQueuedResponse ? 0.5 : 1)
+                .help(captureHelp)
+
+                if state.isResponding || state.isCancellingResponse {
+                    Button {
+                        state.stopResponse()
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "stop.fill").font(.system(size: 10.5))
+                            Text(state.isCancellingResponse ? "Force stop" : "Stop")
+                        }
+                    }
+                    .buttonStyle(GhostButtonStyle(tint: Theme.badInk))
+                    .help(state.isCancellingResponse
+                          ? "The cancel has not come back yet — click again to force the session back to idle"
+                          : "Interrupt this reply")
+                }
 
                 Button {
                     state.settings.continuousScreen.toggle()

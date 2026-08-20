@@ -14,6 +14,7 @@ open VibeVoice.app         # launch it
 
 Debug build: `CONFIG=debug ./build.sh`.
 Plain compile check: `swift build -c release`.
+Tests: `swift test` (covers `VibeVoiceCore`, see [Response lifecycle](#response-lifecycle)).
 
 > **Launch `VibeVoice.app`, not `.build/release/VibeVoice`.**
 > A bare SPM binary is not a bundle, so macOS TCC silently denies it mic and
@@ -93,6 +94,7 @@ RESULT: transport OK — no audio devices were opened.
 | Playback | `response.output_audio.delta` → base64-decode → Float32 @ 24 kHz → `AVAudioPlayerNode` (engine resamples to the device rate) |
 | Amplitude | Real RMS. Mic RMS from the input tap; output RMS from a tap installed **on the player node**, i.e. what is actually being rendered. No timer fakery. |
 | Barge-in | `input_audio_buffer.speech_started` → flush the local playback queue. The server truncates its own turn (`turn_detection.interrupt_response: true`), so no `response.cancel` is sent — that only races and returns "no active response found". |
+| Response lifecycle | `ResponseCoordinator` (`VibeVoiceCore`) owns every `response.create` / `response.cancel`. One response at a time, deadlines on every phase, a Stop button that always works. See below. |
 | Screen | ScreenCaptureKit — `SCShareableContent` + `SCContentFilter` + `SCScreenshotManager.captureImage`, downscaled to 1280px wide, JPEG q0.7, sent as a `data:` URI per contract §3 |
 | Hotkey | Carbon `RegisterEventHotKey` for ⌘⇧2 (no Accessibility permission needed) |
 | Settings | JSON at `~/Library/Application Support/VibeVoice/settings.json` |
@@ -101,6 +103,62 @@ RESULT: transport OK — no audio devices were opened.
 
 Sample rates are logged and shown in the UI footer at runtime, e.g.
 `in 48000 Hz × 1 ch → wire 24000 Hz mono PCM16 · out 48000 Hz`.
+
+## Response lifecycle
+
+The realtime API allows exactly one response per conversation at a time. A second
+`response.create` is refused outright:
+
+```
+Conversation already has an active response in progress
+```
+
+This app can want a turn from four places at once, which is why that error was easy to
+hit: server VAD (`turn_detection.create_response: true`), a screenshot you send, the
+`function_call_output` answering a tool call, and the system note filed when a long
+Claude Code run finishes. The subtle part is the *window*: it opens the moment the
+create leaves this machine, not when `response.created` comes back, so a flag set only
+from the server's event leaves a full round trip in which a second create looks legal.
+
+`ResponseCoordinator` closes that. It is the only thing in the app allowed to send
+`response.create` or `response.cancel`, and it tracks four phases:
+
+| Phase | Meaning |
+|---|---|
+| `idle` | nothing running, a create may go out |
+| `requested` | our create is on the wire, unconfirmed — **this is the state the old flag was missing** |
+| `active` | the server confirmed with `response.created` |
+| `cancelling` | `response.cancel` sent, waiting for `response.done` |
+
+Rules it enforces:
+
+- **Deferred, never dropped, never doubled.** Ask while busy and the request is queued;
+  several asks collapse into ONE create sent at `response.done`.
+- **Server VAD goes first.** Nothing queued is sent while you are speaking, or for
+  1.5 s afterwards — that is the window the server uses to open its own turn, and
+  firing into it is a guaranteed collision.
+- **The lock is released on every `response.done`**, whatever the status. Treating only
+  `completed` as the end is how an app ends up permanently mute.
+- **Self-healing.** If "already has an active response" ever arrives anyway, the server
+  is believed: the coordinator takes the lock, re-queues the rejected request, and the
+  user sees no error. Three failures in a row and it stops retrying instead of looping.
+- **Nothing gets stuck.** Every phase carries a deadline, checked once a second. A
+  create the server never confirms is retried; a response that never finishes is
+  cancelled; a cancel that is never acknowledged is forced back to idle; a
+  `speech_started` with no `speech_stopped` behind it stops holding the queue.
+
+In the UI: a **REPLYING / QUEUED / STOPPING** pill in the header, a **Stop** button
+while a turn is being generated (press it twice to force a stuck session back to idle),
+and **Show screen** turns into a disabled **Queued** while a request is already waiting,
+so a second press cannot stack a no-op. ⌘⇧2 is gated the same way.
+
+Every start, finish, queue, cancel, timeout and recovery is logged to stderr as
+`[response] …`; the ones a user could mistake for the app going silent also appear in
+the transcript.
+
+Covered by `Tests/VibeVoiceCoreTests` — 24 tests over the collision, deferral,
+cancellation, error-recovery and watchdog paths, with an injected clock so the timeout
+cases are deterministic. `swift test`.
 
 ## Verified working
 
