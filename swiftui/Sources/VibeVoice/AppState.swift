@@ -80,7 +80,35 @@ final class AppState: ObservableObject {
     /// beside what, live in VibeVoiceCore where they are tested.
     let devTasks = DevTaskRegistry(maxConcurrent: 3)
     /// Tools answered natively, in-process, without Claude Code.
-    let tools = ToolRegistry(specs: NativeTools.specs)
+    let tools = ToolRegistry(specs: NativeTools.specs + NativeTools.taskControlSpecs)
+
+    /// Stops a running task. The subprocess gets SIGTERM; the run then falls out of its
+    /// stream with no result event, which is reported as "Stopped."
+    @discardableResult
+    func cancelTask(_ id: String) async -> String {
+        guard let t = devTasks.task(id) else { return "No task called \(id)." }
+        guard t.status == .running else { return "\(id) isn't running." }
+        let killed = await claude.cancel(taskID: id)
+        devTasks.cancel(id)
+        devTaskRunning = !devTasks.running.isEmpty
+        transcript.append(TranscriptItem(speaker: .system, text: "■ \(id) \(t.label): stopped"))
+        objectWillChange.send()
+        return killed
+            ? "Stopped \(id) (\(t.label)). Its edits so far are still on disk — say undo \(id) to roll them back."
+            : "\(id) had already finished."
+    }
+
+    /// Rolls the repo back to the restore point taken before the task started.
+    func undoTask(_ id: String) -> String {
+        guard let t = devTasks.task(id) else { return "No task called \(id)." }
+        if t.status == .running {
+            return "\(id) is still running — stop it first, then undo."
+        }
+        let msg = GitSnapshot.restore(repo: t.repo, taskID: id)
+        transcript.append(TranscriptItem(speaker: .system, text: "↩ \(id): \(msg)"))
+        objectWillChange.send()
+        return msg
+    }
 
     /// Turn a native tool on or off, persist it, and tell a live session immediately.
     func setToolEnabled(_ on: Bool, _ name: String) {
@@ -466,7 +494,15 @@ final class AppState: ObservableObject {
             let args = (try? JSONSerialization.jsonObject(with: Data(argumentsJSON.utf8))) as? [String: Any] ?? [:]
             note("tool \(name)")
             Task { @MainActor in
-                let result = await NativeTools.run(name, args: args)
+                let result: String
+                switch name {
+                case "stop_task":
+                    result = await self.cancelTask((args["task_id"] as? String) ?? "")
+                case "undo_task":
+                    result = self.undoTask((args["task_id"] as? String) ?? "")
+                default:
+                    result = await NativeTools.run(name, args: args)
+                }
                 self.transcript.append(TranscriptItem(
                     speaker: .system, text: "⚒ \(spec.summary): \(result.prefix(160))"))
                 self.client.sendToolOutput(callID: callID,
@@ -529,6 +565,12 @@ final class AppState: ObservableObject {
         }
         let taskID = task.id
         let resumeSession = resuming?.claudeSessionID
+
+        // Restore point BEFORE anything is touched, so "undo that" is one sentence.
+        let snapshot = GitSnapshot.take(repo: repo, taskID: taskID)
+        if snapshot == nil {
+            note("\(taskID): no git repo at \(repo) — this task has no undo.")
+        }
         objectWillChange.send()
 
         devTaskRunning = true
@@ -548,7 +590,8 @@ final class AppState: ObservableObject {
 
         Task { [weak self] in
             guard let self else { return }
-            let r = await self.claude.run(task: instruction,
+            let r = await self.claude.run(taskID: taskID,
+                                          task: instruction,
                                           repo: repo,
                                           permissionMode: mode,
                                           resumeSessionID: resumeSession) { step in

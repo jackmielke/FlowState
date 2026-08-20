@@ -11,6 +11,28 @@ import VibeVoiceCore
 @MainActor
 enum NativeTools {
 
+    /// Control tools for Claude Code jobs. Separate from the list below because they are
+    /// answered by AppState (which owns the registry) rather than by this type.
+    static let taskControlSpecs: [ToolSpec] = [
+        ToolSpec(
+            name: "stop_task",
+            summary: "Stop a task",
+            description: "Stop a running Claude Code task by its id (T1, T2…). Use the moment "
+                       + "the user says stop, cancel, or that's wrong. Edits already written stay "
+                       + "on disk — offer to undo afterwards.",
+            parameters: [ToolParameter("task_id", description: "The task id, e.g. T1.", required: true)],
+            effect: .writes(confirmation: "Stop it?")),
+
+        ToolSpec(
+            name: "undo_task",
+            summary: "Undo a task",
+            description: "Roll a repo back to how it was before a task started, by task id. "
+                       + "Use when the user says undo, revert, or put it back. The task must "
+                       + "have stopped or finished first.",
+            parameters: [ToolParameter("task_id", description: "The task id, e.g. T1.", required: true)],
+            effect: .writes(confirmation: "Want me to roll that back?")),
+    ]
+
     static let specs: [ToolSpec] = [
         ToolSpec(
             name: "get_context",

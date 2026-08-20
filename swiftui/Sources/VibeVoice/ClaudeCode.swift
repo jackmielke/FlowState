@@ -32,6 +32,20 @@ actor ClaudeCode {
     /// Each job carries its own Claude Code session id, so several independent
     /// conversations can be in flight and a follow-up resumes the right one.
 
+    /// Live processes, so a task that is going the wrong way can actually be stopped.
+    /// A run can take tens of minutes; without this the only way out is force-quitting
+    /// the app, which is not an answer when the user's hands are the problem.
+    private var live: [String: Process] = [:]
+
+    func cancel(taskID: String) -> Bool {
+        guard let p = live[taskID], p.isRunning else { return false }
+        p.terminate()
+        live[taskID] = nil
+        return true
+    }
+
+    var runningTaskIDs: [String] { live.filter { $0.value.isRunning }.map(\.key) }
+
     /// A GUI .app inherits no shell PATH, so the usual install locations are checked
     /// explicitly before falling back to a login shell lookup.
     private static func binary() -> String? {
@@ -95,7 +109,8 @@ actor ClaudeCode {
 
     /// - Parameter onProgress: called with a short label each time Claude Code does
     ///   something. Fires on a background executor; hop to the main actor to display.
-    func run(task: String,
+    func run(taskID: String,
+             task: String,
              repo: String,
              permissionMode: String = "acceptEdits",
              resumeSessionID: String? = nil,
@@ -131,6 +146,9 @@ actor ClaudeCode {
         let errHandle = errPipe.fileHandleForReading
         async let errData = Task.detached { errHandle.readDataToEndOfFile() }.value
 
+        live[taskID] = proc
+        defer { live[taskID] = nil }
+
         do {
             try proc.run()
         } catch {
@@ -157,6 +175,11 @@ actor ClaudeCode {
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard let obj = final else {
+            // SIGTERM from cancel() lands here: the stream just stops, with no result
+            // event and usually nothing on stderr.
+            if proc.terminationReason == .uncaughtSignal {
+                return Result(ok: false, text: "Stopped.", costUSD: nil, turns: nil)
+            }
             return Result(ok: false,
                           text: stderrText.isEmpty ? "Claude Code produced no result event."
                                                    : String(stderrText.suffix(400)),

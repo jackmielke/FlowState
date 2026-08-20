@@ -69,6 +69,20 @@ struct TaskPanel: View {
                 Text(elapsed(t))
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(Theme.textFaint)
+
+                if t.status == .running {
+                    Button { Task { await state.cancelTask(t.id) } } label: {
+                        Image(systemName: "stop.fill").font(.system(size: 8.5))
+                    }
+                    .buttonStyle(.plain).foregroundStyle(Theme.badInk)
+                    .help("Stop this task")
+                } else {
+                    Button { _ = state.undoTask(t.id) } label: {
+                        Image(systemName: "arrow.uturn.backward").font(.system(size: 8.5))
+                    }
+                    .buttonStyle(.plain).foregroundStyle(Theme.textFaint)
+                    .help("Roll this repo back to before \(t.id) started")
+                }
             }
 
             Text((t.repo as NSString).lastPathComponent)
