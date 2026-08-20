@@ -1,4 +1,5 @@
 import SwiftUI
+import VibeVoiceCore
 import CoreGraphics
 
 struct GhostButtonStyle: ButtonStyle {
@@ -372,5 +373,50 @@ struct SecureTokenField: View {
                 .disabled(entry.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }
+    }
+}
+
+/// The Dev Mode offer, shown inline rather than as a modal.
+///
+/// A modal would interrupt a voice conversation to advertise a feature, which is exactly
+/// the wrong trade. This sits under the orb, waits to be noticed, and takes "Not now" as
+/// final.
+struct DevOfferCard: View {
+    let trigger: DevModeHint.Trigger
+    let claudeReady: Bool
+    let onAccept: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 11) {
+            Image(systemName: "wand.and.stars")
+                .font(.system(size: 13)).foregroundStyle(Theme.accentInk)
+                .padding(.top, 1)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(trigger.headline)
+                    .font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.text)
+                Text(trigger.body(claudeReady: claudeReady))
+                    .font(.system(size: 11.5)).foregroundStyle(Theme.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 6)
+
+            VStack(spacing: 6) {
+                Button(claudeReady ? "Turn it on" : "Show me how", action: onAccept)
+                    .buttonStyle(GhostButtonStyle(tint: Theme.accentInk))
+                Button("Not now", action: onDismiss)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.textFaint)
+            }
+        }
+        .padding(13)
+        .frame(maxWidth: 560)
+        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Theme.fill))
+        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
+            .stroke(Theme.accent.opacity(0.35), lineWidth: 1))
+        .transition(.opacity.combined(with: .move(edge: .bottom)))
     }
 }

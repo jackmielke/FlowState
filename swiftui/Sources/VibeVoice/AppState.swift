@@ -51,6 +51,34 @@ final class AppState: ObservableObject {
     @Published var claudeAvailability: ClaudeCode.Availability = ClaudeCode.availability()
 
     func refreshClaudeAvailability() { claudeAvailability = ClaudeCode.availability() }
+
+    /// The Dev Mode offer, if one is warranted right now. See `DevModeHint`.
+    @Published private(set) var devOffer: DevModeHint.Trigger?
+    private var assistantTurns = 0
+    private var lastUserSaid: String?
+
+    private func reconsiderDevOffer() {
+        devOffer = DevModeHint.offer(devModeOn: settings.devMode,
+                                     dismissed: settings.devNudgeDismissed,
+                                     assistantTurns: assistantTurns,
+                                     lastUserTranscript: lastUserSaid)
+    }
+
+    func acceptDevOffer() {
+        devOffer = nil
+        if claudeAvailability == .ready {
+            settings.devMode = true
+            applySettingsLive()
+            note("Dev Mode is on. Ask me to change something in \(settings.devRepo).")
+        } else {
+            showSettings = true    // it cannot be switched on yet; show them why
+        }
+    }
+
+    func dismissDevOffer() {
+        devOffer = nil
+        settings.devNudgeDismissed = true
+    }
     /// Every display Vantage could look at. Re-read on launch, on activation, and
     /// whenever macOS reports a display arriving or leaving.
     @Published var displays: [DisplayOption] = []
@@ -464,7 +492,11 @@ final class AppState: ObservableObject {
 
         case .userTranscript(let t):
             let clean = t.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !clean.isEmpty { transcript.append(TranscriptItem(speaker: .user, text: clean)) }
+            if !clean.isEmpty {
+                transcript.append(TranscriptItem(speaker: .user, text: clean))
+                lastUserSaid = clean
+                reconsiderDevOffer()
+            }
 
         case .assistantDelta(let d):
             if let i = assistantIndex, i < transcript.count {
@@ -476,6 +508,8 @@ final class AppState: ObservableObject {
 
         case .responseDone(let status):
             closeAssistantTurn()
+            assistantTurns += 1
+            reconsiderDevOffer()
             // Releases the lock and flushes at most one deferred request. Runs for every
             // status, including cancelled and failed — a response that ends badly still
             // ends, and treating it as still-running is what leaves the app mute.

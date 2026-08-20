@@ -359,6 +359,14 @@ struct ContentView: View {
                     .multilineTextAlignment(.center)
                     .frame(height: 16)
 
+                if let offer = state.devOffer {
+                    DevOfferCard(trigger: offer,
+                                 claudeReady: state.claudeAvailability == .ready,
+                                 onAccept: { state.acceptDevOffer() },
+                                 onDismiss: { state.dismissDevOffer() })
+                        .padding(.top, 10)
+                }
+
                 if case .error = state.connection, let a = state.bannerAction {
                     Button(a.label) { NSWorkspace.shared.open(a.url) }
                         .buttonStyle(GhostButtonStyle(tint: Theme.accentInk))

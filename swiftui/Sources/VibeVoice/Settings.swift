@@ -102,13 +102,16 @@ struct AppSettings: Codable, Equatable {
     /// Summon hotkey. Empty string = off.
     var summonHotkey: String = "cmdShiftSpace"
 
+    /// Set once the Dev Mode offer has been declined. Permanent on purpose.
+    var devNudgeDismissed: Bool = false
+
     enum CodingKeys: String, CodingKey {
         case voice, model, systemPrompt, speed, continuousScreen, screenInterval
         case vadThreshold, silenceDurationMs, transcribeUser, devMode, devRepo
         case maxScreenFrames, screenshotSize, qualityMode, appearance, screenDisplayID
         case devNarrate, devNarrateInterval, devNarrateMax, devPermissionMode
         case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
-        case photoRotateSeconds, menuBarEnabled, summonHotkey
+        case photoRotateSeconds, menuBarEnabled, summonHotkey, devNudgeDismissed
     }
 }
 
@@ -156,6 +159,7 @@ extension AppSettings {
         photoRotateSeconds = v(.photoRotateSeconds, d.photoRotateSeconds)
         menuBarEnabled    = v(.menuBarEnabled, d.menuBarEnabled)
         summonHotkey      = v(.summonHotkey, d.summonHotkey)
+        devNudgeDismissed = v(.devNudgeDismissed, d.devNudgeDismissed)
         ambientMode       = v(.ambientMode, d.ambientMode)
     }
 }
