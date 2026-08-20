@@ -960,6 +960,11 @@ final class AppState: ObservableObject {
             note("Continuous screen stays paused until Screen Recording is usable (\(screenPermission.logToken)).")
             return
         }
+        // Send a frame NOW, not one interval from now. A repeating Timer first fires
+        // after its interval, so connecting with a 10s interval left the model blind for
+        // ten seconds — long enough to ask "what am I looking at?" and be told nothing.
+        Task { @MainActor [weak self] in await self?.captureAndSend(auto: true) }
+
         let t = Timer(timeInterval: settings.screenInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.captureAndSend(auto: true) }
         }

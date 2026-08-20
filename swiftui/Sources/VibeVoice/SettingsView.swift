@@ -195,6 +195,14 @@ struct SettingsView: View {
                         caption("Frames are filed silently as context, so it won't narrate every one. Ask about your screen whenever you like.")
                     }
 
+                    section("Notion") {
+                        SecureTokenField(
+                            placeholder: "ntn_… integration token",
+                            isSet: Notion.isConfigured,
+                            onSave: { try? KeyStore.setSecret($0, forKey: "NOTION_TOKEN") })
+                        caption("Create an internal integration at notion.so/my-integrations, then share the pages you want Flow to see with it — it can only read what you share. The token is written to the same 0600 file as your OpenAI key, outside the repo.")
+                    }
+
                     section("Tools") {
                         ForEach(state.tools.specs) { spec in
                             HStack(alignment: .top) {

@@ -22,6 +22,31 @@ enum KeyStore {
         }
     }
 
+    /// Writes a secondary credential into the same file, preserving everything else in
+    /// it and keeping the file 0600. Used for the Notion token, so a user never has to
+    /// open a terminal to connect a service.
+    static func setSecret(_ value: String, forKey key: String) throws {
+        let url = configURL
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        var obj = (try? Data(contentsOf: url))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { obj.removeValue(forKey: key) } else { obj[key] = trimmed }
+
+        let data = try JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: url, options: .atomic)
+        // Re-assert 0600: an atomic write replaces the file, taking its mode with it.
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    static func secret(forKey key: String) -> String? {
+        guard let d = try? Data(contentsOf: configURL),
+              let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+              let v = j[key] as? String, !v.isEmpty else { return nil }
+        return v
+    }
+
     static func load() throws -> String {
         let url = configURL
         guard let data = try? Data(contentsOf: url) else {

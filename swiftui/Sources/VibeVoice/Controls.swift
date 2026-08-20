@@ -329,3 +329,48 @@ struct AppearancePicker: View {
         }
     }
 }
+
+/// A write-only credential field.
+///
+/// Never renders the stored secret — once a token is saved there is no reason to display
+/// it again, and plenty of reasons not to (screen sharing, screenshots, this very app's
+/// screen-capture feature). It shows whether one is set, and lets you replace or clear it.
+struct SecureTokenField: View {
+    let placeholder: String
+    let isSet: Bool
+    let onSave: (String) -> Void
+
+    @State private var entry = ""
+    @State private var saved = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Circle().fill(isSet || saved ? Theme.good : Theme.textFaint)
+                    .frame(width: 6, height: 6)
+                Text(isSet || saved ? "Token saved" : "No token yet")
+                    .font(.system(size: 12)).foregroundStyle(Theme.textDim)
+                Spacer()
+                if isSet || saved {
+                    Button("Clear") { entry = ""; onSave(""); saved = false }
+                        .buttonStyle(GhostButtonStyle(tint: Theme.badInk))
+                }
+            }
+            HStack(spacing: 8) {
+                SecureField(placeholder, text: $entry)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(Theme.text)
+                    .padding(9)
+                    .surface(10)
+                Button("Save") {
+                    onSave(entry)
+                    entry = ""
+                    saved = true
+                }
+                .buttonStyle(GhostButtonStyle(tint: Theme.accentInk))
+                .disabled(entry.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+    }
+}

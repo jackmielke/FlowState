@@ -72,6 +72,20 @@ enum NativeTools {
             ],
             // A shortcut can do anything its author wrote, including send things.
             effect: .writes(confirmation: "Want me to run that shortcut?")),
+
+        ToolSpec(
+            name: "notion_search",
+            summary: "Search Notion",
+            description: "Search the user's Notion for pages matching a query, newest first. "
+                       + "Only pages shared with the integration are visible.",
+            parameters: [ToolParameter("query", description: "What to look for.", required: true)]),
+
+        ToolSpec(
+            name: "notion_read",
+            summary: "Read a Notion page",
+            description: "Read the text of a Notion page. Pass the page title as the user said "
+                       + "it — the title is looked up, so never ask them for an id.",
+            parameters: [ToolParameter("page", description: "Page title, or a Notion page id.", required: true)]),
     ]
 
     static func run(_ name: String, args: [String: Any]) async -> String {
@@ -82,6 +96,8 @@ enum NativeTools {
         case "list_shortcuts":  return shortcutList()
         case "run_shortcut":    return await runShortcut(name: args["name"] as? String ?? "",
                                                          input: args["input"] as? String)
+        case "notion_search":   return await Notion.search(args["query"] as? String ?? "")
+        case "notion_read":     return await Notion.read(args["page"] as? String ?? "")
         default:                return "No such tool: \(name)."
         }
     }
