@@ -179,7 +179,20 @@ enum QualityMode: String, Codable, CaseIterable {
 
 @MainActor
 final class SettingsStore: ObservableObject {
-    @Published var settings: AppSettings { didSet { save() } }
+    /// Writes only on a REAL change.
+    ///
+    /// Without the equality guard this is a loaded gun. SwiftUI writes to bindings during
+    /// view evaluation, so a binding whose setter assigns here — MenuBarExtra's
+    /// `isInserted` did exactly this — starts a loop: assign, save, @Published fires, body
+    /// re-evaluates, assign again. It pegged a core at 99% and wrote settings.json
+    /// continuously until the app stopped responding. AppSettings is Equatable precisely
+    /// so this comparison is cheap and total.
+    @Published var settings: AppSettings {
+        didSet {
+            guard settings != oldValue else { return }
+            save()
+        }
+    }
 
     private static var fileURL: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]

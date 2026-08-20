@@ -50,8 +50,11 @@ struct VibeVoiceApp: App {
         // .commands — chained onto them instead, it silently attaches the command menus
         // to the wrong scene and no status item appears.
         MenuBarExtra("Flow", systemImage: state.menuBarSymbol,
-                     isInserted: Binding(get: { state.settings.menuBarEnabled },
-                                         set: { state.settings.menuBarEnabled = $0 })) {
+                     // Idempotent on purpose: SwiftUI assigns to this during evaluation,
+                     // and an unconditional write here re-entered the whole update cycle.
+                     isInserted: Binding(
+                        get: { state.settings.menuBarEnabled },
+                        set: { if state.settings.menuBarEnabled != $0 { state.settings.menuBarEnabled = $0 } })) {
             MenuBarMenu(state: state)
         }
     }
