@@ -337,11 +337,32 @@ struct SettingsView: View {
                     section("Dev Mode") {
                         HStack {
                             Text("Let it edit code with Claude Code")
-                                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                                .font(.system(size: 12.5))
+                                .foregroundStyle(state.claudeAvailability == .ready ? Theme.text : Theme.textDim)
                             Spacer()
                             NeatToggle(isOn: Binding(
-                                get: { state.settings.devMode },
+                                get: { state.settings.devMode && state.claudeAvailability == .ready },
                                 set: { state.settings.devMode = $0; state.applySettingsLive() }))
+                                .disabled(state.claudeAvailability != .ready)
+                                .opacity(state.claudeAvailability == .ready ? 1 : 0.4)
+                        }
+
+                        // Offering a switch that cannot work is worse than not offering it:
+                        // every task would fail with something that reads like a bug.
+                        if state.claudeAvailability != .ready {
+                            HStack(spacing: 7) {
+                                Circle().fill(Theme.bad).frame(width: 6, height: 6)
+                                Text(state.claudeAvailability.headline)
+                                    .font(.system(size: 12)).foregroundStyle(Theme.text)
+                                Spacer()
+                                Button("Check again") { state.refreshClaudeAvailability() }
+                                    .buttonStyle(GhostButtonStyle())
+                            }
+                            Text(state.claudeAvailability.detail)
+                                .font(.system(size: 11.5, design: .monospaced))
+                                .foregroundStyle(Theme.textFaint)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                         TextField("~/dev/vibe-voice", text: Binding(
                             get: { state.settings.devRepo },

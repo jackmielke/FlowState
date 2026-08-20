@@ -108,6 +108,9 @@ struct ContentView: View {
         .onChange(of: state.settings.backdrop) { _, _ in state.applyEffectiveAppearance() }
         .onChange(of: state.settings.appearance) { _, _ in state.applyEffectiveAppearance() }
         .sheet(isPresented: $state.showSettings) { SettingsView(state: state) }
+        .sheet(isPresented: $state.showWelcome) {
+            WelcomeView(state: state) { state.showWelcome = false }
+        }
     }
 
     // MARK: - Header

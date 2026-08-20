@@ -46,9 +46,52 @@ actor ClaudeCode {
 
     var runningTaskIDs: [String] { live.filter { $0.value.isRunning }.map(\.key) }
 
+    /// Where Claude Code stands on this Mac, so Dev Mode can explain itself rather than
+    /// offering a switch that quietly fails.
+    enum Availability: Equatable {
+        case ready
+        case notInstalled
+        case notSignedIn
+
+        var headline: String {
+            switch self {
+            case .ready:        return "Claude Code is ready"
+            case .notInstalled: return "Claude Code isn't installed"
+            case .notSignedIn:  return "Claude Code isn't signed in"
+            }
+        }
+
+        var detail: String {
+            switch self {
+            case .ready:
+                return "Dev Mode can hand coding tasks to it."
+            case .notInstalled:
+                return "Install it, then check again:\n    npm i -g @anthropic-ai/claude-code\n"
+                     + "Dev Mode needs it; everything else in Vantage works without it."
+            case .notSignedIn:
+                return "Run `claude` once in a terminal and sign in. Dev Mode uses your own "
+                     + "Claude account, so tasks run on your subscription, not anyone else's."
+            }
+        }
+    }
+
+    /// Cheap enough to call from a settings screen: a file check and one small JSON read,
+    /// never a subprocess that could hang.
+    static func availability() -> Availability {
+        guard binary() != nil else { return .notInstalled }
+        let cfg = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude.json")
+        guard let d = try? Data(contentsOf: cfg),
+              let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+              j["oauthAccount"] != nil || ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"] != nil
+        else { return .notSignedIn }
+        return .ready
+    }
+
+    static var isReady: Bool { availability() == .ready }
+
     /// A GUI .app inherits no shell PATH, so the usual install locations are checked
     /// explicitly before falling back to a login shell lookup.
-    private static func binary() -> String? {
+    static func binary() -> String? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let candidates = [
             "\(home)/.local/bin/claude",
