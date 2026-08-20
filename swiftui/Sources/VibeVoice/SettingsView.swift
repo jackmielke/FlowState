@@ -144,6 +144,33 @@ struct SettingsView: View {
                         caption("Frames are filed silently as context, so it won't narrate every one. Ask about your screen whenever you like.")
                     }
 
+                    section("Tools") {
+                        ForEach(state.tools.specs) { spec in
+                            HStack(alignment: .top) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack(spacing: 6) {
+                                        Text(spec.summary)
+                                            .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                                        if !spec.isReadOnly {
+                                            Text("ASKS FIRST")
+                                                .font(.system(size: 8.5, weight: .bold, design: .rounded))
+                                                .tracking(0.6)
+                                                .foregroundStyle(Theme.voice)
+                                        }
+                                    }
+                                    Text(spec.name)
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundStyle(Theme.textFaint)
+                                }
+                                Spacer()
+                                NeatToggle(isOn: Binding(
+                                    get: { state.tools.isEnabled(spec.name) },
+                                    set: { state.setToolEnabled($0, spec.name) }))
+                            }
+                        }
+                        caption("Answered by the app itself in milliseconds, so it replies in the same breath — no Claude Code, no subscription usage. Shortcuts are the extensible part: build one in the Shortcuts app and it becomes something you can ask for out loud.")
+                    }
+
                     section("Dev Mode") {
                         HStack {
                             Text("Let it edit code with Claude Code")

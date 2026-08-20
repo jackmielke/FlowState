@@ -28,7 +28,11 @@
     <true/>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.productivity</string>
-    <key>NSMicrophoneUsageDescription</key>
+    	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Vibe Voice reads your calendar so you can ask what is coming up.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>Vibe Voice reads your calendar so you can ask what is coming up.</string>
+<key>NSMicrophoneUsageDescription</key>
     <string>Vibe Voice uses your microphone so you can talk to the realtime model.</string>
     <key>NSCameraUsageDescription</key>
     <string>Not used.</string>

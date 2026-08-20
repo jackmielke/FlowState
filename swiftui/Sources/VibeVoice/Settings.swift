@@ -37,6 +37,11 @@ struct AppSettings: Codable, Equatable {
     /// voice, and also means a misheard sentence can run anything.
     var devPermissionMode: String = "acceptEdits"
 
+    /// Native tools the user has switched OFF. Stored as the exceptions rather than the
+    /// enabled list, so a tool added in a later build is on by default instead of
+    /// silently missing for everyone who already has a settings file.
+    var disabledTools: [String] = []
+
     /// Speak progress aloud while Claude Code works, instead of going quiet until it
     /// finishes. Steps are always filed silently so the model can answer "what are you
     /// doing?" — this only controls whether it volunteers updates unprompted.
@@ -73,6 +78,7 @@ struct AppSettings: Codable, Equatable {
         case vadThreshold, silenceDurationMs, transcribeUser, devMode, devRepo
         case maxScreenFrames, screenshotSize, qualityMode, appearance, screenDisplayID
         case devNarrate, devNarrateInterval, devNarrateMax, devPermissionMode
+        case disabledTools
     }
 }
 
@@ -107,6 +113,7 @@ extension AppSettings {
         devRepo           = v(.devRepo, d.devRepo)
         devNarrate        = v(.devNarrate, d.devNarrate)
         devPermissionMode = v(.devPermissionMode, d.devPermissionMode)
+        disabledTools     = v(.disabledTools, d.disabledTools)
         devNarrateInterval = v(.devNarrateInterval, d.devNarrateInterval)
         devNarrateMax     = v(.devNarrateMax, d.devNarrateMax)
         maxScreenFrames   = v(.maxScreenFrames, d.maxScreenFrames)

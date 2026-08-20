@@ -79,6 +79,16 @@ final class AppState: ObservableObject {
     /// Several Claude Code jobs at once. The rules about how many, and what may run
     /// beside what, live in VibeVoiceCore where they are tested.
     let devTasks = DevTaskRegistry(maxConcurrent: 3)
+    /// Tools answered natively, in-process, without Claude Code.
+    let tools = ToolRegistry(specs: NativeTools.specs)
+
+    /// Turn a native tool on or off, persist it, and tell a live session immediately.
+    func setToolEnabled(_ on: Bool, _ name: String) {
+        tools.setEnabled(on, for: name)
+        settings.disabledTools = tools.disabledNames
+        applySettingsLive()
+        objectWillChange.send()
+    }
     private var devStepBuffer: [String] = []
     private var devNarrateTimer: Timer?
     private var devSpokenUpdates = 0
@@ -160,6 +170,8 @@ final class AppState: ObservableObject {
             }
             .store(in: &bag)
 
+        for name in settings.disabledTools { tools.setEnabled(false, for: name) }
+
         refreshScreenPermission(reason: "launch")
         // Get listed in Privacy & Security > Screen & System Audio Recording.
         //
@@ -239,7 +251,7 @@ final class AppState: ObservableObject {
 
     func applySettingsLive() {
         guard case .live = connection else { return }
-        client.sendSessionUpdate(settings)
+        client.sendSessionUpdate(settings, nativeTools: tools.realtimeTools())
     }
 
     // MARK: - Response lifecycle
@@ -314,7 +326,7 @@ final class AppState: ObservableObject {
             connection = .live
             frameItemIDs.removeAll()
             cost.startSession()
-            client.sendSessionUpdate(settings)
+            client.sendSessionUpdate(settings, nativeTools: tools.realtimeTools())
             // A fresh conversation has no response running, whatever the last one left
             // behind — and this is the point where a stale queued request must not
             // survive into the new session.
@@ -440,12 +452,30 @@ final class AppState: ObservableObject {
     /// (it says "on it"), and the finished result is filed later as a new turn, which
     /// makes it announce the outcome unprompted.
     private func handleToolCall(callID: String, name: String, argumentsJSON: String) {
-        guard settings.devMode else {
+        // Dev Mode gates ONLY the Claude Code dispatcher — native tools are unrelated
+        // to it and must keep working with Dev Mode off.
+        guard settings.devMode || tools.spec(name) != nil else {
             client.sendToolOutput(callID: callID,
                                   output: ["status": "refused", "reason": "Dev Mode is off."])
             requestResponse("tool-refused")
             return
         }
+        // Native tools return fast enough to answer in this same turn, so there is no
+        // dispatch-and-report-back dance — just run it and hand back the result.
+        if let spec = tools.spec(name) {
+            let args = (try? JSONSerialization.jsonObject(with: Data(argumentsJSON.utf8))) as? [String: Any] ?? [:]
+            note("tool \(name)")
+            Task { @MainActor in
+                let result = await NativeTools.run(name, args: args)
+                self.transcript.append(TranscriptItem(
+                    speaker: .system, text: "⚒ \(spec.summary): \(result.prefix(160))"))
+                self.client.sendToolOutput(callID: callID,
+                                           output: ["status": "ok", "result": result])
+                self.requestResponse("native-tool-\(name)")
+            }
+            return
+        }
+
         guard name == "dispatch_to_claude_code" else {
             client.sendToolOutput(callID: callID,
                                   output: ["status": "error", "reason": "Unknown tool \(name)."])

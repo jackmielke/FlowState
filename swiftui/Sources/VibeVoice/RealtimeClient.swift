@@ -1,4 +1,5 @@
 import Foundation
+import VibeVoiceCore
 
 enum ConnectionState: Equatable {
     case idle
@@ -89,7 +90,8 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
     }
 
     /// API-CONTRACT §"Session config" — note voice / turn_detection nest under `audio`.
-    func sendSessionUpdate(_ s: AppSettings) {
+    /// - Parameter nativeTools: realtime schemas for the tools the app answers itself.
+    func sendSessionUpdate(_ s: AppSettings, nativeTools: [[String: Any]] = []) {
         var input: [String: Any] = [
             "format": ["type": "audio/pcm", "rate": 24000],
             "noise_reduction": ["type": "near_field"],
@@ -119,8 +121,11 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
                 ]
             ]
         ]
-        if s.devMode {
-            session["tools"] = Self.devTools
+        // Native tools answer in milliseconds; Dev Mode's dispatcher is appended only
+        // when Dev Mode is on.
+        let tools = nativeTools + (s.devMode ? Self.devTools : [])
+        if !tools.isEmpty {
+            session["tools"] = tools
             session["tool_choice"] = "auto"
         }
         send(json: ["type": "session.update", "session": session])
