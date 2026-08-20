@@ -50,6 +50,13 @@ audio into Rust. It didn't. Inside the real Tauri webview: `getUserMedia` grante
 `backdrop-filter` / `color-mix` / `:has()` all supported. The `cpal` fallback stayed
 unused. Tauri gets Electron's architecture at a tenth of the footprint.
 
+## Decision (2026-08-19)
+
+**Electron is parked.** Swift is the chosen product; Tauri stays as the comparison point
+and the fallback if the native audio stack keeps biting. Electron's source stays in the
+repo for reference but is no longer maintained — its one advantage, Chromium's audio
+pipeline, Tauri also has at a tenth of the footprint.
+
 ## Recommendation
 
 **Tauri is the best engineering answer.** It gets browser-grade audio for free, like

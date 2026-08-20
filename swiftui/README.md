@@ -82,12 +82,41 @@ Sample rates are logged and shown in the UI footer at runtime, e.g.
   `input_image` conversation item.
 - Window corners: verified rounded on all four via the captured alpha channel.
 
+## Dev Mode — talk to your code
+
+Settings → **Dev Mode**, plus a repo path. When on, the model gets one tool,
+`dispatch_to_claude_code`, and can change code while you talk to it.
+
+How a turn actually runs:
+
+1. You say *"the CODING badge is too purple, tone it down"*.
+2. The model rewrites that into a complete instruction — Claude Code cannot hear the
+   conversation, so pronouns get resolved before dispatch.
+3. The tool returns **immediately** and the model says it's on it. Claude Code takes
+   minutes; blocking would leave the voice session in dead silence for the whole run.
+4. `claude -p --output-format json` runs in your repo, in the background.
+5. When it finishes, the result is filed as a new turn, so the model **announces the
+   outcome unprompted** — the real-time update, spoken.
+
+The `session_id` from each run is passed back with `--resume`, so one voice conversation
+is one Claude Code session. "Actually make that a bit faster" knows what "that" means.
+
+A **CODING** badge shows in the header while a task runs — with the voice loop idle for
+minutes, it is the only proof anything is still happening.
+
+**It runs with `--permission-mode acceptEdits`, so it writes files without asking.** That
+is the only way voice-driven coding flows, but a misheard sentence edits your code. Point
+it at a repo you can `git checkout`. Dev Mode is off by default, and one task runs at a
+time — the model will happily fire a second tool call while waiting, and two runs
+resuming the same session id would race.
+
 ## Known issues / not verified
 
-- **Speakers cause self-interruption.** Raw PCM through AVAudioEngine has no acoustic
-  echo cancellation, so the model's own voice re-enters the mic and server VAD reads it
-  as a barge-in. **Use headphones.** Fixing this properly means routing input through
-  a `kAudioUnitSubType_VoiceProcessingIO` audio unit — not done.
+- **Echo cancellation is on, but untested by ear.** `setVoiceProcessingEnabled` is
+  enabled on the input and output nodes and the signal path is verified end to end
+  (`Scripts/verify-full-duplex.swift`). Whether it actually stops the model hearing
+  itself over open speakers is a listening test that has not been run. Three silent
+  traps had to be cleared to get here — see the comments in `AudioEngine.start()`.
 - Screen Recording permission was already granted for this bundle ID on the dev machine;
   the **denied → explainer card → Open Privacy Settings** path is coded but was not
   exercised against an actual denial.

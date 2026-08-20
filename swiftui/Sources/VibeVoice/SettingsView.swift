@@ -61,7 +61,27 @@ struct SettingsView: View {
                             String(format: "every %.0fs", state.settings.screenInterval)) {
                                 state.syncScreenTimer()
                             }
-                        caption("When on, a frame is sent automatically and the header shows a WATCHING badge.")
+                        caption("Frames are filed silently as context, so it won't narrate every one. Ask about your screen whenever you like.")
+                    }
+
+                    section("Dev Mode") {
+                        HStack {
+                            Text("Let it edit code with Claude Code")
+                                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                            Spacer()
+                            NeatToggle(isOn: Binding(
+                                get: { state.settings.devMode },
+                                set: { state.settings.devMode = $0; state.applySettingsLive() }))
+                        }
+                        TextField("~/dev/vibe-voice", text: Binding(
+                            get: { state.settings.devRepo },
+                            set: { state.settings.devRepo = $0 }))
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(Theme.text)
+                            .padding(9)
+                            .surface(10)
+                        caption("Runs claude -p in that folder with --permission-mode acceptEdits, so it writes files without asking. Keep it on a repo you can git checkout.")
                     }
 
                     section("Turn detection") {

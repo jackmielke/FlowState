@@ -77,6 +77,8 @@ struct ContentView: View {
 
                 if state.isWatching { watchingPill }
 
+                if state.devTaskRunning { codingPill }
+
                 Spacer()
 
                 if let n = state.lastCaptureNote {
@@ -127,6 +129,21 @@ struct ContentView: View {
         .padding(.horizontal, 8).padding(.vertical, 4)
         .background(Capsule().fill(Theme.accent.opacity(0.92)))
         .modifier(PulseIf(active: true))
+    }
+
+    /// Claude Code runs for minutes with the voice loop idle, so this is the only
+    /// on-screen proof that something is still happening.
+    private var codingPill: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "curlybraces").font(.system(size: 8.5))
+            Text("CODING")
+                .font(.system(size: 9.5, weight: .bold, design: .rounded)).tracking(0.8)
+        }
+        .foregroundStyle(Color.white.opacity(0.92))
+        .padding(.horizontal, 8).padding(.vertical, 4)
+        .background(Capsule().fill(Color.purple.opacity(0.75)))
+        .modifier(PulseIf(active: true))
+        .help(state.devTaskSummary ?? "Claude Code is working")
     }
 
     private var pillColor: Color {

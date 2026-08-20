@@ -28,6 +28,7 @@ enum RealtimeEvent {
     case audio(Data)
     case apiError(String)
     case closed(String)
+    case toolCall(callID: String, name: String, argumentsJSON: String)
 }
 
 /// WebSocket transport for the realtime API (API-CONTRACT §2b).
@@ -99,22 +100,85 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
         if s.transcribeUser {
             input["transcription"] = ["model": "gpt-4o-mini-transcribe"]
         }
-        send(json: [
-            "type": "session.update",
-            "session": [
-                "type": "realtime",
-                "instructions": s.systemPrompt,
-                "output_modalities": ["audio"],
-                "audio": [
-                    "input": input,
-                    "output": [
-                        "format": ["type": "audio/pcm", "rate": 24000],
-                        "voice": s.voice,
-                        "speed": s.speed
-                    ]
+        var session: [String: Any] = [
+            "type": "realtime",
+            "instructions": s.devMode ? s.systemPrompt + "\n\n" + Self.devModeInstructions(repo: s.devRepo)
+                                      : s.systemPrompt,
+            "output_modalities": ["audio"],
+            "audio": [
+                "input": input,
+                "output": [
+                    "format": ["type": "audio/pcm", "rate": 24000],
+                    "voice": s.voice,
+                    "speed": s.speed
                 ]
             ]
+        ]
+        if s.devMode {
+            session["tools"] = Self.devTools
+            session["tool_choice"] = "auto"
+        }
+        send(json: ["type": "session.update", "session": session])
+    }
+
+    // MARK: - Dev Mode tools
+
+    static func devModeInstructions(repo: String) -> String {
+        """
+        DEV MODE is on. You can change code on this Mac by calling dispatch_to_claude_code.
+        The working repo is \(repo).
+
+        Claude Code cannot hear this conversation, so `task` must be a complete,
+        self-contained instruction — resolve "that", "it" and "the thing we just did"
+        into explicit words before sending.
+
+        Dispatching returns immediately, before the work is finished. Say briefly that
+        you're on it, then STOP and wait. The result arrives later as a system message;
+        summarise it in one or two sentences when it does. Never invent a result, and
+        never read code aloud.
+        """
+    }
+
+    static let devTools: [[String: Any]] = [[
+        "type": "function",
+        "name": "dispatch_to_claude_code",
+        "description": "Send a coding task to Claude Code on the user's Mac. Use whenever the user asks to change, build, fix, explain or inspect code. Returns immediately; the result arrives later.",
+        "parameters": [
+            "type": "object",
+            "properties": [
+                "task": [
+                    "type": "string",
+                    "description": "A complete, self-contained instruction. No pronouns referring to the conversation."
+                ]
+            ],
+            "required": ["task"]
+        ]
+    ]]
+
+    /// Answers a tool call. `requestResponse` false lets the model speak without
+    /// waiting for a second turn to be forced.
+    func sendToolOutput(callID: String, output: [String: Any], requestResponse: Bool = true) {
+        let json = (try? JSONSerialization.data(withJSONObject: output)).flatMap {
+            String(data: $0, encoding: .utf8)
+        } ?? "{}"
+        send(json: [
+            "type": "conversation.item.create",
+            "item": ["type": "function_call_output", "call_id": callID, "output": json]
         ])
+        if requestResponse { send(json: ["type": "response.create"]) }
+    }
+
+    /// Files a note as context and asks the model to speak it. Used to announce a
+    /// long-running Claude Code task finishing, without blocking the voice loop.
+    func sendSystemNote(_ text: String, requestResponse: Bool = true) {
+        send(json: [
+            "type": "conversation.item.create",
+            "item": [
+                "type": "message", "role": "user",
+                "content": [["type": "input_text", "text": text]]
+            ]
+        ])
+        if requestResponse { send(json: ["type": "response.create"]) }
     }
 
     func appendAudio(_ pcm16: Data) {
@@ -123,7 +187,11 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
     }
 
     /// API-CONTRACT §3 — image as a conversation item, then ask for a response.
-    func sendImage(dataURI: String, prompt: String) {
+    /// - Parameter requestResponse: when false the frame is added as silent context and
+    ///   the model is NOT asked to reply. Continuous mode must use false: `response.create`
+    ///   compels a response, so asking the model to "only speak up if something changed"
+    ///   while also forcing a turn just makes it narrate "no meaningful change" forever.
+    func sendImage(dataURI: String, prompt: String, requestResponse: Bool = true) {
         send(json: [
             "type": "conversation.item.create",
             "item": [
@@ -135,7 +203,9 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
                 ]
             ]
         ])
-        send(json: ["type": "response.create"])
+        if requestResponse {
+            send(json: ["type": "response.create"])
+        }
     }
 
     func cancelResponse() { send(json: ["type": "response.cancel"]) }
@@ -194,6 +264,13 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
         case "response.output_audio.delta", "response.audio.delta":
             if let b64 = obj["delta"] as? String, let pcm = Data(base64Encoded: b64) {
                 emit(.audio(pcm))
+            }
+
+        case "response.function_call_arguments.done":
+            if let callID = obj["call_id"] as? String {
+                emit(.toolCall(callID: callID,
+                               name: (obj["name"] as? String) ?? "",
+                               argumentsJSON: (obj["arguments"] as? String) ?? "{}"))
             }
 
         case "response.done":

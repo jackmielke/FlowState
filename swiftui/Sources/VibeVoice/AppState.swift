@@ -25,10 +25,13 @@ final class AppState: ObservableObject {
     @Published var showSettings = false
     @Published var lastCaptureNote: String?
     @Published var sessionID: String?
+    @Published var devTaskRunning = false
+    @Published var devTaskSummary: String?
 
     let audio = AudioEngine()
     let settingsStore = SettingsStore()
     private let client = RealtimeClient()
+    private let claude = ClaudeCode()
     private var screenTimer: Timer?
     private var assistantIndex: Int?
     private var responseActive = false
@@ -160,6 +163,9 @@ final class AppState: ObservableObject {
         case .audio(let pcm):
             audio.enqueue(pcm16: pcm)
 
+        case .toolCall(let callID, let name, let argumentsJSON):
+            handleToolCall(callID: callID, name: name, argumentsJSON: argumentsJSON)
+
         case .apiError(let msg):
             banner = msg
             note("API error: \(msg)")
@@ -172,6 +178,62 @@ final class AppState: ObservableObject {
             }
             audio.stop()
             stopScreenTimer()
+        }
+    }
+
+    // MARK: - Dev Mode
+
+    /// Answers the tool call IMMEDIATELY, then does the work in the background.
+    ///
+    /// Claude Code routinely takes minutes. Blocking here would leave the voice session
+    /// in dead silence for the whole run — so the model is told "dispatched" right away
+    /// (it says "on it"), and the finished result is filed later as a new turn, which
+    /// makes it announce the outcome unprompted.
+    private func handleToolCall(callID: String, name: String, argumentsJSON: String) {
+        guard settings.devMode else {
+            client.sendToolOutput(callID: callID,
+                                  output: ["status": "refused", "reason": "Dev Mode is off."])
+            return
+        }
+        guard name == "dispatch_to_claude_code" else {
+            client.sendToolOutput(callID: callID,
+                                  output: ["status": "error", "reason": "Unknown tool \(name)."])
+            return
+        }
+
+        let args = (try? JSONSerialization.jsonObject(with: Data(argumentsJSON.utf8))) as? [String: Any]
+        let task = (args?["task"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !task.isEmpty else {
+            client.sendToolOutput(callID: callID,
+                                  output: ["status": "error", "reason": "Empty task."])
+            return
+        }
+
+        let repo = settings.devRepo
+        devTaskRunning = true
+        devTaskSummary = String(task.prefix(120))
+        transcript.append(TranscriptItem(speaker: .system, text: "→ Claude Code: \(task)"))
+
+        client.sendToolOutput(callID: callID, output: [
+            "status": "dispatched",
+            "note": "Work has started in \(repo). Tell the user you're on it in a few words, then wait for the result."
+        ])
+
+        Task { [weak self] in
+            guard let self else { return }
+            let r = await self.claude.run(task: task, repo: repo)
+            await MainActor.run {
+                self.devTaskRunning = false
+                self.devTaskSummary = nil
+                let cost = r.costUSD.map { String(format: " ($%.2f)", $0) } ?? ""
+                self.transcript.append(TranscriptItem(
+                    speaker: .system,
+                    text: (r.ok ? "✓ Claude Code" : "✗ Claude Code") + cost + ": " + r.text))
+                let note = r.ok
+                    ? "[Claude Code finished the task. Result: \(r.text)] Tell the user what changed, in one or two sentences."
+                    : "[Claude Code FAILED. Error: \(r.text)] Tell the user it failed and why, briefly."
+                self.client.sendSystemNote(note)
+            }
         }
     }
 
@@ -200,10 +262,12 @@ final class AppState: ObservableObject {
         do {
             let frame = try await ScreenCapture.capture()
             screenPermissionDenied = false
+            // Auto frames are context, not questions. They are filed silently so the
+            // model simply knows what is on screen when you next speak to it.
             let prompt = auto
-                ? "This is my screen right now. Only speak up if something meaningfully changed or if I asked you to watch for something."
+                ? "[Screen update — context only. Do not reply to this.]"
                 : "Here's my screen. What do you see?"
-            client.sendImage(dataURI: frame.dataURI, prompt: prompt)
+            client.sendImage(dataURI: frame.dataURI, prompt: prompt, requestResponse: !auto)
             transcript.append(TranscriptItem(
                 speaker: .user,
                 text: auto ? "Screen frame (auto)" : "Sent a screenshot",

@@ -21,6 +21,12 @@ struct AppSettings: Codable, Equatable {
     var vadThreshold: Double = 0.5        // 0...1
     var silenceDurationMs: Double = 500   // 200...1500
     var transcribeUser: Bool = true
+
+    /// Dev Mode — lets the model dispatch coding tasks to headless Claude Code.
+    /// Off by default: it edits files with `--permission-mode acceptEdits`, so a
+    /// misheard sentence can change your code.
+    var devMode: Bool = false
+    var devRepo: String = "~/dev/vibe-voice"
 }
 
 @MainActor
