@@ -2,45 +2,45 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>
-    <string>VibeVoice</string>
-    <key>CFBundleDisplayName</key>
-    <string>Vibe Voice</string>
-    <key>CFBundleExecutable</key>
-    <string>VibeVoice</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.jackmielke.vibevoice</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSSupportsAutomaticGraphicsSwitching</key>
-    <true/>
-    <key>LSApplicationCategoryType</key>
-    <string>public.app-category.productivity</string>
-    	<key>NSCalendarsFullAccessUsageDescription</key>
+	<key>CFBundleDisplayName</key>
+	<string>Flow</string>
+	<key>CFBundleExecutable</key>
+	<string>VibeVoice</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.jackmielke.vibevoice</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Flow</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Not used.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
 	<string>Vibe Voice reads your calendar so you can ask what is coming up.</string>
 	<key>NSCalendarsUsageDescription</key>
 	<string>Vibe Voice reads your calendar so you can ask what is coming up.</string>
-<key>NSMicrophoneUsageDescription</key>
-    <string>Vibe Voice uses your microphone so you can talk to the realtime model.</string>
-    <key>NSCameraUsageDescription</key>
-    <string>Not used.</string>
-    <key>NSAppleEventsUsageDescription</key>
-    <string>Not used.</string>
-    <key>NSScreenCaptureUsageDescription</key>
-    <string>Vibe Voice captures your screen so the model can see what you are looking at.</string>
-    <key>NSHumanReadableCopyright</key>
-    <string>Local-only. No telemetry.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Not used.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Local-only. No telemetry.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Vibe Voice uses your microphone so you can talk to the realtime model.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Vibe Voice captures your screen so the model can see what you are looking at.</string>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
 </dict>
 </plist>

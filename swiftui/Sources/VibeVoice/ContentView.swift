@@ -35,14 +35,24 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            VisualEffectBackground()
+            if state.settings.backdrop == .midnight || state.settings.backdrop == .paper {
+                VisualEffectBackground()
             LinearGradient(colors: [Theme.bg.opacity(0.94), Theme.bg.opacity(0.99)],
                            startPoint: .top, endPoint: .bottom)
             // faint accent wash from the top-left, so the flat field — near-black or
             // paper, depending on the theme — never reads as dead
             RadialGradient(colors: [accentForMode.opacity(0.10), .clear],
-                           center: .init(x: 0.28, y: 0.18), startRadius: 0, endRadius: 620)
-                .animation(.easeInOut(duration: 0.6), value: mode)
+                               center: .init(x: 0.28, y: 0.18), startRadius: 0, endRadius: 620)
+                    .animation(.easeInOut(duration: 0.6), value: mode)
+            } else {
+                BackdropView(backdrop: state.settings.backdrop,
+                             imagePath: state.settings.backdropImagePath,
+                             energy: Double(orbLevel))
+                // Keep the mode tint, so the room still shifts colour when Vibe speaks.
+                RadialGradient(colors: [accentForMode.opacity(0.14), .clear],
+                               center: .init(x: 0.28, y: 0.18), startRadius: 0, endRadius: 620)
+                    .animation(.easeInOut(duration: 0.6), value: mode)
+            }
 
             VStack(spacing: 0) {
                 header
@@ -75,7 +85,7 @@ struct ContentView: View {
                                              startPoint: .top, endPoint: .bottom))
                         .frame(width: 9, height: 9)
                         .shadow(color: Theme.accent.opacity(0.7), radius: 6)
-                    Text("VIBE VOICE")
+                    Text("FLOW")
                         .font(.system(size: 11.5, weight: .bold, design: .rounded))
                         .tracking(2.0)
                         .foregroundStyle(Theme.text.opacity(0.92))

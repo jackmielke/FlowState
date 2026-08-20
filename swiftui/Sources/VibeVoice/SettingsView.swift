@@ -30,6 +30,57 @@ struct SettingsView: View {
                                 : "Pinned to \(state.settings.appearance.label.lowercased()), whatever macOS is set to. Saved with the rest of your settings.")
                     }
 
+                    section("Backdrop") {
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4),
+                                  spacing: 8) {
+                            ForEach(Backdrop.allCases) { b in
+                                Button {
+                                    if b == .custom {
+                                        if let path = BackdropPicker.chooseImage() {
+                                            state.settings.backdropImagePath = path
+                                            state.settings.backdrop = .custom
+                                        }
+                                    } else {
+                                        state.settings.backdrop = b
+                                    }
+                                } label: {
+                                    VStack(spacing: 5) {
+                                        ZStack {
+                                            if b == .custom {
+                                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                                    .fill(Theme.fill)
+                                                Image(systemName: "photo")
+                                                    .font(.system(size: 13))
+                                                    .foregroundStyle(Theme.textDim)
+                                            } else {
+                                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                                    .fill(LinearGradient(colors: b.colors,
+                                                                         startPoint: .topLeading,
+                                                                         endPoint: .bottomTrailing))
+                                            }
+                                        }
+                                        .frame(height: 40)
+                                        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            .stroke(state.settings.backdrop == b
+                                                    ? Theme.accent : Theme.hairline,
+                                                    lineWidth: state.settings.backdrop == b ? 2 : 1))
+                                        Text(b.label)
+                                            .font(.system(size: 10.5))
+                                            .foregroundStyle(state.settings.backdrop == b
+                                                             ? Theme.text : Theme.textDim)
+                                            .lineLimit(1)
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        caption(state.settings.backdrop.blurb
+                                + (state.settings.backdrop == .custom && !state.settings.backdropImagePath.isEmpty
+                                   ? " — " + ((state.settings.backdropImagePath as NSString).lastPathComponent)
+                                   : ""))
+                        caption("The places are painted rather than photographed, so they stay sharp at any size and add nothing to the app's two megabytes.")
+                    }
+
                     section("Voice") {
                         ChipPicker(options: kVoices, selection: binding(\.voice), columns: 5)
                         caption("marin and cedar are the newest and best.")

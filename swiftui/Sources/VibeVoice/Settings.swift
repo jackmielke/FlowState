@@ -73,12 +73,17 @@ struct AppSettings: Codable, Equatable {
     /// choice is restored on launch.
     var appearance: AppearanceMode = .system
 
+    /// The scene behind the orb. Midnight and Paper follow the existing theme; the place
+    /// presets and a custom photo are painted by `BackdropView`.
+    var backdrop: Backdrop = .midnight
+    var backdropImagePath: String = ""
+
     enum CodingKeys: String, CodingKey {
         case voice, model, systemPrompt, speed, continuousScreen, screenInterval
         case vadThreshold, silenceDurationMs, transcribeUser, devMode, devRepo
         case maxScreenFrames, screenshotSize, qualityMode, appearance, screenDisplayID
         case devNarrate, devNarrateInterval, devNarrateMax, devPermissionMode
-        case disabledTools
+        case disabledTools, backdrop, backdropImagePath
     }
 }
 
@@ -120,6 +125,8 @@ extension AppSettings {
         screenshotSize    = v(.screenshotSize, d.screenshotSize)
         qualityMode       = v(.qualityMode, d.qualityMode)
         appearance        = v(.appearance, d.appearance)
+        backdrop          = v(.backdrop, d.backdrop)
+        backdropImagePath = v(.backdropImagePath, d.backdropImagePath)
     }
 }
 
