@@ -21,6 +21,15 @@ struct SettingsView: View {
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 26) {
 
+                    section("Appearance") {
+                        AppearancePicker(mode: Binding(
+                            get: { state.settings.appearance },
+                            set: { state.settings.appearance = $0; $0.applyToApp() }))
+                        caption(state.settings.appearance == .system
+                                ? "Following macOS — the app flips with your desktop, including on an Auto schedule."
+                                : "Pinned to \(state.settings.appearance.label.lowercased()), whatever macOS is set to. Saved with the rest of your settings.")
+                    }
+
                     section("Voice") {
                         ChipPicker(options: kVoices, selection: binding(\.voice), columns: 5)
                         caption("marin and cedar are the newest and best.")
@@ -58,9 +67,9 @@ struct SettingsView: View {
                                             RoundedRectangle(cornerRadius: 9, style: .continuous)
                                                 .fill(state.settings.qualityMode == m
                                                       ? Theme.accent.opacity(0.9)
-                                                      : Color.white.opacity(0.06)))
+                                                      : Theme.fill))
                                         .foregroundStyle(state.settings.qualityMode == m
-                                                         ? Color.black.opacity(0.85) : Theme.text)
+                                                         ? Theme.onAccent : Theme.text)
                                 }
                                 .buttonStyle(.plain)
                             }
@@ -142,7 +151,7 @@ struct SettingsView: View {
                     }
 
                     Button("Apply to live session") { state.applySettingsLive() }
-                        .buttonStyle(GhostButtonStyle(tint: Theme.accent))
+                        .buttonStyle(GhostButtonStyle(tint: Theme.accentInk))
                         .opacity(state.connection == .live ? 1 : 0.4)
                         .disabled(state.connection != .live)
                 }
@@ -151,6 +160,9 @@ struct SettingsView: View {
         }
         .frame(width: 440, height: 620)
         .background(Theme.bg)
+        // The sheet is its own AppKit window; without this it can render one frame
+        // behind the main window after a theme switch.
+        .preferredColorScheme(state.settings.appearance.colorScheme)
     }
 
     private func binding<T>(_ kp: WritableKeyPath<AppSettings, T>) -> Binding<T> {

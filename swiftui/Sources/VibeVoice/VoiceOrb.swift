@@ -3,18 +3,33 @@ import SwiftUI
 enum OrbMode {
     case idle, listening, speaking, connecting, error
 
-    var palette: [Color] {
+    /// The neutral modes need their own light values: a mid-grey that reads as
+    /// "resting" against near-black reads as "smudge" against paper.
+    func palette(light: Bool) -> [Color] {
         switch self {
-        case .idle:       return [Color(red: 0.52, green: 0.50, blue: 0.55),
-                                  Color(red: 0.30, green: 0.28, blue: 0.34),
-                                  Color(red: 0.38, green: 0.28, blue: 0.22)]
+        case .idle:
+            return light
+                ? [Color(red: 0.46, green: 0.44, blue: 0.52),
+                   Color(red: 0.32, green: 0.30, blue: 0.38),
+                   Color(red: 0.52, green: 0.36, blue: 0.24)]
+                : [Color(red: 0.52, green: 0.50, blue: 0.55),
+                   Color(red: 0.30, green: 0.28, blue: 0.34),
+                   Color(red: 0.38, green: 0.28, blue: 0.22)]
         case .listening:  return [Theme.accentSoft, Theme.accent, Theme.accentDeep]
         case .speaking:   return [Theme.voice, Theme.voiceDeep, Color(red: 0.30, green: 0.55, blue: 0.95)]
-        case .connecting: return [Color(red: 0.65, green: 0.68, blue: 0.78), Color(red: 0.36, green: 0.40, blue: 0.52)]
+        case .connecting:
+            return light
+                ? [Color(red: 0.46, green: 0.50, blue: 0.64), Color(red: 0.28, green: 0.32, blue: 0.46)]
+                : [Color(red: 0.65, green: 0.68, blue: 0.78), Color(red: 0.36, green: 0.40, blue: 0.52)]
         case .error:      return [Theme.bad, Color(red: 0.55, green: 0.16, blue: 0.20)]
         }
     }
 }
+
+/// Clamp, and pin the type: the drawing math is all CGFloat, `Color.opacity` wants a
+/// Double, and letting the implicit bridge sort that out inside a nested gradient
+/// literal is how you get a type-checker timeout instead of an error.
+private func alpha(_ x: CGFloat) -> Double { Double(min(1, max(0, x))) }
 
 /// The centerpiece. Every radius here is driven by real RMS from the audio
 /// buffers — nothing is on a decorative timer except the slow rotation.
@@ -23,37 +38,51 @@ struct VoiceOrb: View {
     /// 0…1, already smoothed. Real amplitude.
     var level: Float
 
+    @Environment(\.colorScheme) private var scheme
+
     var body: some View {
+        let light = scheme == .light
         TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { tl in
             let t = tl.date.timeIntervalSinceReferenceDate
             Canvas { ctx, size in
-                draw(ctx: &ctx, size: size, t: t)
+                draw(ctx: &ctx, size: size, t: t, light: light)
             }
             .allowsHitTesting(false)
         }
     }
 
-    private func draw(ctx: inout GraphicsContext, size: CGSize, t: TimeInterval) {
+    private func draw(ctx: inout GraphicsContext, size: CGSize, t: TimeInterval, light: Bool) {
         let c = CGPoint(x: size.width / 2, y: size.height / 2)
         let unit = min(size.width, size.height) / 2
         // Perceptual boost — raw RMS is tiny for speech.
         let lv = CGFloat(min(1, pow(Double(level) * 6.0, 0.75)))
-        let colors = mode.palette
+        let colors = mode.palette(light: light)
         let base = unit * (0.40 + 0.10 * lv)
         let breathe = 1 + 0.025 * CGFloat(sin(t * 1.1))
+
+        // Additive light is the whole idea on a near-black stage; on paper it just
+        // bleaches out. Subtractive ink is its mirror image — same shapes, same
+        // build-up where the blobs overlap, but it darkens instead of brightens.
+        let mix: GraphicsContext.BlendMode = light ? .multiply : .plusLighter
+        // Ink builds up where additive light would have; the bloom, which has nothing
+        // to build up against, goes the other way and backs off.
+        let inkBoost: CGFloat = light ? 1.25 : 1.0
+        let bloomScale: CGFloat = light ? 0.55 : 1.0
+        let ringBoost: CGFloat = light ? 2.2 : 1.0
 
         // 1 — ambient bloom
         let bloomR = unit * (0.95 + 0.35 * lv)
         ctx.fill(
             Path(ellipseIn: CGRect(x: c.x - bloomR, y: c.y - bloomR, width: bloomR * 2, height: bloomR * 2)),
             with: .radialGradient(
-                Gradient(colors: [colors[0].opacity(0.34 + 0.30 * lv), colors[min(1, colors.count - 1)].opacity(0.08), .clear]),
+                Gradient(colors: [colors[0].opacity(alpha((0.34 + 0.30 * lv) * bloomScale)),
+                                  colors[min(1, colors.count - 1)].opacity(0.08), .clear]),
                 center: c, startRadius: 0, endRadius: bloomR))
 
-        // 2 — soft harmonic blobs, additively blended
+        // 2 — soft harmonic blobs
         var layer = ctx
         layer.addFilter(.blur(radius: unit * 0.09))
-        layer.blendMode = .plusLighter
+        layer.blendMode = mix
         let specs: [(lobes: Int, speed: Double, amp: CGFloat, scale: CGFloat, ci: Int)] = [
             (3, 0.31, 0.16, 1.10, 0),
             (5, -0.24, 0.12, 0.95, min(1, colors.count - 1)),
@@ -66,13 +95,13 @@ struct VoiceOrb: View {
                          amp: s.amp * (0.30 + 1.7 * lv),
                          phase: t * s.speed)
             layer.fill(p, with: .radialGradient(
-                Gradient(colors: [colors[s.ci].opacity(0.55), colors[s.ci].opacity(0.05)]),
+                Gradient(colors: [colors[s.ci].opacity(alpha(0.55 * inkBoost)), colors[s.ci].opacity(0.05)]),
                 center: c, startRadius: base * 0.15, endRadius: base * s.scale * 1.25))
         }
 
         // 3 — crisp contour
         var edge = ctx
-        edge.blendMode = .plusLighter
+        edge.blendMode = mix
         let ring = blob(center: c, radius: base * 1.16 * breathe, lobes: 3,
                         amp: 0.10 * (0.30 + 1.7 * lv), phase: t * 0.31)
         edge.stroke(ring, with: .linearGradient(
@@ -87,7 +116,7 @@ struct VoiceOrb: View {
             var ring2 = Path()
             ring2.addEllipse(in: CGRect(x: c.x - rr, y: c.y - rr, width: rr * 2, height: rr * 2))
             edge.stroke(ring2,
-                        with: .color(colors[i % colors.count].opacity(0.055 + 0.05 * lv)),
+                        with: .color(colors[i % colors.count].opacity(alpha((0.055 + 0.05 * lv) * ringBoost))),
                         lineWidth: 0.7)
         }
 
@@ -99,20 +128,24 @@ struct VoiceOrb: View {
                         lineWidth: 0.8)
         }
 
-        // 5 — core
+        // 5 — core. Light mode paints the same hot centre with normal blending, so
+        // the white still lands as a highlight on top of the inked blobs rather than
+        // multiplying away to nothing.
         let coreR = base * (0.44 + 0.16 * lv)
         var core = ctx
-        core.blendMode = .plusLighter
+        core.blendMode = light ? .normal : .plusLighter
         core.fill(
             Path(ellipseIn: CGRect(x: c.x - coreR, y: c.y - coreR, width: coreR * 2, height: coreR * 2)),
             with: .radialGradient(
-                Gradient(colors: [.white.opacity(0.72 + 0.24 * lv), colors[0].opacity(0.75), colors[colors.count - 1].opacity(0.0)]),
+                Gradient(colors: [.white.opacity(alpha(0.72 + 0.24 * lv)),
+                                  colors[0].opacity(light ? 0.30 : 0.75),
+                                  colors[colors.count - 1].opacity(0.0)]),
                 center: CGPoint(x: c.x - coreR * 0.18, y: c.y - coreR * 0.22),
                 startRadius: 0, endRadius: coreR * 1.5))
 
         // 6 — orbiting sparks
         var sparks = ctx
-        sparks.blendMode = .plusLighter
+        sparks.blendMode = mix
         let n = 22
         for i in 0..<n {
             let f = Double(i) / Double(n)
@@ -121,7 +154,7 @@ struct VoiceOrb: View {
             let p = CGPoint(x: c.x + cos(ang) * rr, y: c.y + sin(ang) * rr)
             let d = 1.0 + 2.2 * CGFloat(lv) * CGFloat(abs(sin(f * 7 + t)))
             sparks.fill(Path(ellipseIn: CGRect(x: p.x - d, y: p.y - d, width: d * 2, height: d * 2)),
-                        with: .color(colors[i % colors.count].opacity(0.18 + 0.5 * lv)))
+                        with: .color(colors[i % colors.count].opacity(alpha((0.18 + 0.5 * lv) * inkBoost))))
         }
     }
 

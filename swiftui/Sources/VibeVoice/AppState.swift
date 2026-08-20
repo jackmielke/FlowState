@@ -34,6 +34,10 @@ final class AppState: ObservableObject {
     private let client = RealtimeClient()
     private let claude = ClaudeCode()
     private var frameItemIDs: [String] = []
+    /// A response.create sent while one is already running is rejected outright
+    /// ("Conversation already has an active response in progress"). Requests made
+    /// during a live response are deferred to response.done instead of dropped.
+    private var pendingResponse = false
     private var screenTimer: Timer?
     private var assistantIndex: Int?
     private var responseActive = false
@@ -163,6 +167,10 @@ final class AppState: ObservableObject {
         case .assistantDone:
             responseActive = false
             closeAssistantTurn()
+            if pendingResponse {
+                pendingResponse = false
+                client.createResponse()
+            }
 
         case .audio(let pcm):
             audio.enqueue(pcm16: pcm)
@@ -202,6 +210,11 @@ final class AppState: ObservableObject {
 
     // MARK: - Dev Mode
 
+    /// Asks for a spoken turn, waiting for any in-flight response to finish first.
+    private func requestResponseSoon() {
+        if responseActive { pendingResponse = true } else { client.createResponse() }
+    }
+
     /// Answers the tool call IMMEDIATELY, then does the work in the background.
     ///
     /// Claude Code routinely takes minutes. Blocking here would leave the voice session
@@ -211,12 +224,16 @@ final class AppState: ObservableObject {
     private func handleToolCall(callID: String, name: String, argumentsJSON: String) {
         guard settings.devMode else {
             client.sendToolOutput(callID: callID,
-                                  output: ["status": "refused", "reason": "Dev Mode is off."])
+                                  output: ["status": "refused", "reason": "Dev Mode is off."],
+                                  requestResponse: false)
+            requestResponseSoon()
             return
         }
         guard name == "dispatch_to_claude_code" else {
             client.sendToolOutput(callID: callID,
-                                  output: ["status": "error", "reason": "Unknown tool \(name)."])
+                                  output: ["status": "error", "reason": "Unknown tool \(name)."],
+                                  requestResponse: false)
+            requestResponseSoon()
             return
         }
 
@@ -224,7 +241,9 @@ final class AppState: ObservableObject {
         let task = (args?["task"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !task.isEmpty else {
             client.sendToolOutput(callID: callID,
-                                  output: ["status": "error", "reason": "Empty task."])
+                                  output: ["status": "error", "reason": "Empty task."],
+                                  requestResponse: false)
+            requestResponseSoon()
             return
         }
 
@@ -233,14 +252,20 @@ final class AppState: ObservableObject {
         devTaskSummary = String(task.prefix(120))
         transcript.append(TranscriptItem(speaker: .system, text: "→ Claude Code: \(task)"))
 
+        // The response that produced this tool call is still active, so the reply must
+        // be queued rather than requested now.
         client.sendToolOutput(callID: callID, output: [
             "status": "dispatched",
             "note": "Work has started in \(repo). Tell the user you're on it in a few words, then wait for the result."
-        ])
+        ], requestResponse: false)
+        requestResponseSoon()
 
         Task { [weak self] in
             guard let self else { return }
-            let r = await self.claude.run(task: task, repo: repo)
+            let r = await self.claude.run(task: task, repo: repo) { label in
+                // Fires on a background executor as Claude Code works.
+                Task { @MainActor [weak self] in self?.appendDevStep(label) }
+            }
             await MainActor.run {
                 self.devTaskRunning = false
                 self.devTaskSummary = nil
@@ -252,9 +277,19 @@ final class AppState: ObservableObject {
                 let note = r.ok
                     ? "[Claude Code finished the task. Result: \(r.text)] Tell the user what changed, in one or two sentences."
                     : "[Claude Code FAILED. Error: \(r.text)] Tell the user it failed and why, briefly."
-                self.client.sendSystemNote(note)
+                self.client.sendSystemNote(note, requestResponse: false)
+                self.requestResponseSoon()
             }
         }
+    }
+
+    /// Appends one live Claude Code step to the transcript, collapsing consecutive
+    /// duplicates so a tool called repeatedly does not spam the view.
+    private func appendDevStep(_ label: String) {
+        devTaskSummary = label
+        let line = "   · " + label
+        if let last = transcript.last, last.speaker == .system, last.text == line { return }
+        transcript.append(TranscriptItem(speaker: .system, text: line))
     }
 
     private func closeAssistantTurn() {

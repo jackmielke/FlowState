@@ -35,6 +35,49 @@ struct AppSettings: Codable, Equatable {
     var screenshotSize: Int = 1280
 
     var qualityMode: QualityMode = .quality
+
+    /// Dark / light / follow-the-system. Persisted like everything else here, so the
+    /// choice is restored on launch.
+    var appearance: AppearanceMode = .system
+
+    enum CodingKeys: String, CodingKey {
+        case voice, model, systemPrompt, speed, continuousScreen, screenInterval
+        case vadThreshold, silenceDurationMs, transcribeUser, devMode, devRepo
+        case maxScreenFrames, screenshotSize, qualityMode, appearance
+    }
+}
+
+extension AppSettings {
+    /// Hand-rolled so a missing key falls back to its default instead of throwing.
+    ///
+    /// The synthesised decoder does *not* use property defaults for absent keys, and
+    /// `SettingsStore` decodes with `try?` — so adding a field to this struct would
+    /// silently reset every existing user's whole settings file on first launch.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = AppSettings()
+        // Missing key OR a value of the wrong shape both fall back, so one bad field
+        // can never cost the user the other fourteen.
+        func v<T: Decodable>(_ k: CodingKeys, _ fallback: T) -> T {
+            guard let found = try? c.decodeIfPresent(T.self, forKey: k) else { return fallback }
+            return found ?? fallback
+        }
+        voice             = v(.voice, d.voice)
+        model             = v(.model, d.model)
+        systemPrompt      = v(.systemPrompt, d.systemPrompt)
+        speed             = v(.speed, d.speed)
+        continuousScreen  = v(.continuousScreen, d.continuousScreen)
+        screenInterval    = v(.screenInterval, d.screenInterval)
+        vadThreshold      = v(.vadThreshold, d.vadThreshold)
+        silenceDurationMs = v(.silenceDurationMs, d.silenceDurationMs)
+        transcribeUser    = v(.transcribeUser, d.transcribeUser)
+        devMode           = v(.devMode, d.devMode)
+        devRepo           = v(.devRepo, d.devRepo)
+        maxScreenFrames   = v(.maxScreenFrames, d.maxScreenFrames)
+        screenshotSize    = v(.screenshotSize, d.screenshotSize)
+        qualityMode       = v(.qualityMode, d.qualityMode)
+        appearance        = v(.appearance, d.appearance)
+    }
 }
 
 enum QualityMode: String, Codable, CaseIterable {

@@ -65,6 +65,7 @@ RESULT: transport OK — no audio devices were opened.
 | Screen | ScreenCaptureKit — `SCShareableContent` + `SCContentFilter` + `SCScreenshotManager.captureImage`, downscaled to 1280px wide, JPEG q0.7, sent as a `data:` URI per contract §3 |
 | Hotkey | Carbon `RegisterEventHotKey` for ⌘⇧2 (no Accessibility permission needed) |
 | Settings | JSON at `~/Library/Application Support/VibeVoice/settings.json` |
+| Theme | One `Theme` token = one dynamic `NSColor`, resolved per effective appearance (`Theme.swift`) |
 | Window | `.titled` + `fullSizeContentView` + transparent titlebar + `NSVisualEffectView`. `.titled` is kept deliberately — dropping it is what loses the system corner rounding. |
 
 Sample rates are logged and shown in the UI footer at runtime, e.g.
@@ -81,6 +82,37 @@ Sample rates are logged and shown in the UI footer at runtime, e.g.
 - ScreenCaptureKit capture: 1280×831 JPEG, ~126 KB, accepted by the model as an
   `input_image` conversation item.
 - Window corners: verified rounded on all four via the captured alpha channel.
+
+## Theme — dark, light, or whatever macOS is doing
+
+Three choices: **System** (the default), **Light**, **Dark**. Pick one from any of:
+
+- the sun/moon button in the header — one click steps System → Light → Dark, and the
+  icon is always the mode you are currently in;
+- **Settings → Appearance**, which shows all three at once;
+- the **View** menu — ⌥⌘1 System, ⌥⌘2 Light, ⌥⌘3 Dark.
+
+All three write the same field, so they stay in sync. The choice is saved to
+`settings.json` alongside voice and model, and is restored on launch.
+
+**System is live, not a snapshot.** It sets `NSApp.appearance = nil`, which hands control
+back to macOS — so the app flips with the desktop, including partway through a session
+on an Auto/sunset schedule. Light and Dark pin `.aqua` / `.darkAqua` and ignore the
+system entirely.
+
+How it works: every colour in `Theme.swift` is one token with two values, built as a
+dynamic `NSColor` that AppKit resolves *at draw time* against whichever appearance is
+in effect. Nothing observes a notification and nothing gets recomputed on a flip. Two
+consequences worth knowing:
+
+- Tokens come in **fill** and **ink** pairs — `accent` vs `accentInk`, `bad` vs `badInk`.
+  A fill has something sitting on top of it so it stays bright in both themes; an ink
+  sits on the background and has to darken on light or it fails contrast. Amber text on
+  white is the specific thing this exists to prevent.
+- The **orb inverts its blend mode**, not just its palette. Additive light
+  (`.plusLighter`) is the whole idea against near-black and bleaches to nothing on paper,
+  so light mode draws the same shapes subtractively (`.multiply`) with a normal-blended
+  white core as the highlight. Compare `VoiceOrb.draw(…, light:)`.
 
 ## Dev Mode — talk to your code
 

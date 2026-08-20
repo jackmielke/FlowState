@@ -27,12 +27,18 @@ struct ContentView: View {
         }
     }
 
+    private var appearance: Binding<AppearanceMode> {
+        Binding(get: { state.settings.appearance },
+                set: { state.settings.appearance = $0; $0.applyToApp() })
+    }
+
     var body: some View {
         ZStack {
             VisualEffectBackground()
             LinearGradient(colors: [Theme.bg.opacity(0.94), Theme.bg.opacity(0.99)],
                            startPoint: .top, endPoint: .bottom)
-            // faint accent wash from the top-left, keeps the near-black from going flat
+            // faint accent wash from the top-left, so the flat field — near-black or
+            // paper, depending on the theme — never reads as dead
             RadialGradient(colors: [accentForMode.opacity(0.10), .clear],
                            center: .init(x: 0.28, y: 0.18), startRadius: 0, endRadius: 620)
                 .animation(.easeInOut(duration: 0.6), value: mode)
@@ -46,10 +52,11 @@ struct ContentView: View {
                     sidebar
                 }
             }
-            WindowConfigurator().frame(width: 0, height: 0)
+            WindowConfigurator(appearance: state.settings.appearance).frame(width: 0, height: 0)
         }
         .frame(minWidth: 940, minHeight: 620)
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(state.settings.appearance.colorScheme)
+        .onAppear { state.settings.appearance.applyToApp() }
         .sheet(isPresented: $state.showSettings) { SettingsView(state: state) }
     }
 
@@ -95,6 +102,8 @@ struct ContentView: View {
                 .buttonStyle(IconButtonStyle())
                 .help("Send a screenshot (⌘⇧2)")
 
+                AppearanceToggle(mode: appearance)
+
                 Button { state.showSettings = true } label: { Image(systemName: "slider.horizontal.3") }
                     .buttonStyle(IconButtonStyle())
                     .help("Settings")
@@ -117,7 +126,7 @@ struct ContentView: View {
                 .foregroundStyle(Theme.textDim)
         }
         .padding(.horizontal, 9).padding(.vertical, 4)
-        .background(Capsule().fill(Color.white.opacity(0.05))
+        .background(Capsule().fill(Theme.fill)
             .overlay(Capsule().stroke(Theme.hairline, lineWidth: 1)))
     }
 
@@ -127,7 +136,7 @@ struct ContentView: View {
             Text("WATCHING · \(Int(state.settings.screenInterval))s")
                 .font(.system(size: 9.5, weight: .bold, design: .rounded)).tracking(0.8)
         }
-        .foregroundStyle(Color.black.opacity(0.82))
+        .foregroundStyle(Theme.onAccent)
         .padding(.horizontal, 8).padding(.vertical, 4)
         .background(Capsule().fill(Theme.accent.opacity(0.92)))
         .modifier(PulseIf(active: true))
@@ -172,9 +181,9 @@ struct ContentView: View {
             Text("CODING")
                 .font(.system(size: 9.5, weight: .bold, design: .rounded)).tracking(0.8)
         }
-        .foregroundStyle(Color.white.opacity(0.92))
+        .foregroundStyle(Theme.onDev)
         .padding(.horizontal, 8).padding(.vertical, 4)
-        .background(Capsule().fill(Color.purple.opacity(0.75)))
+        .background(Capsule().fill(Theme.dev))
         .modifier(PulseIf(active: true))
         .help(state.devTaskSummary ?? "Claude Code is working")
     }
@@ -253,7 +262,7 @@ struct ContentView: View {
                         Text(state.settings.continuousScreen ? "Watching" : "Watch")
                     }
                 }
-                .buttonStyle(GhostButtonStyle(tint: state.settings.continuousScreen ? Theme.accent : Theme.text))
+                .buttonStyle(GhostButtonStyle(tint: state.settings.continuousScreen ? Theme.accentInk : Theme.text))
             }
 
             Text(state.audio.running ? state.audio.formatDescription : "audio idle · nothing is captured until you connect")
@@ -299,7 +308,7 @@ struct ContentView: View {
     private func banner(_ msg: String) -> some View {
         HStack(alignment: .top, spacing: 9) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 11)).foregroundStyle(Theme.bad)
+                .font(.system(size: 11)).foregroundStyle(Theme.badInk)
                 .padding(.top, 1)
             Text(msg)
                 .font(.system(size: 11.5))
@@ -326,7 +335,7 @@ struct ContentView: View {
                 .font(.system(size: 11.5)).foregroundStyle(Theme.textDim)
                 .fixedSize(horizontal: false, vertical: true)
             Button("Open Privacy Settings") { ScreenCapture.openPrivacySettings() }
-                .buttonStyle(GhostButtonStyle(tint: Theme.accent))
+                .buttonStyle(GhostButtonStyle(tint: Theme.accentInk))
         }
         .padding(13)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -375,7 +384,7 @@ struct ContentView: View {
             }
         }
         .frame(width: 372)
-        .background(Color.black.opacity(0.22))
+        .background(Theme.sidebar)
     }
 }
 

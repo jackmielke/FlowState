@@ -43,14 +43,14 @@ struct TranscriptView: View {
             VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 6) {
                     Circle()
-                        .fill(isUser ? Theme.accent : Theme.voice)
+                        .fill(isUser ? Theme.accentInk : Theme.voiceInk)
                         .frame(width: 5, height: 5)
                     Text(isUser ? "YOU" : "VIBE")
                         .font(.system(size: 9.5, weight: .bold, design: .rounded))
                         .tracking(1.1)
-                        .foregroundStyle(isUser ? Theme.accent.opacity(0.9) : Theme.voice.opacity(0.9))
+                        .foregroundStyle(isUser ? Theme.accentInk : Theme.voiceInk)
                     if item.streaming {
-                        Circle().fill(Theme.voice)
+                        Circle().fill(Theme.voiceInk)
                             .frame(width: 4, height: 4)
                             .opacity(0.9)
                             .modifier(Blink())

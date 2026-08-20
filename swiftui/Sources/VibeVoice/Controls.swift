@@ -11,7 +11,7 @@ struct GhostButtonStyle: ButtonStyle {
             .padding(.horizontal, padH).padding(.vertical, padV)
             .background(
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(Color.white.opacity(configuration.isPressed ? 0.11 : 0.055))
+                    .fill(configuration.isPressed ? Theme.fillHi : Theme.fill)
                     .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
                         .stroke(Theme.hairlineHi, lineWidth: 1))
             )
@@ -25,13 +25,13 @@ struct PrimaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(Color(red: 0.06, green: 0.06, blue: 0.07))
+            .foregroundStyle(Theme.onAccent)
             .padding(.horizontal, 22).padding(.vertical, 10)
             .background(
                 Capsule().fill(
                     LinearGradient(colors: [tint.opacity(0.98), tint.opacity(0.78)],
                                    startPoint: .top, endPoint: .bottom))
-                .overlay(Capsule().stroke(.white.opacity(0.22), lineWidth: 1))
+                .overlay(Capsule().stroke(Theme.gloss, lineWidth: 1))
                 .shadow(color: tint.opacity(configuration.isPressed ? 0.18 : 0.38), radius: 16, y: 5)
             )
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
@@ -47,7 +47,7 @@ struct IconButtonStyle: ButtonStyle {
             .frame(width: 30, height: 30)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.white.opacity(configuration.isPressed ? 0.12 : 0.05))
+                    .fill(configuration.isPressed ? Theme.fillHi : Theme.fill)
             )
             .contentShape(Rectangle())
     }
@@ -65,12 +65,13 @@ struct NeatSlider: View {
             let w = geo.size.width
             let f = CGFloat((value - range.lowerBound) / (range.upperBound - range.lowerBound))
             ZStack(alignment: .leading) {
-                Capsule().fill(Color.white.opacity(0.09)).frame(height: 4)
+                Capsule().fill(Theme.track).frame(height: 4)
                 Capsule().fill(tint.opacity(0.85)).frame(width: max(4, w * f), height: 4)
                 Circle()
-                    .fill(Color.white)
+                    .fill(Theme.knob)
+                    .overlay(Circle().stroke(Theme.hairlineHi, lineWidth: 1))
                     .frame(width: 12, height: 12)
-                    .shadow(color: .black.opacity(0.5), radius: 3, y: 1)
+                    .shadow(color: Theme.shadow, radius: 3, y: 1)
                     .offset(x: max(0, w * f - 6))
             }
             .frame(height: 20)
@@ -104,10 +105,10 @@ struct ChipPicker: View {
                         let on = opt == selection
                         Text(opt)
                             .font(.system(size: 11.5, weight: on ? .semibold : .regular))
-                            .foregroundStyle(on ? Color.black.opacity(0.85) : Theme.textDim)
+                            .foregroundStyle(on ? Theme.onAccent : Theme.textDim)
                             .padding(.horizontal, 10).padding(.vertical, 5)
                             .background(
-                                Capsule().fill(on ? tint.opacity(0.92) : Color.white.opacity(0.055))
+                                Capsule().fill(on ? tint.opacity(0.92) : Theme.fill)
                                     .overlay(Capsule().stroke(Theme.hairline, lineWidth: on ? 0 : 1))
                             )
                             .contentShape(Capsule())
@@ -125,15 +126,66 @@ struct NeatToggle: View {
     var tint: Color = Theme.accent
     var body: some View {
         Capsule()
-            .fill(isOn ? tint.opacity(0.9) : Color.white.opacity(0.10))
+            .fill(isOn ? tint.opacity(0.9) : Theme.track)
             .frame(width: 38, height: 22)
             .overlay(
-                Circle().fill(.white)
+                Circle().fill(Theme.knob)
+                    .overlay(Circle().stroke(Theme.hairline, lineWidth: 1))
                     .frame(width: 17, height: 17)
-                    .shadow(color: .black.opacity(0.4), radius: 2, y: 1)
+                    .shadow(color: Theme.shadow, radius: 2, y: 1)
                     .offset(x: isOn ? 8 : -8)
             )
             .contentShape(Capsule())
             .onTapGesture { withAnimation(.spring(response: 0.28, dampingFraction: 0.75)) { isOn.toggle() } }
+    }
+}
+
+/// Header theme control: one click, one step through System → Light → Dark.
+/// The icon is always the mode you are *in*, and the tooltip names the next one,
+/// so a three-way choice costs no header width.
+struct AppearanceToggle: View {
+    @Binding var mode: AppearanceMode
+
+    var body: some View {
+        Button {
+            withAnimation(Theme.ease) { mode = mode.next }
+        } label: {
+            Image(systemName: mode.symbol)
+                .contentTransition(.symbolEffect(.replace))
+        }
+        .buttonStyle(IconButtonStyle())
+        .help("Appearance: \(mode.label) — click for \(mode.next.label)")
+        .accessibilityLabel("Appearance: \(mode.label)")
+    }
+}
+
+/// The explicit form of the same choice, for Settings.
+struct AppearancePicker: View {
+    @Binding var mode: AppearanceMode
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(AppearanceMode.allCases, id: \.self) { m in
+                let on = m == mode
+                Button {
+                    withAnimation(Theme.ease) { mode = m }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: m.symbol).font(.system(size: 11))
+                        Text(m.label).font(.system(size: 12, weight: .semibold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 7)
+                    .background(
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .fill(on ? Theme.accent.opacity(0.9) : Theme.fill)
+                            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .stroke(Theme.hairline, lineWidth: on ? 0 : 1)))
+                    .foregroundStyle(on ? Theme.onAccent : Theme.text)
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(on ? [.isSelected] : [])
+            }
+        }
     }
 }

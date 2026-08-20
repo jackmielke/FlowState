@@ -24,6 +24,18 @@ struct VibeVoiceApp: App {
         .defaultSize(width: 1080, height: 700)
         .commands {
             CommandGroup(replacing: .newItem) {}
+            CommandMenu("View") {
+                ForEach(AppearanceMode.allCases, id: \.self) { m in
+                    // Spelled-out checkmark rather than a Label/Picker: menu items are
+                    // the one place the current choice has to be readable with no
+                    // dependence on how the SDK decides to render menu glyphs.
+                    Button(state.settings.appearance == m ? "✓ \(m.label)" : "    \(m.label)") {
+                        state.settings.appearance = m
+                        m.applyToApp()
+                    }
+                    .keyboardShortcut(m.shortcut, modifiers: [.command, .option])
+                }
+            }
             CommandMenu("Session") {
                 Button("Connect / Disconnect") { state.toggleConnection() }
                     .keyboardShortcut("k", modifiers: .command)

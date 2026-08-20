@@ -213,6 +213,8 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
 
     func cancelResponse() { send(json: ["type": "response.cancel"]) }
 
+    func createResponse() { send(json: ["type": "response.create"]) }
+
     /// Drops an item from the conversation. Used to evict stale screen frames so their
     /// image tokens stop being re-billed on every subsequent turn.
     func deleteItem(id: String) {

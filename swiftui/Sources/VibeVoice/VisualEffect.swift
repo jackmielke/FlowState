@@ -35,10 +35,14 @@ struct WindowDragArea: NSViewRepresentable {
     func updateNSView(_ v: NSView, context: Context) {}
 }
 
-/// Applies the frameless / full-size-content chrome once the window exists.
+/// Applies the frameless / full-size-content chrome once the window exists, and keeps
+/// the window's appearance in step with the user's theme choice.
 struct WindowConfigurator: NSViewRepresentable {
+    var appearance: AppearanceMode = .system
+
     func makeNSView(context: Context) -> NSView {
         let v = NSView()
+        let mode = appearance
         DispatchQueue.main.async {
             guard let w = v.window else { return }
             // Keep .titled — dropping it (or going borderless) is what loses the
@@ -50,7 +54,8 @@ struct WindowConfigurator: NSViewRepresentable {
             w.isMovableByWindowBackground = true
             w.isOpaque = false
             w.backgroundColor = .clear
-            w.appearance = NSAppearance(named: .darkAqua)
+            // nil = inherit from NSApp, which is what tracks the system live.
+            w.appearance = mode.nsAppearance
             // Belt and braces: clip our own content to the same radius the
             // system uses, so no child view paints square past the corner.
             if let cv = w.contentView {
@@ -67,5 +72,7 @@ struct WindowConfigurator: NSViewRepresentable {
         }
         return v
     }
-    func updateNSView(_ v: NSView, context: Context) {}
+    func updateNSView(_ v: NSView, context: Context) {
+        v.window?.appearance = appearance.nsAppearance
+    }
 }
