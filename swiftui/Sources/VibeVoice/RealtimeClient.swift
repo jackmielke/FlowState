@@ -141,19 +141,41 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
         you're on it, then STOP and wait. The result arrives later as a system message;
         summarise it in one or two sentences when it does. Never invent a result, and
         never read code aloud.
+
+        SEVERAL TASKS CAN RUN AT ONCE, each in a different repo. Every dispatch answers
+        with a short id like T1 or T2 — use those ids when you talk about them ("task one
+        finished, task two is still building"). Pass `repo` when the user names a
+        different project; leave it out for the default.
+
+        Two tasks may NOT run in the same repo at the same time: they overwrite each
+        other's files mid-build. If that is refused, say so plainly and offer to wait or
+        to use another repo. A follow-up like "make it faster" continues the most recent
+        task unless the user names one.
         """
     }
 
     static let devTools: [[String: Any]] = [[
         "type": "function",
         "name": "dispatch_to_claude_code",
-        "description": "Send a coding task to Claude Code on the user's Mac. Use whenever the user asks to change, build, fix, explain or inspect code. Returns immediately; the result arrives later.",
+        "description": "Send a coding task to Claude Code on the user's Mac. Use whenever the user asks to change, build, fix, explain or inspect code. Returns immediately with a short task id; the result arrives later. Several tasks can run at once in different repos.",
         "parameters": [
             "type": "object",
             "properties": [
                 "task": [
                     "type": "string",
                     "description": "A complete, self-contained instruction. No pronouns referring to the conversation."
+                ],
+                "label": [
+                    "type": "string",
+                    "description": "Two or three words naming this task, for the on-screen list. E.g. 'orb animation'."
+                ],
+                "repo": [
+                    "type": "string",
+                    "description": "Absolute or ~ path to the repo. Omit to use the default repo."
+                ],
+                "resume_task": [
+                    "type": "string",
+                    "description": "An existing task id (T1, T2…) to continue instead of starting a new one. Use for follow-ups like 'make that faster'."
                 ]
             ],
             "required": ["task"]

@@ -45,6 +45,14 @@ final class AppState: ObservableObject {
     /// before every capture, and on demand — never assumed from a past failure.
     @Published var screenPermission: ScreenPermission = .unknown
     @Published var showSettings = false
+    /// Every display Vibe Voice could look at. Re-read on launch, on activation, and
+    /// whenever macOS reports a display arriving or leaving.
+    @Published var displays: [DisplayOption] = []
+    /// The display the last frame actually came from — not the one that was requested.
+    @Published var lastCaptureDisplay: String?
+    /// Which display this window sits on, i.e. what "follow the active display" means at
+    /// this instant. See `refreshActiveDisplay()`.
+    @Published private var windowDisplayID: CGDirectDisplayID?
     @Published var lastCaptureNote: String?
     @Published var sessionID: String?
     @Published var devTaskRunning = false
@@ -68,6 +76,9 @@ final class AppState: ObservableObject {
     private let responses = ResponseCoordinator()
     /// Drives the coordinator's deadlines while a session is live.
     private var responseWatchdog: Timer?
+    /// Several Claude Code jobs at once. The rules about how many, and what may run
+    /// beside what, live in VibeVoiceCore where they are tested.
+    let devTasks = DevTaskRegistry(maxConcurrent: 3)
     private var devStepBuffer: [String] = []
     private var devNarrateTimer: Timer?
     private var devSpokenUpdates = 0
@@ -123,7 +134,29 @@ final class AppState: ObservableObject {
         NotificationCenter.default
             .publisher(for: NSApplication.didBecomeActiveNotification)
             .sink { [weak self] _ in
-                Task { @MainActor in self?.refreshScreenPermission(reason: "app-activated") }
+                Task { @MainActor in
+                    self?.refreshScreenPermission(reason: "app-activated")
+                    await self?.refreshDisplays()
+                }
+            }
+            .store(in: &bag)
+
+        // Plugging a monitor in or out is the one moment the picker's contents are
+        // guaranteed to be wrong, and it is the only display change macOS does tell us
+        // about — so it is worth listening for rather than polling.
+        NotificationCenter.default
+            .publisher(for: NSApplication.didChangeScreenParametersNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor in await self?.refreshDisplays() }
+            }
+            .store(in: &bag)
+
+        // Dragging the window to another monitor changes what "follow the active display"
+        // captures. Without this the picker would keep naming the screen you left.
+        NotificationCenter.default
+            .publisher(for: NSWindow.didChangeScreenNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.refreshActiveDisplay() }
             }
             .store(in: &bag)
 
@@ -147,6 +180,7 @@ final class AppState: ObservableObject {
                 s = await ScreenCapture.probe(reason: "launch-register")
             }
             self.screenPermission = s
+            await self.refreshDisplays()
         }
         note("Ready. Hit Connect and just talk. ⌘⇧2 shows me your screen.")
 
@@ -420,80 +454,122 @@ final class AppState: ObservableObject {
         }
 
         let args = (try? JSONSerialization.jsonObject(with: Data(argumentsJSON.utf8))) as? [String: Any]
-        let task = (args?["task"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !task.isEmpty else {
+        let instruction = (args?["task"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !instruction.isEmpty else {
             client.sendToolOutput(callID: callID,
                                   output: ["status": "error", "reason": "Empty task."])
             requestResponse("tool-empty-task")
             return
         }
 
-        let repo = settings.devRepo
+        let repo = (args?["repo"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty ?? settings.devRepo
+        let label = (args?["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty ?? String(instruction.prefix(40))
         let mode = settings.devPermissionMode
-        devTaskRunning = true
-        devTaskSummary = String(task.prefix(120))
-        startDevNarration()
-        transcript.append(TranscriptItem(speaker: .system, text: "→ Claude Code: \(task)"))
 
-        // The response that produced this tool call is still running, so the spoken
-        // reply gets deferred to its response.done rather than sent now.
+        // A follow-up ("make that faster") continues an existing conversation rather
+        // than starting a fresh one that knows nothing about the earlier work.
+        let resumeID = (args?["resume_task"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        let resuming = resumeID.flatMap { devTasks.task($0) }
+
+        // Capacity and repo-exclusivity are the registry's call, and refusing here is
+        // far better than letting two runs shred each other's files mid-build.
+        if resuming == nil, let why = devTasks.rejectionFor(repo: repo) {
+            note("Refused a task: \(why.spokenExplanation)")
+            client.sendToolOutput(callID: callID, output: [
+                "status": "refused",
+                "reason": why.spokenExplanation,
+                "note": "Tell the user this in one sentence and offer to wait or use another repo."
+            ])
+            requestResponse("tool-refused-capacity")
+            return
+        }
+
+        let task: DevTask
+        if let r = resuming {
+            task = r
+            devTasks.reopen(r.id)
+            transcript.append(TranscriptItem(speaker: .system,
+                                             text: "→ \(r.id) (continuing): \(instruction)"))
+        } else {
+            task = devTasks.start(label: label, repo: repo)
+            transcript.append(TranscriptItem(speaker: .system,
+                                             text: "→ \(task.id) \(label) · \(repo): \(instruction)"))
+        }
+        let taskID = task.id
+        let resumeSession = resuming?.claudeSessionID
+        objectWillChange.send()
+
+        devTaskRunning = true
+        devTaskSummary = label
+        startDevNarration()
+
         client.sendToolOutput(callID: callID, output: [
             "status": "dispatched",
-            "note": "A Claude Code task is now RUNNING in \(repo). It keeps running until you "
-                  + "receive a message saying it finished or failed. While it runs you will get "
-                  + "progress notes; if the user asks what is happening, answer from the most "
-                  + "recent note. Tell the user you're on it in a few words now."
+            "task_id": taskID,
+            "repo": repo,
+            "note": "Task \(taskID) is now RUNNING in \(repo). It keeps running until you receive "
+                  + "a message saying it finished or failed. Other tasks may be running too — refer "
+                  + "to them by id. If the user asks what is happening, answer from the most recent "
+                  + "progress note. Tell the user you're on it in a few words now."
         ])
         requestResponse("tool-dispatched")
 
         Task { [weak self] in
             guard let self else { return }
-            let r = await self.claude.run(task: task, repo: repo,
-                                          permissionMode: mode) { label in
-                // Fires on a background executor as Claude Code works.
-                Task { @MainActor [weak self] in self?.appendDevStep(label) }
+            let r = await self.claude.run(task: instruction,
+                                          repo: repo,
+                                          permissionMode: mode,
+                                          resumeSessionID: resumeSession) { step in
+                Task { @MainActor [weak self] in self?.appendDevStep(step, taskID: taskID) }
             }
             await MainActor.run {
-                self.devTaskRunning = false
-                self.devTaskSummary = nil
-                self.stopDevNarration()
-                self.devStepBuffer.removeAll()
+                self.devTasks.setSessionID(r.sessionID, for: taskID)
+                self.devTasks.finish(taskID, ok: r.ok, result: r.text, deniedTools: r.deniedTools)
+                self.devTasks.pruneFinished()
                 if let c = r.costUSD { self.cost.addClaudeCode(c) }
-                // Deliberately not shown. Claude Code runs on the Max subscription here,
-                // so its list-price-equivalent figure is not money the user is billed,
-                // and putting a dollar sign next to it only invites confusion with the
-                // OpenAI meter, which is real spend.
-                let cost = ""
+
+                let still = self.devTasks.running
+                self.devTaskRunning = !still.isEmpty
+                self.devTaskSummary = still.first?.label
+                if still.isEmpty { self.stopDevNarration(); self.devStepBuffer.removeAll() }
+
+                let mark = r.deniedTools.isEmpty ? (r.ok ? "✓" : "✗") : "⚠︎"
                 self.transcript.append(TranscriptItem(
-                    speaker: .system,
-                    text: (r.ok ? "✓ Claude Code" : "✗ Claude Code") + cost + ": " + r.text))
-                // A blocked tool is the difference between "it got stuck" and a question
-                // the user can answer out loud, so it is reported as its own outcome.
+                    speaker: .system, text: "\(mark) \(taskID) \(label): " + r.text))
+
                 var note: String
                 if !r.deniedTools.isEmpty {
                     let tools = r.deniedTools.joined(separator: ", ")
-                    self.transcript.append(TranscriptItem(
-                        speaker: .system, text: "⚠︎ permission blocked: \(tools)"))
-                    note = "[Claude Code was BLOCKED from using: \(tools). It could not finish. "
-                        + "Tell the user which tool was blocked and that they can turn on "
+                    note = "[Task \(taskID) (\(label)) was BLOCKED from using: \(tools). It could not "
+                        + "finish. Tell the user which tool was blocked and that they can turn on "
                         + "auto-allow in Settings under Dev Mode, then ask if they want you to retry.] "
                         + "Partial result: \(r.text)"
                 } else if r.ok {
-                    note = "[Claude Code finished the task. Result: \(r.text)] Tell the user what changed, in one or two sentences."
+                    note = "[Task \(taskID) (\(label)) FINISHED. Result: \(r.text)] Tell the user what "
+                        + "changed, in one or two sentences. Name the task if others are still running."
                 } else {
-                    note = "[Claude Code FAILED. Error: \(r.text)] Tell the user it failed and why, briefly."
+                    note = "[Task \(taskID) (\(label)) FAILED. Error: \(r.text)] Tell the user it failed "
+                        + "and why, briefly."
+                }
+                if !still.isEmpty {
+                    note += " Still running: " + still.map { "\($0.id) (\($0.label))" }.joined(separator: ", ") + "."
                 }
                 self.client.sendSystemNote(note)
-                self.requestResponse("claude-code-\(r.ok ? "finished" : "failed")")
+                self.requestResponse("claude-code-finished")
+                self.objectWillChange.send()
             }
         }
     }
 
     /// Appends one live Claude Code step to the transcript, collapsing consecutive
     /// duplicates so a tool called repeatedly does not spam the view.
-    private func appendDevStep(_ label: String) {
+    private func appendDevStep(_ label: String, taskID: String) {
+        devTasks.addStep(label, to: taskID)
         devTaskSummary = label
-        let line = "   · " + label
+        objectWillChange.send()
+        let line = "   · \(taskID) " + label
         if let last = transcript.last, last.speaker == .system, last.text == line { return }
         transcript.append(TranscriptItem(speaker: .system, text: line))
         // Buffered rather than sent per-step: Claude Code emits steps in bursts, and one
@@ -534,7 +610,11 @@ final class AppState: ObservableObject {
         guard devTaskRunning, case .live = connection, !devStepBuffer.isEmpty else { return }
 
         // Keep the note short — the last few steps are what matter, not the whole log.
-        let steps = devStepBuffer.suffix(6).joined(separator: "; ")
+        let live = devTasks.running
+        let prefix = live.count > 1
+            ? "(" + live.map { "\($0.id) \($0.label)" }.joined(separator: ", ") + ") "
+            : ""
+        let steps = prefix + devStepBuffer.suffix(6).joined(separator: "; ")
         devStepBuffer.removeAll()
 
         let elapsed = Date().timeIntervalSince(lastNarrationAt)
@@ -594,6 +674,9 @@ final class AppState: ObservableObject {
             if banner == before.bannerText { banner = nil }
             note("Screen Recording permission is now granted.")
             syncScreenTimer()
+            // The display list is empty while permission blocks capture, so this is the
+            // first moment it can be populated at all.
+            Task { await refreshDisplays() }
         }
         return now
     }
@@ -613,6 +696,7 @@ final class AppState: ObservableObject {
             if banner == before.bannerText { banner = nil }
             note("Screen Recording is granted and this process can capture.")
             syncScreenTimer()
+            await refreshDisplays()
         case .needsRestart:
             banner = now.bannerText
             note("Screen Recording is granted, but this process was launched before the grant — relaunch to use it.")
@@ -625,6 +709,87 @@ final class AppState: ObservableObject {
     func openScreenPrivacySettings() { ScreenCapture.openPrivacySettings() }
 
     func relaunchForScreenPermission() { ScreenCapture.relaunch() }
+
+    // MARK: - Which screen
+
+    /// The saved pick, if it is still attached. `nil` means "follow the active display",
+    /// which is both the default and where an unplugged pick lands.
+    var selectedDisplay: DisplayOption? {
+        guard settings.screenDisplayID != DisplayOption.followsActiveID else { return nil }
+        return displays.first { $0.displayID == settings.screenDisplayID }
+    }
+
+    /// What the pick resolves to right now — the display a capture would actually use.
+    var activeDisplay: DisplayOption? {
+        if let picked = selectedDisplay { return picked }
+        guard let id = windowDisplayID else { return displays.first }
+        return displays.first { $0.displayID == id } ?? displays.first
+    }
+
+    var isFollowingActiveDisplay: Bool { settings.screenDisplayID == DisplayOption.followsActiveID }
+
+    /// The id to hand the capture layer: the raw saved pick, not `selectedDisplay`.
+    ///
+    /// The two differ before the display list has loaded — the first seconds after launch,
+    /// and any moment permission was blocked — and in that window `selectedDisplay` is nil
+    /// while a perfectly valid pin is sitting in settings. Capture resolves an unattached
+    /// id by falling back on its own, so the raw value is both safe and more faithful.
+    private var requestedDisplayID: CGDirectDisplayID? {
+        isFollowingActiveDisplay ? nil : settings.screenDisplayID
+    }
+
+    /// Re-reads which display this window is on.
+    ///
+    /// Published rather than computed on demand: `NSScreen.main` is not observable, so a
+    /// label derived straight from it would keep showing the old screen after you drag
+    /// the window to another one, right up until something unrelated redrew the view.
+    func refreshActiveDisplay() {
+        let id = ScreenCapture.activeDisplayID()
+        if windowDisplayID != id { windowDisplayID = id }
+    }
+
+    /// Pick a display, or pass `nil` to go back to following the active one.
+    ///
+    /// Deliberately does not touch the watch timer: the interval and the on/off state are
+    /// unchanged by this, and tearing the timer down would drop a frame for no reason.
+    /// The next tick simply captures the newly chosen screen.
+    func selectDisplay(_ displayID: CGDirectDisplayID?) {
+        let target = displayID ?? DisplayOption.followsActiveID
+        guard settings.screenDisplayID != target else { return }
+        settings.screenDisplayID = target
+        if let d = displays.first(where: { $0.displayID == target }) {
+            note("Now showing \(d.name) (\(d.resolution)) when you ask about my screen.")
+        } else {
+            note("Now following whichever display Vibe Voice is on.")
+        }
+    }
+
+    /// Re-reads the attached displays and re-validates the saved pick against them.
+    ///
+    /// A saved display id is only meaningful while that display is attached — CoreGraphics
+    /// reissues ids across unplug and reboot — so a pick that no longer matches anything is
+    /// dropped back to the active display rather than left pointing at nothing. Silent when
+    /// permission is blocked: the list is empty for a reason the permission card already
+    /// explains, and clearing a valid pick over it would lose the user's choice.
+    func refreshDisplays() async {
+        refreshActiveDisplay()
+        guard !screenPermission.blocksCapture else { return }
+        let found = await ScreenCapture.displays()
+        guard !found.isEmpty else {
+            // The capture layer just contradicted what the UI is claiming — re-read
+            // rather than leaving a stale "granted" on screen with an empty picker.
+            refreshScreenPermission(reason: "display-scan")
+            return
+        }
+        displays = found
+
+        let picked = settings.screenDisplayID
+        guard picked != DisplayOption.followsActiveID,
+              !found.contains(where: { $0.displayID == picked })
+        else { return }
+        settings.screenDisplayID = DisplayOption.followsActiveID
+        note("The screen you had picked is no longer attached — following the active display again.")
+    }
 
     func captureAndSend(auto: Bool) async {
         // Permission FIRST, connection second. ensureAccess() is what fires
@@ -654,13 +819,20 @@ final class AppState: ObservableObject {
         }
 
         do {
-            let frame = try await ScreenCapture.capture(maxWidth: CGFloat(settings.screenshotSize))
+            let frame = try await ScreenCapture.capture(
+                displayID: requestedDisplayID,
+                maxWidth: CGFloat(settings.screenshotSize))
             screenPermission = .granted
             // Auto frames are context, not questions. They are filed silently so the
             // model simply knows what is on screen when you next speak to it.
+            //
+            // The display is named in both prompts because with more than one screen the
+            // model otherwise has no way to know it is being shown one of several, and
+            // will happily answer "your screen" questions about the wrong one.
+            let screen = displays.count > 1 ? " (\(frame.display.menuLabel))" : ""
             let prompt = auto
-                ? "[Screen update — context only. Do not reply to this.]"
-                : "Here's my screen. What do you see?"
+                ? "[Screen update\(screen) — context only. Do not reply to this.]"
+                : "Here's my screen\(screen). What do you see?"
             client.sendImage(dataURI: frame.dataURI, prompt: prompt)
             // The frame lands in the conversation either way. Only a MANUAL capture is
             // a question, and even then the turn is requested through the coordinator —
@@ -668,11 +840,18 @@ final class AppState: ObservableObject {
             // response.create straight on the wire, which is the exact rejection this
             // whole path now avoids.
             if !auto { requestResponse("screenshot") }
+            let label = displays.count > 1 ? " · \(frame.display.name)" : ""
             transcript.append(TranscriptItem(
                 speaker: .user,
-                text: auto ? "Screen frame (auto)" : "Sent a screenshot",
+                text: (auto ? "Screen frame (auto)" : "Sent a screenshot") + label,
                 image: frame.thumbnail))
             lastCaptureNote = String(format: "%.0f KB", Double(frame.bytes) / 1024)
+            lastCaptureDisplay = frame.display.name
+            // A pick that silently fell back (display unplugged between the pick and the
+            // capture) is corrected here rather than left to lie in the picker.
+            if let wanted = requestedDisplayID, wanted != frame.display.displayID {
+                await refreshDisplays()
+            }
         } catch ScreenCaptureError.permissionDenied(let p) {
             screenPermission = p
             handleScreenBlock(p, auto: auto)

@@ -9,6 +9,39 @@ struct CapturedFrame {
     let dataURI: String     // data:image/jpeg;base64,...
     let thumbnail: NSImage
     let bytes: Int
+    /// Which display this frame actually came from. Not necessarily the one the user
+    /// picked — a display can be unplugged between the pick and the capture — so the
+    /// UI reports what was really sent rather than what was requested.
+    let display: DisplayOption
+}
+
+/// One display the user can hand to the assistant.
+///
+/// `displayID` is the CoreGraphics id, which is what both ScreenCaptureKit and
+/// `NSScreen` key off, and is stable for as long as the display stays attached. It is
+/// NOT stable across unplug/replug or a reboot, which is why `AppState` re-resolves the
+/// saved choice against the live list instead of trusting it.
+struct DisplayOption: Identifiable, Hashable {
+    let displayID: CGDirectDisplayID
+    let width: Int
+    let height: Int
+    /// The display holding the menu bar. Worth calling out: on a laptop plus monitor
+    /// setup "which one is main" is the only thing that tells the two apart at a glance.
+    let isMain: Bool
+    /// `NSScreen.localizedName` when macOS knows one ("Built-in Retina Display",
+    /// "LG UltraFine"), otherwise a positional fallback.
+    let name: String
+
+    var id: CGDirectDisplayID { displayID }
+
+    var resolution: String { "\(width) × \(height)" }
+
+    /// One line for a menu row: name plus the detail that disambiguates identical models.
+    var menuLabel: String { isMain ? "\(name) (main)" : name }
+
+    /// What the settings file stores for "whichever display the app is on right now".
+    /// Safe as a sentinel because `kCGNullDirectDisplay` is 0 — no real display has it.
+    static let followsActiveID: CGDirectDisplayID = 0
 }
 
 /// What macOS will let *this process* do right now.
@@ -246,9 +279,74 @@ enum ScreenCapture {
         return .permissionDenied(state)
     }
 
+    // MARK: - Displays
+
+    /// The display the app itself is on, i.e. what "follow the active display" resolves to.
+    static func activeDisplayID() -> CGDirectDisplayID? {
+        guard let main = NSScreen.main,
+              let num = main.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+        else { return nil }
+        return num.uint32Value
+    }
+
+    /// Human names, straight from AppKit. SCDisplay has no name of its own, so the two
+    /// lists are joined on the CoreGraphics display id.
+    private static func screenNames() -> [CGDirectDisplayID: String] {
+        var out: [CGDirectDisplayID: String] = [:]
+        for screen in NSScreen.screens {
+            guard let num = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+            else { continue }
+            let name = screen.localizedName
+            if !name.isEmpty { out[num.uint32Value] = name }
+        }
+        return out
+    }
+
+    /// Every display Vibe Voice is allowed to look at, in a stable order.
+    ///
+    /// Returns `[]` rather than throwing when permission is missing: the caller is a UI
+    /// refresh that runs on launch and on every activation, and a blocked permission is
+    /// already reported by its own card. The permission evidence is still updated on the
+    /// way through, so a refusal here is not swallowed silently.
+    static func displays() async -> [DisplayOption] {
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            noteCaptureSucceeded()
+        } catch {
+            _ = classify(error as NSError)
+            return []
+        }
+        return describe(content.displays)
+    }
+
+    private static func describe(_ displays: [SCDisplay]) -> [DisplayOption] {
+        let names = screenNames()
+        let mainID = CGMainDisplayID()
+        // Main display first, then a stable id order, so the list does not reshuffle
+        // under the user's cursor between refreshes.
+        let sorted = displays.sorted { a, b in
+            if (a.displayID == mainID) != (b.displayID == mainID) { return a.displayID == mainID }
+            return a.displayID < b.displayID
+        }
+        return sorted.enumerated().map { index, d in
+            DisplayOption(
+                displayID: d.displayID,
+                width: d.width,
+                height: d.height,
+                isMain: d.displayID == mainID,
+                name: names[d.displayID] ?? "Display \(index + 1)")
+        }
+    }
+
     // MARK: - Capture
 
-    static func capture(maxWidth: CGFloat = 1280, quality: CGFloat = 0.7) async throws -> CapturedFrame {
+    /// - Parameter displayID: the display to capture, or `nil` / an id that is no longer
+    ///   attached to fall back to whichever display the app is on. Falling back beats
+    ///   throwing: unplugging a monitor mid-session must not break the watch loop.
+    static func capture(displayID: CGDirectDisplayID? = nil,
+                        maxWidth: CGFloat = 1280,
+                        quality: CGFloat = 0.7) async throws -> CapturedFrame {
         let content: SCShareableContent
         do {
             content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -256,17 +354,31 @@ enum ScreenCapture {
             throw classify(error as NSError)
         }
 
-        // Prefer the display holding the key window; fall back to the first.
+        // Explicit pick first, then the display holding the key window, then the first
+        // one attached.
+        let picked = displayID.flatMap { id in content.displays.first { $0.displayID == id } }
+        if let wanted = displayID, picked == nil {
+            log("requested display \(wanted) is not attached — falling back to the active one")
+        }
+
         let target: SCDisplay
-        if let main = NSScreen.main,
-           let num = main.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
-           let match = content.displays.first(where: { $0.displayID == num.uint32Value }) {
+        if let picked {
+            target = picked
+        } else if let active = activeDisplayID(),
+                  let match = content.displays.first(where: { $0.displayID == active }) {
             target = match
         } else if let first = content.displays.first {
             target = first
         } else {
             throw ScreenCaptureError.noDisplay
         }
+
+        // Described against the FULL list so the positional fallback name ("Display 2")
+        // matches what the picker shows, rather than restarting at 1 for the one display
+        // that happened to win.
+        let described = describe(content.displays).first { $0.displayID == target.displayID }
+            ?? DisplayOption(displayID: target.displayID, width: target.width, height: target.height,
+                             isMain: target.displayID == CGMainDisplayID(), name: "Display")
 
         let filter = SCContentFilter(display: target, excludingWindows: [])
         let cfg = SCStreamConfiguration()
@@ -291,7 +403,7 @@ enum ScreenCapture {
         guard let jpeg = jpegData(from: cg, quality: quality) else { throw ScreenCaptureError.encodeFailed }
         let uri = "data:image/jpeg;base64," + jpeg.base64EncodedString()
         let thumb = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
-        return CapturedFrame(dataURI: uri, thumbnail: thumb, bytes: jpeg.count)
+        return CapturedFrame(dataURI: uri, thumbnail: thumb, bytes: jpeg.count, display: described)
     }
 
     private static func jpegData(from image: CGImage, quality: CGFloat) -> Data? {

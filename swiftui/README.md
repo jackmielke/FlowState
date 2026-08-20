@@ -95,7 +95,7 @@ RESULT: transport OK — no audio devices were opened.
 | Amplitude | Real RMS. Mic RMS from the input tap; output RMS from a tap installed **on the player node**, i.e. what is actually being rendered. No timer fakery. |
 | Barge-in | `input_audio_buffer.speech_started` → flush the local playback queue. The server truncates its own turn (`turn_detection.interrupt_response: true`), so no `response.cancel` is sent — that only races and returns "no active response found". |
 | Response lifecycle | `ResponseCoordinator` (`VibeVoiceCore`) owns every `response.create` / `response.cancel`. One response at a time, deadlines on every phase, a Stop button that always works. See below. |
-| Screen | ScreenCaptureKit — `SCShareableContent` + `SCContentFilter` + `SCScreenshotManager.captureImage`, downscaled to 1280px wide, JPEG q0.7, sent as a `data:` URI per contract §3 |
+| Screen | ScreenCaptureKit — `SCShareableContent` + `SCContentFilter` + `SCScreenshotManager.captureImage`, downscaled to 1280px wide, JPEG q0.7, sent as a `data:` URI per contract §3. One display at a time — see below |
 | Hotkey | Carbon `RegisterEventHotKey` for ⌘⇧2 (no Accessibility permission needed) |
 | Settings | JSON at `~/Library/Application Support/VibeVoice/settings.json` |
 | Theme | One `Theme` token = one dynamic `NSColor`, resolved per effective appearance (`Theme.swift`) |
@@ -171,6 +171,41 @@ cases are deterministic. `swift test`.
 - ScreenCaptureKit capture: 1280×831 JPEG, ~126 KB, accepted by the model as an
   `input_image` conversation item.
 - Window corners: verified rounded on all four via the captured alpha channel.
+
+## Which screen it sees
+
+Multi-monitor setups make "look at my screen" ambiguous, so the display is an explicit,
+persisted choice. All displays stay available; exactly one is shared at a time, and it
+applies to single shots (⌘⇧2 / **Show screen**) and continuous mode alike.
+
+Pick it from either place:
+
+- the **Showing …** pill under the buttons on the main window — it names the display
+  currently being shared, so the answer is on screen without opening anything;
+- **Settings › Screen › Screen Vibe sees** — every attached display as a row, with its
+  resolution and a `(main)` marker so two identical monitors are still tellable apart.
+
+Two modes:
+
+| Choice | Behaviour |
+|---|---|
+| **Active display** (default) | Whichever display the Vibe Voice window is on. Drag the window to another monitor and the capture follows it. |
+| A specific display | Pinned. Moving the window does not change what is shared. |
+
+Details worth knowing:
+
+- CoreGraphics display ids are **not** stable across unplug/replug or a reboot, so the
+  saved pick is re-validated against the live display list on launch, on activation, and
+  on every `didChangeScreenParameters`. A pin that no longer matches anything silently
+  reverts to Active display and says so in the transcript.
+- If the pinned display vanishes between the pick and the capture, `ScreenCapture.capture`
+  falls back to the active display rather than throwing — unplugging a monitor must not
+  break a running watch loop.
+- With more than one display attached, the display name is included in the prompt sent
+  with each frame. Without it the model has no way to know it is being shown one screen
+  of several and will answer "what's on my screen" questions about the wrong one.
+- The list is empty until Screen Recording is usable, which is the same gate everything
+  else in this section sits behind.
 
 ## Theme — dark, light, or whatever macOS is doing
 

@@ -103,6 +103,29 @@ struct SettingsView: View {
                             caption("Allow Vibe Voice under Privacy & Security › Screen & System Audio Recording. If it is already checked, this build was re-signed since then — toggle it off and back on.")
                         }
 
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("Screen Vibe sees")
+                                    .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                                Spacer()
+                                Button("Rescan") { Task { await state.refreshDisplays() } }
+                                    .buttonStyle(GhostButtonStyle())
+                            }
+                            if state.displays.isEmpty {
+                                caption(state.screenPermission.blocksCapture
+                                        ? "Displays are listed once Screen Recording is usable."
+                                        : "No displays found yet — hit Rescan.")
+                            } else {
+                                DisplayPicker(displays: state.displays,
+                                              active: state.activeDisplay,
+                                              followsActive: state.isFollowingActiveDisplay,
+                                              onSelect: { state.selectDisplay($0) })
+                                caption(state.displays.count == 1
+                                        ? "Only one display attached. Plug in another and it appears here — one is shared at a time, and the choice applies to single shots and continuous mode alike."
+                                        : "One screen at a time, for single shots and continuous mode alike. Pinning a display keeps it in view even when you move this window to another one; if that display is unplugged, Vibe falls back to the active one instead of failing.")
+                            }
+                        }
+
                         HStack {
                             Text("Continuous screen mode")
                                 .font(.system(size: 12.5)).foregroundStyle(Theme.text)

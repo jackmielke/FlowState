@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import CoreGraphics
 
 let kVoices = ["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]
 let kModels = ["gpt-realtime-2.1", "gpt-realtime-2.1-mini", "gpt-realtime-2", "gpt-realtime-1.5", "gpt-realtime", "gpt-realtime-mini"]
@@ -46,6 +47,15 @@ struct AppSettings: Codable, Equatable {
     /// Hard ceiling on spoken updates per task, so a long run cannot narrate forever.
     var devNarrateMax: Int = 8
 
+    /// Which display the assistant looks at. `0` — the sentinel, since no real display
+    /// has id 0 — means "whichever display Vibe Voice is on right now", which is the
+    /// behaviour every build before this one had.
+    ///
+    /// Persisted, but never trusted on its own: CoreGraphics display ids do not survive
+    /// an unplug or a reboot, so `AppState` re-resolves this against the live display
+    /// list and falls back to the active display if it no longer matches anything.
+    var screenDisplayID: UInt32 = DisplayOption.followsActiveID
+
     /// How many screen frames stay in context. Older ones are deleted so their image
     /// tokens stop being re-billed every turn. 0 = keep everything (expensive).
     var maxScreenFrames: Int = 3
@@ -61,7 +71,7 @@ struct AppSettings: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case voice, model, systemPrompt, speed, continuousScreen, screenInterval
         case vadThreshold, silenceDurationMs, transcribeUser, devMode, devRepo
-        case maxScreenFrames, screenshotSize, qualityMode, appearance
+        case maxScreenFrames, screenshotSize, qualityMode, appearance, screenDisplayID
         case devNarrate, devNarrateInterval, devNarrateMax, devPermissionMode
     }
 }
@@ -89,6 +99,7 @@ extension AppSettings {
         speed             = v(.speed, d.speed)
         continuousScreen  = v(.continuousScreen, d.continuousScreen)
         screenInterval    = v(.screenInterval, d.screenInterval)
+        screenDisplayID   = v(.screenDisplayID, d.screenDisplayID)
         vadThreshold      = v(.vadThreshold, d.vadThreshold)
         silenceDurationMs = v(.silenceDurationMs, d.silenceDurationMs)
         transcribeUser    = v(.transcribeUser, d.transcribeUser)

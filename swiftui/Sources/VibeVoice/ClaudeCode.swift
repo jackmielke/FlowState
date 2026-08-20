@@ -16,6 +16,8 @@ actor ClaudeCode {
         var text: String
         var costUSD: Double?
         var turns: Int?
+        /// Claude Code's session id for this run, so a follow-up can --resume it.
+        var sessionID: String?
         /// Tools Claude Code wanted but was not allowed to use. In headless mode there
         /// is nobody to answer a permission prompt, so a blocked tool silently derails
         /// the task — surfacing it is the difference between "it got stuck" and
@@ -23,14 +25,12 @@ actor ClaudeCode {
         var deniedTools: [String] = []
     }
 
-    private var sessionID: String?
-    /// The realtime model will happily fire a second tool call while waiting, and two
-    /// runs resuming the same session id would race.
-    private var busy = false
-
-    var isBusy: Bool { busy }
-
-    func resetSession() { sessionID = nil }
+    /// Concurrency is governed by `DevTaskRegistry`, not here: whether a second job may
+    /// start is a question about repos and capacity, which is decidable (and tested)
+    /// without touching a process. This type just runs what it is told to run.
+    ///
+    /// Each job carries its own Claude Code session id, so several independent
+    /// conversations can be in flight and a follow-up resumes the right one.
 
     /// A GUI .app inherits no shell PATH, so the usual install locations are checked
     /// explicitly before falling back to a login shell lookup.
@@ -98,19 +98,13 @@ actor ClaudeCode {
     func run(task: String,
              repo: String,
              permissionMode: String = "acceptEdits",
+             resumeSessionID: String? = nil,
              onProgress: @escaping @Sendable (String) -> Void) async -> Result {
 
-        if busy {
-            return Result(ok: false, text: "A previous task is still running — one at a time.",
-                          costUSD: nil, turns: nil)
-        }
         guard let bin = Self.binary() else {
             return Result(ok: false, text: "Could not find the `claude` CLI on this Mac.",
                           costUSD: nil, turns: nil)
         }
-
-        busy = true
-        defer { busy = false }
 
         // acceptEdits only auto-approves FILE EDITS. MCP tools (Notion, Slack…) and
         // shell commands still prompt, and a prompt in headless mode has nobody to
@@ -118,7 +112,7 @@ actor ClaudeCode {
         // "just do it" mode.
         var args = ["-p", "--output-format", "stream-json", "--verbose",
                     "--permission-mode", permissionMode]
-        if let sid = sessionID { args += ["--resume", sid] }
+        if let sid = resumeSessionID { args += ["--resume", sid] }
         args.append(task)
 
         let expanded = (repo as NSString).expandingTildeInPath
@@ -169,7 +163,6 @@ actor ClaudeCode {
                           costUSD: nil, turns: nil)
         }
 
-        if let sid = obj["session_id"] as? String { sessionID = sid }
         let isError = (obj["is_error"] as? Bool) ?? false
         let text = (obj["result"] as? String) ?? ""
 
@@ -187,6 +180,7 @@ actor ClaudeCode {
                       text: String(text.prefix(1500)),
                       costUSD: obj["total_cost_usd"] as? Double,
                       turns: obj["num_turns"] as? Int,
+                      sessionID: obj["session_id"] as? String,
                       deniedTools: Array(Set(denied)).sorted())
     }
 }

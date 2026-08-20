@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreGraphics
 
 struct GhostButtonStyle: ButtonStyle {
     var tint: Color = Theme.text
@@ -137,6 +138,145 @@ struct NeatToggle: View {
             )
             .contentShape(Capsule())
             .onTapGesture { withAnimation(.spring(response: 0.28, dampingFraction: 0.75)) { isOn.toggle() } }
+    }
+}
+
+/// Which screen the assistant is looking at, as a one-click menu.
+///
+/// Lives next to Show screen / Watch rather than only in Settings, because with two
+/// monitors "which screen is it seeing?" is a question you ask mid-conversation, and the
+/// answer has to be readable without opening anything. The label is always the display
+/// that would be captured right now — never just "Screen".
+struct ScreenPicker: View {
+    var displays: [DisplayOption]
+    /// The display that would be captured right now, whether picked or followed.
+    var active: DisplayOption?
+    /// True while no explicit pick is set, i.e. the choice tracks the app's own screen.
+    var followsActive: Bool
+    /// `nil` restores follow-the-active-display.
+    var onSelect: (CGDirectDisplayID?) -> Void
+
+    var body: some View {
+        Menu {
+            Toggle(isOn: Binding(get: { followsActive },
+                                 set: { if $0 { onSelect(nil) } })) {
+                Text("Active display — follow me")
+            }
+            Divider()
+            ForEach(displays) { d in
+                Toggle(isOn: Binding(get: { !followsActive && d.displayID == active?.displayID },
+                                     set: { if $0 { onSelect(d.displayID) } })) {
+                    Text("\(d.menuLabel) · \(d.resolution)")
+                }
+            }
+        } label: {
+            // The pill is built inside the label, not around the Menu: anything outside
+            // the label is drawn but not hit-tested, which would leave most of the
+            // control looking clickable and doing nothing.
+            HStack(spacing: 6) {
+                Image(systemName: followsActive ? "display" : "display.and.arrow.down")
+                    .font(.system(size: 10.5))
+                // "Showing X" and not just "X": on its own line the name alone would read
+                // as a status readout rather than the thing you can change.
+                Text("Showing \(label)")
+                    .lineLimit(1)
+                if displays.count > 1 {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 7.5, weight: .bold))
+                        .foregroundStyle(Theme.textFaint)
+                }
+            }
+            .font(.system(size: 11.5, weight: .medium))
+            .foregroundStyle(Theme.textDim)
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Theme.fill)
+                    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(Theme.hairlineHi, lineWidth: 1)))
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(helpText)
+        .accessibilityLabel("Screen shown to Vibe: \(label)")
+    }
+
+    private var label: String {
+        guard let active else { return "No screen" }
+        return followsActive ? "\(active.name) (active)" : active.name
+    }
+
+    private var helpText: String {
+        guard let active else { return "No display is available to capture." }
+        let what = "Vibe sees \(active.name) — \(active.resolution)."
+        return followsActive
+            ? what + " Following whichever display this window is on; pick one to pin it."
+            : what + " Pinned, so moving this window does not change what it sees."
+    }
+}
+
+/// The explicit form of the same choice, for Settings — every display listed as a row
+/// with its resolution, so a two-identical-monitors setup is still tellable apart.
+struct DisplayPicker: View {
+    var displays: [DisplayOption]
+    var active: DisplayOption?
+    var followsActive: Bool
+    var onSelect: (CGDirectDisplayID?) -> Void
+
+    var body: some View {
+        VStack(spacing: 6) {
+            row(title: "Active display",
+                detail: followsActive ? followDetail : "Follow whichever display Vibe Voice is on",
+                symbol: "display",
+                on: followsActive) { onSelect(nil) }
+
+            ForEach(displays) { d in
+                row(title: d.menuLabel,
+                    detail: d.resolution,
+                    symbol: d.isMain ? "menubar.rectangle" : "display.2",
+                    on: !followsActive && d.displayID == active?.displayID) { onSelect(d.displayID) }
+            }
+        }
+    }
+
+    private var followDetail: String {
+        guard let active else { return "No display available" }
+        return "Right now: \(active.name)"
+    }
+
+    private func row(title: String, detail: String, symbol: String,
+                     on: Bool, tap: @escaping () -> Void) -> some View {
+        Button(action: tap) {
+            HStack(spacing: 9) {
+                Image(systemName: symbol)
+                    .font(.system(size: 12))
+                    .foregroundStyle(on ? Theme.onAccent : Theme.textDim)
+                    .frame(width: 16)
+                Text(title)
+                    .font(.system(size: 12.5, weight: on ? .semibold : .regular))
+                    .foregroundStyle(on ? Theme.onAccent : Theme.text)
+                Spacer(minLength: 8)
+                Text(detail)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(on ? Theme.onAccent.opacity(0.75) : Theme.textFaint)
+                if on {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Theme.onAccent)
+                }
+            }
+            .padding(.horizontal, 10).padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(on ? Theme.accent.opacity(0.9) : Theme.fill)
+                    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(Theme.hairline, lineWidth: on ? 0 : 1)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(on ? [.isSelected] : [])
     }
 }
 

@@ -92,7 +92,7 @@ struct ContentView: View {
                 Spacer()
 
                 if let n = state.lastCaptureNote {
-                    Text("last frame \(n)")
+                    Text("last frame \(n)\(lastCaptureFrom)")
                         .font(.system(size: 10.5, design: .monospaced))
                         .foregroundStyle(Theme.textFaint)
                 }
@@ -148,13 +148,36 @@ struct ContentView: View {
     private var watchingPill: some View {
         HStack(spacing: 5) {
             Image(systemName: "eye.fill").font(.system(size: 8.5))
-            Text("WATCHING · \(Int(state.settings.screenInterval))s")
+            Text(watchingLabel)
                 .font(.system(size: 9.5, weight: .bold, design: .rounded)).tracking(0.8)
         }
         .foregroundStyle(Theme.onAccent)
         .padding(.horizontal, 8).padding(.vertical, 4)
         .background(Capsule().fill(Theme.accent.opacity(0.92)))
         .modifier(PulseIf(active: true))
+        .help(watchingHelp)
+    }
+
+    /// Which screen the last frame came from — worth the header width only once there is
+    /// more than one it could have been.
+    private var lastCaptureFrom: String {
+        guard state.displays.count > 1, let name = state.lastCaptureDisplay else { return "" }
+        return " · \(name)"
+    }
+
+    /// Names the screen once there is more than one, so a pill that says something is
+    /// being watched also says *what*.
+    private var watchingLabel: String {
+        let base = "WATCHING · \(Int(state.settings.screenInterval))s"
+        guard state.displays.count > 1, let d = state.activeDisplay else { return base }
+        return base + " · " + d.name.uppercased()
+    }
+
+    private var watchingHelp: String {
+        guard let d = state.activeDisplay else {
+            return "Sending a frame every \(Int(state.settings.screenInterval))s."
+        }
+        return "Sending a frame of \(d.name) every \(Int(state.settings.screenInterval))s."
     }
 
     /// Live spend for this session. Token counts come from response.done.usage, so the
@@ -351,6 +374,18 @@ struct ContentView: View {
                 .buttonStyle(GhostButtonStyle(tint: state.settings.continuousScreen ? Theme.accentInk : Theme.text))
             }
 
+            // Its own line rather than a fifth button: at the 940pt minimum width the
+            // action row is already full, and this is a statement of what is being shared
+            // more than it is an action — so it reads better directly under the controls
+            // it qualifies.
+            if !state.displays.isEmpty {
+                ScreenPicker(displays: state.displays,
+                             active: state.activeDisplay,
+                             followsActive: state.isFollowingActiveDisplay,
+                             onSelect: { state.selectDisplay($0) })
+                    .padding(.top, 10)
+            }
+
             Text(state.audio.running ? state.audio.formatDescription : "audio idle · nothing is captured until you connect")
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(Theme.textFaint.opacity(0.8))
@@ -478,6 +513,14 @@ struct ContentView: View {
 
     private var sidebar: some View {
         VStack(spacing: 0) {
+            // Only takes space once there is something to show, so a plain voice
+            // session keeps the full sidebar for the conversation.
+            if !state.devTasks.tasks.isEmpty {
+                TaskPanel(state: state)
+                    .frame(maxHeight: 260)
+                Divider().overlay(Theme.hairline)
+            }
+
             HStack(spacing: 7) {
                 Text("TRANSCRIPT")
                     .font(.system(size: 9.5, weight: .bold, design: .rounded)).tracking(1.4)
