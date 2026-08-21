@@ -17,9 +17,11 @@ enum NativeTools {
         ToolSpec(
             name: "stop_task",
             summary: "Stop a task",
-            description: "Stop a running Claude Code task by its id (T1, T2…). Use the moment "
-                       + "the user says stop, cancel, or that's wrong. Edits already written stay "
-                       + "on disk — offer to undo afterwards.",
+            description: "Stop a running Claude Code task, or drop a queued one that has not "
+                       + "started, by its id (T1, T2…). Use the moment the user says stop, "
+                       + "cancel, that's wrong, or 'don't bother with that one'. Edits already "
+                       + "written by a running task stay on disk — offer to undo afterwards. A "
+                       + "queued task has changed nothing, so there is nothing to undo.",
             parameters: [ToolParameter("task_id", description: "The task id, e.g. T1.", required: true)],
             effect: .writes(confirmation: "Stop it?")),
 
@@ -31,6 +33,54 @@ enum NativeTools {
                        + "have stopped or finished first.",
             parameters: [ToolParameter("task_id", description: "The task id, e.g. T1.", required: true)],
             effect: .writes(confirmation: "Want me to roll that back?")),
+    ]
+
+    /// Conversation-memory tools. Also answered by AppState, for the same reason as the
+    /// task controls: it owns the store, the summariser and the privacy settings.
+    ///
+    /// These are here rather than buried in Settings because the moment somebody wants
+    /// recording to stop is a moment they are already talking — "don't write this down"
+    /// has to work at the speed of a sentence, not of finding a checkbox.
+    static let memorySpecs: [ToolSpec] = [
+        ToolSpec(
+            name: "summarize_conversation",
+            summary: "Summarise this conversation",
+            description: "Write a short summary of what has been said so far and save it "
+                       + "as a note. Use when the user says summarise this, recap, or what "
+                       + "did we decide. The summary arrives a moment later, so say you're "
+                       + "writing it rather than inventing one."),
+
+        ToolSpec(
+            name: "memory_status",
+            summary: "What's being kept",
+            description: "What Vantage is currently recording about this conversation and "
+                       + "for how long. Use whenever the user asks what you're keeping, "
+                       + "whether you're recording, or where the transcript goes."),
+
+        ToolSpec(
+            name: "pause_recording",
+            summary: "Stop recording",
+            description: "Stop keeping any record of this conversation, immediately. Use "
+                       + "the moment the user says don't record this, stop recording, or "
+                       + "keep this off the record. Never ask them to confirm — do it, "
+                       + "then say it's done."),
+
+        ToolSpec(
+            name: "resume_recording",
+            summary: "Start recording again",
+            description: "Start keeping a record of the conversation again after it was "
+                       + "paused.",
+            // Starting to keep somebody's words again is not a thing to do on a
+            // misheard sentence.
+            effect: .writes(confirmation: "Want me to start keeping a record again?")),
+
+        ToolSpec(
+            name: "forget_conversation",
+            summary: "Forget this conversation",
+            description: "Delete everything kept about this conversation — the transcript "
+                       + "on screen and the file on disk. Use when the user says forget "
+                       + "this, delete this, or wipe that.",
+            effect: .writes(confirmation: "Delete everything from this conversation?")),
     ]
 
     static let specs: [ToolSpec] = [

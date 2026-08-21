@@ -96,4 +96,160 @@ final class DevTaskRegistryTests: XCTestCase {
         XCTAssertEqual(r.finished.count, 5)
         XCTAssertNotNil(r.task(live.id), "a running task must never be pruned")
     }
+
+    // MARK: - The queue
+
+    private func request(_ what: String = "do the thing") -> DevTaskRequest {
+        DevTaskRequest(instruction: what, permissionMode: "acceptEdits")
+    }
+
+    func test_aQueuedTaskIsNeitherRunningNorFinished() {
+        let r = DevTaskRegistry()
+        r.start(label: "first", repo: "~/a")
+        let waiting = r.enqueue(label: "second", repo: "~/a", request: request())
+
+        XCTAssertEqual(r.task(waiting.id)?.status, .queued)
+        XCTAssertEqual(r.running.count, 1)
+        XCTAssertEqual(r.queued.map(\.id), [waiting.id])
+        XCTAssertTrue(r.finished.isEmpty, "queued is not an outcome")
+    }
+
+    /// The whole point: a second task for a busy repo waits instead of being turned away,
+    /// and starts on its own the moment the first one ends.
+    func test_theNextQueuedTaskStartsWhenTheRepoFrees() {
+        let r = DevTaskRegistry()
+        let first = r.start(label: "first", repo: "~/dev/vibe-voice")
+        let second = r.enqueue(label: "second", repo: "~/dev/vibe-voice", request: request())
+
+        XCTAssertNil(r.startNextQueued(), "the repo is still busy")
+
+        r.finish(first.id, ok: true, result: "done")
+        XCTAssertEqual(r.startNextQueued()?.id, second.id)
+        XCTAssertEqual(r.task(second.id)?.status, .running)
+        XCTAssertNil(r.startNextQueued(), "and now the repo is busy again")
+    }
+
+    /// One job per repo is still absolute — the queue may not smuggle a second one in.
+    func test_theQueueNeverStartsTwoJobsInOneRepo() {
+        let r = DevTaskRegistry(maxConcurrent: 3)
+        r.start(label: "live", repo: "~/a")
+        r.enqueue(label: "same repo", repo: "~/a", request: request())
+        r.enqueue(label: "also same", repo: "~/a", request: request())
+
+        XCTAssertNil(r.startNextQueued())
+        XCTAssertEqual(r.running.count, 1)
+    }
+
+    /// A queued job for a free repo is not held up by one queued ahead of it whose repo
+    /// is busy — the queue is an order, not a barrier.
+    func test_aBlockedQueuedTaskDoesNotHoldUpTheOneBehindIt() {
+        let r = DevTaskRegistry(maxConcurrent: 3)
+        r.start(label: "live", repo: "~/a")
+        r.enqueue(label: "blocked", repo: "~/a", request: request())
+        let free = r.enqueue(label: "free", repo: "~/b", request: request())
+
+        XCTAssertEqual(r.startNextQueued()?.id, free.id)
+    }
+
+    func test_capacityStillCapsWhatTheQueueMayStart() {
+        let r = DevTaskRegistry(maxConcurrent: 2)
+        r.start(label: "a", repo: "~/a")
+        r.start(label: "b", repo: "~/b")
+        r.enqueue(label: "c", repo: "~/c", request: request())
+
+        XCTAssertNil(r.startNextQueued())
+        XCTAssertEqual(r.rejectionFor(repo: "~/c"), .atCapacity(limit: 2))
+    }
+
+    func test_queuedTasksCanBeReorderedBeforeTheyRun() {
+        let r = DevTaskRegistry()
+        r.start(label: "live", repo: "~/a")
+        let one = r.enqueue(label: "one", repo: "~/a", request: request())
+        let two = r.enqueue(label: "two", repo: "~/a", request: request())
+        let three = r.enqueue(label: "three", repo: "~/a", request: request())
+
+        XCTAssertTrue(r.moveQueued(three.id, by: -1))
+        XCTAssertEqual(r.queued.map(\.id), [one.id, three.id, two.id])
+        XCTAssertEqual(r.queuePosition(three.id), 2)
+
+        XCTAssertTrue(r.moveQueued(three.id, by: -1))
+        XCTAssertEqual(r.queued.map(\.id), [three.id, one.id, two.id])
+
+        XCTAssertFalse(r.moveQueued(three.id, by: -1), "already first")
+        XCTAssertFalse(r.moveQueued(two.id, by: 1), "already last")
+        XCTAssertEqual(r.queued.map(\.id), [three.id, one.id, two.id])
+    }
+
+    /// Reordering must not disturb what is running or what has already finished —
+    /// the queue shares one array with both.
+    func test_reorderingLeavesRunningAndFinishedTasksAlone() {
+        let r = DevTaskRegistry(maxConcurrent: 3)
+        let live = r.start(label: "live", repo: "~/a")
+        let done = r.start(label: "done", repo: "~/b")
+        r.finish(done.id, ok: true, result: "ok")
+        let one = r.enqueue(label: "one", repo: "~/a", request: request())
+        let two = r.enqueue(label: "two", repo: "~/a", request: request())
+
+        r.moveQueued(from: 0, to: 2)
+
+        XCTAssertEqual(r.queued.map(\.id), [two.id, one.id])
+        XCTAssertEqual(r.task(live.id)?.status, .running)
+        XCTAssertEqual(r.task(done.id)?.status, .finished)
+    }
+
+    /// Reordering decides what runs next, which is the only reason to do it.
+    func test_theReorderedQueueIsTheOrderThingsRunIn() {
+        let r = DevTaskRegistry()
+        let live = r.start(label: "live", repo: "~/a")
+        r.enqueue(label: "one", repo: "~/a", request: request())
+        let two = r.enqueue(label: "two", repo: "~/a", request: request())
+        r.moveQueued(two.id, by: -1)
+
+        r.finish(live.id, ok: true, result: "ok")
+        XCTAssertEqual(r.startNextQueued()?.id, two.id)
+    }
+
+    func test_aQueuedTaskCanBeDropped() {
+        let r = DevTaskRegistry()
+        let live = r.start(label: "live", repo: "~/a")
+        let waiting = r.enqueue(label: "waiting", repo: "~/a", request: request())
+
+        r.cancel(waiting.id)
+        XCTAssertEqual(r.task(waiting.id)?.status, .cancelled)
+        XCTAssertTrue(r.queued.isEmpty)
+
+        r.finish(live.id, ok: true, result: "ok")
+        XCTAssertNil(r.startNextQueued(), "a dropped task must not come back")
+    }
+
+    /// The instruction has to survive the wait, or the queue is a list of promises it
+    /// has forgotten how to keep.
+    func test_aQueuedTaskRemembersWhatItWasAskedToDo() {
+        let r = DevTaskRegistry()
+        r.start(label: "live", repo: "~/a")
+        let waiting = r.enqueue(label: "waiting", repo: "~/a",
+                                request: DevTaskRequest(instruction: "tighten the button spacing",
+                                                        permissionMode: "bypassPermissions",
+                                                        resumeTaskID: "T1"))
+        XCTAssertEqual(r.task(waiting.id)?.request?.instruction, "tighten the button spacing")
+        XCTAssertEqual(r.task(waiting.id)?.request?.permissionMode, "bypassPermissions")
+        XCTAssertEqual(r.task(waiting.id)?.request?.resumeTaskID, "T1")
+    }
+
+    /// Elapsed time must mean "ran for", not "existed for" — a task that waited an hour
+    /// and ran for ten seconds took ten seconds.
+    func test_timeSpentWaitingIsNotCountedAsTimeSpentRunning() {
+        let r = DevTaskRegistry()
+        let live = r.start(label: "live", repo: "~/a", now: base)
+        let waiting = r.enqueue(label: "waiting", repo: "~/a", request: request(), now: base)
+
+        r.finish(live.id, ok: true, result: "ok", now: base.addingTimeInterval(3600))
+        let started = r.startNextQueued(now: base.addingTimeInterval(3600))
+
+        XCTAssertEqual(started?.id, waiting.id)
+        XCTAssertEqual(r.task(waiting.id)?.elapsed(now: base.addingTimeInterval(3610)), 10)
+        XCTAssertEqual(r.task(waiting.id)?.queuedAt, base)
+    }
+
+    private let base = Date(timeIntervalSince1970: 1_700_000_000)
 }

@@ -22,6 +22,8 @@ you: "the spacing on that button is off, tighten it up"
 | **Talk, don't type** | Server-side voice activity detection handles turn-taking. No push-to-talk, and you can interrupt it mid-sentence |
 | **It sees your screen** | On demand (⌘⇧2), or continuously. Multi-monitor: it follows whichever screen your cursor is on |
 | **Dev Mode** | Say what you want changed; it dispatches to Claude Code on *your* machine. Up to three tasks at once across different repos, with live progress and an undo |
+| **A queue, not a refusal** | Ask for a second change to the same repo and it waits its turn instead of being turned away — reorder or drop what's queued, and the next one starts on its own |
+| **Recaps** | One button writes a summary of the conversation, keeps it where you can re-read it, and saves it as a markdown note |
 | **Native tools** | Calendar, clipboard, Notion, and any macOS Shortcut you own — answered in milliseconds, not by spinning up an agent |
 | **Live cost meter** | Real token counts from the API, and dollars per minute. Budget mode cuts it to roughly a third |
 | **Painted backdrops** | Six places that change with your local hour, or your own photos |
@@ -103,3 +105,9 @@ Three implementations exist because they were built simultaneously to be compare
 - [docs/SCREEN-PERMISSION.md](docs/SCREEN-PERMISSION.md) — why macOS screen recording
   keeps breaking for locally built apps, and the fix. Cost a whole night.
 - [docs/COMPARISON.md](docs/COMPARISON.md) — SwiftUI vs Tauri vs Electron, measured.
+- [docs/TASK-QUEUE.md](docs/TASK-QUEUE.md) — two Claude Code runs in one checkout break
+  each other. The rule stayed; "not now" became "next".
+- [docs/CONVERSATION-MEMORY.md](docs/CONVERSATION-MEMORY.md) — what a conversation keeps
+  of itself, what it refuses to keep, and how it gets summarised.
+- [docs/MARKDOWN-RENDERING.md](docs/MARKDOWN-RENDERING.md) — why `**done**` used to render
+  as five literal asterisks.

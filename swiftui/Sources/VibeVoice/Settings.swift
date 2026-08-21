@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import CoreGraphics
+import VibeVoiceCore
 
 let kVoices = ["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]
 let kModels = ["gpt-realtime-2.1", "gpt-realtime-2.1-mini", "gpt-realtime-2", "gpt-realtime-1.5", "gpt-realtime", "gpt-realtime-mini"]
@@ -105,6 +106,13 @@ struct AppSettings: Codable, Equatable {
     /// Set once the Dev Mode offer has been declined. Permanent on purpose.
     var devNudgeDismissed: Bool = false
 
+    /// What Vantage is allowed to remember, and for how long. See `TranscriptPrivacy` —
+    /// every switch in it is honoured in one place, `ConversationLog.append`.
+    var privacy: TranscriptPrivacy = TranscriptPrivacy()
+
+    /// When a running conversation gets summarised, and where the summary goes.
+    var summaries: SummaryPolicy = SummaryPolicy()
+
     enum CodingKeys: String, CodingKey {
         case voice, model, systemPrompt, speed, continuousScreen, screenInterval
         case vadThreshold, silenceDurationMs, transcribeUser, devMode, devRepo
@@ -112,6 +120,7 @@ struct AppSettings: Codable, Equatable {
         case devNarrate, devNarrateInterval, devNarrateMax, devPermissionMode
         case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
         case photoRotateSeconds, menuBarEnabled, summonHotkey, devNudgeDismissed
+        case privacy, summaries
     }
 }
 
@@ -161,6 +170,8 @@ extension AppSettings {
         summonHotkey      = v(.summonHotkey, d.summonHotkey)
         devNudgeDismissed = v(.devNudgeDismissed, d.devNudgeDismissed)
         ambientMode       = v(.ambientMode, d.ambientMode)
+        privacy           = v(.privacy, d.privacy)
+        summaries         = v(.summaries, d.summaries)
     }
 }
 
@@ -185,6 +196,10 @@ enum QualityMode: String, Codable, CaseIterable {
             s.maxScreenFrames = 2
             s.screenInterval = max(s.screenInterval, 10)
             s.transcribeUser = false      // a second model per user turn, billed separately
+            // With no transcription there are no user words to record — the audio
+            // metadata still lands, so a session is not silent in the record, but a
+            // summary built from one side only is worth less. Left to the user rather
+            // than forced: they may well want the assistant's half kept anyway.
         case .quality:
             s.model = "gpt-realtime-2.1"
             s.screenshotSize = 1280

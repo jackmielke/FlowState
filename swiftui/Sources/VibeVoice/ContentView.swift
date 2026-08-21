@@ -111,6 +111,7 @@ struct ContentView: View {
         .sheet(isPresented: $state.showWelcome) {
             WelcomeView(state: state) { state.showWelcome = false }
         }
+        .sheet(isPresented: $state.showSummary) { SummaryView(state: state) }
     }
 
     // MARK: - Header
@@ -308,14 +309,29 @@ struct ContentView: View {
     private var codingPill: some View {
         HStack(spacing: 5) {
             Image(systemName: "curlybraces").font(.system(size: 8.5))
-            Text("CODING")
+            Text(codingLabel)
                 .font(.system(size: 9.5, weight: .bold, design: .rounded)).tracking(0.8)
         }
         .foregroundStyle(Theme.onDev)
         .padding(.horizontal, 8).padding(.vertical, 4)
         .background(Capsule().fill(Theme.dev))
         .modifier(PulseIf(active: true))
-        .help(state.devTaskSummary ?? "Claude Code is working")
+        .help(codingHelp)
+    }
+
+    /// The queue is counted here because a task that will run later is still work the
+    /// user asked for, and the pill is the only place they might be looking.
+    private var codingLabel: String {
+        let waiting = state.devTasks.queued.count
+        return waiting > 0 ? "CODING · +\(waiting)" : "CODING"
+    }
+
+    private var codingHelp: String {
+        let running = state.devTaskSummary ?? "Claude Code is working"
+        let waiting = state.devTasks.queued
+        guard !waiting.isEmpty else { return running }
+        return running + " · " + waiting.count.formatted() + " queued: "
+             + waiting.map(\.label).joined(separator: ", ")
     }
 
     private var pillColor: Color {
@@ -385,26 +401,25 @@ struct ContentView: View {
                 Button(connectLabel) { state.toggleConnection() }
                     .buttonStyle(PrimaryButtonStyle(tint: state.connection == .live ? Theme.bad : Theme.accent))
 
-                // Gated, not blocked. While a reply is streaming the frame is still worth
-                // filing — it is answered on the next turn — but a SECOND press would
-                // only be coalesced into the same queued turn, so the button says
-                // "Queued" and stops taking clicks until that turn goes out.
+                // Screen capture lives in the header icon and ⌘⇧2 — it was here as well,
+                // which made the busiest row in the app carry the same action twice.
+
+                // The recap. Deliberately next to Connect rather than buried in a menu:
+                // the moment it is wanted is the moment a conversation ends, which is
+                // the moment you are already looking at this row.
                 Button {
-                    Task { await state.captureAndSend(auto: false) }
+                    state.summarizeSessionNow()
                 } label: {
                     HStack(spacing: 6) {
-                        Image(systemName: state.hasQueuedResponse ? "clock" : "camera.viewfinder")
+                        Image(systemName: state.isSummarizing ? "ellipsis.bubble" : "text.append")
                             .font(.system(size: 11.5))
-                        Text(state.hasQueuedResponse ? "Queued" : "Show screen")
-                        if !state.hasQueuedResponse {
-                            Text("⌘⇧2").foregroundStyle(Theme.textFaint)
-                        }
+                        Text(state.isSummarizing ? "Summarising…" : "Summary")
                     }
                 }
-                .buttonStyle(GhostButtonStyle())
-                .disabled(state.hasQueuedResponse)
-                .opacity(state.hasQueuedResponse ? 0.5 : 1)
-                .help(captureHelp)
+                .buttonStyle(GhostButtonStyle(tint: summaryTint))
+                .disabled(!state.canSummarizeSession && !hasSummaries)
+                .opacity(state.canSummarizeSession || hasSummaries ? 1 : 0.5)
+                .help(state.summaryButtonHelp)
 
                 if state.isResponding || state.isCancellingResponse {
                     Button {
@@ -434,16 +449,15 @@ struct ContentView: View {
                 .buttonStyle(GhostButtonStyle(tint: state.settings.continuousScreen ? Theme.accentInk : Theme.text))
             }
 
-            // Its own line rather than a fifth button: at the 940pt minimum width the
-            // action row is already full, and this is a statement of what is being shared
-            // more than it is an action — so it reads better directly under the controls
-            // it qualifies.
+            // A status line, not a control — which is why it is quiet. It says what is
+            // being shared, and it is still a menu if you want to change it, but it no
+            // longer competes with the buttons above it for attention.
             if !state.displays.isEmpty {
                 ScreenPicker(displays: state.displays,
                              active: state.activeDisplay,
                              followsActive: state.isFollowingActiveDisplay,
                              onSelect: { state.selectDisplay($0) })
-                    .padding(.top, 10)
+                    .padding(.top, 12)
             }
 
             Text(state.audio.running ? state.audio.formatDescription : "audio idle · nothing is captured until you connect")
@@ -489,6 +503,12 @@ struct ContentView: View {
         case .live: return state.settings.voice + " · " + state.settings.model + (state.sessionID.map { " · \($0)" } ?? "")
         }
     }
+
+    private var hasSummaries: Bool { !state.visibleSummaries.isEmpty }
+
+    /// Amber once there is something to go back and read, plain otherwise — the button
+    /// doubles as the way back into the panel.
+    private var summaryTint: Color { hasSummaries ? Theme.accentInk : Theme.text }
 
     private var connectLabel: String {
         switch state.connection {
@@ -586,6 +606,23 @@ struct ContentView: View {
                     .font(.system(size: 9.5, weight: .bold, design: .rounded)).tracking(1.4)
                     .foregroundStyle(Theme.textFaint)
                 Spacer()
+                // The way back to a recap that has already scrolled past. Only appears
+                // once there is one, so a plain conversation keeps a plain header.
+                if hasSummaries {
+                    Button { state.showSummary = true } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "text.alignleft").font(.system(size: 8.5))
+                            Text("\(state.visibleSummaries.count)")
+                                .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        }
+                        .foregroundStyle(Theme.accentInk)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Capsule().fill(Theme.fill))
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Summaries of this conversation")
+                }
                 Text("\(state.transcript.count)")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(Theme.textFaint.opacity(0.7))

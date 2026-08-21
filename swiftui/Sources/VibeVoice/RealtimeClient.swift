@@ -153,16 +153,21 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
         different project; leave it out for the default.
 
         Two tasks may NOT run in the same repo at the same time: they overwrite each
-        other's files mid-build. If that is refused, say so plainly and offer to wait or
-        to use another repo. A follow-up like "make it faster" continues the most recent
-        task unless the user names one.
+        other's files mid-build. When that happens the new task is QUEUED, not refused —
+        it starts by itself the moment the repo frees up, and reports back like any
+        other. So never tell the user to wait, never offer to retry it later, and never
+        ask them to pick a different repo for you: say in one sentence that it is queued
+        and what it is behind. They can reorder or drop queued tasks in the tasks panel.
+
+        A follow-up like "make it faster" continues the most recent task unless the user
+        names one. If that task is still running, the follow-up queues behind it.
         """
     }
 
     static let devTools: [[String: Any]] = [[
         "type": "function",
         "name": "dispatch_to_claude_code",
-        "description": "Send a coding task to Claude Code on the user's Mac. Use whenever the user asks to change, build, fix, explain or inspect code. Returns immediately with a short task id; the result arrives later. Several tasks can run at once in different repos.",
+        "description": "Send a coding task to Claude Code on the user's Mac. Use whenever the user asks to change, build, fix, explain or inspect code. Returns immediately with a short task id; the result arrives later. Several tasks can run at once in different repos, and a task for a repo that is already busy is queued and started automatically — so call this even when something else is running.",
         "parameters": [
             "type": "object",
             "properties": [

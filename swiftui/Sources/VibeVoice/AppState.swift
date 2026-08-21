@@ -12,7 +12,16 @@ struct TranscriptItem: Identifiable {
     var text: String
     var image: NSImage?
     var streaming: Bool = false
-    let at = Date()
+    var at: Date = Date()
+    /// The conversation this line belongs to — the realtime `session.created` id, or a
+    /// locally minted one when nothing is connected. Carried on the view model as well
+    /// as on the stored record so a line on screen can always be traced to the file it
+    /// was written to.
+    var sessionID: String?
+    /// The durable record this line produced, or nil when privacy refused to keep it.
+    /// The difference is visible: an unrecorded line is still shown, because the live
+    /// transcript reports what was said rather than what was kept.
+    var entryID: UUID?
 }
 
 @MainActor
@@ -92,6 +101,17 @@ final class AppState: ObservableObject {
     @Published var devTaskRunning = false
     @Published var devTaskSummary: String?
 
+    /// The summary panel — what has been written about this conversation, and the
+    /// button that writes one now. See `SummaryService` / `SummaryJob`.
+    @Published var showSummary = false
+    @Published private(set) var isSummarizing = false
+    /// The newest summary written this launch. Drives the button's caption, and is
+    /// what the panel opens on.
+    @Published private(set) var latestSummary: ConversationSummary?
+    /// Why the last request produced nothing — shown in the panel rather than swallowed,
+    /// because a button that silently does nothing is indistinguishable from a broken one.
+    @Published private(set) var summaryProblem: String?
+
     /// Mirrors of the response lifecycle, for the views. See `ResponseCoordinator`.
     @Published private(set) var responsePhase: ResponseCoordinator.Phase = .idle
     @Published private(set) var queuedResponses: Int = 0
@@ -99,6 +119,19 @@ final class AppState: ObservableObject {
     let audio = AudioEngine()
     let cost = CostMeter()
     let settingsStore = SettingsStore()
+    /// The durable transcript: what was said, when, in which session, and what the
+    /// microphone looked like while it was said. Privacy is applied on the way in.
+    let conversation = ConversationStore()
+    /// Measures the utterance in progress. Metadata only — see `UtteranceRecorder`.
+    private let utterance = UtteranceRecorder()
+    /// Metadata for the utterance that just ended, waiting for its transcript to arrive
+    /// on the socket. The two events are separate (`speech_stopped` then
+    /// `input_audio_transcription.completed`, often a second apart), so the measurement
+    /// has to be parked between them.
+    private var pendingUtteranceAudio: UtteranceAudio?
+    /// Rolling summaries of the conversation. See `SummaryService` / `SummaryJob`.
+    private var summaries: SummaryService!
+    private var summaryTimer: Timer?
     private let client = RealtimeClient()
     private let claude = ClaudeCode()
     private var frameItemIDs: [String] = []
@@ -180,16 +213,32 @@ final class AppState: ObservableObject {
     }
 
     /// Tools answered natively, in-process, without Claude Code.
-    let tools = ToolRegistry(specs: NativeTools.specs + NativeTools.taskControlSpecs)
+    let tools = ToolRegistry(specs: NativeTools.specs
+                                  + NativeTools.taskControlSpecs
+                                  + NativeTools.memorySpecs)
 
     /// Stops a running task. The subprocess gets SIGTERM; the run then falls out of its
     /// stream with no result event, which is reported as "Stopped."
     @discardableResult
     func cancelTask(_ id: String) async -> String {
         guard let t = devTasks.task(id) else { return "No task called \(id)." }
+
+        // A queued task has touched nothing yet, so dropping it is free — and a queue
+        // you cannot take something out of is a trap.
+        if t.status == .queued {
+            devTasks.cancel(id)
+            transcript.append(TranscriptItem(speaker: .system,
+                                             text: "■ \(id) \(t.label): taken out of the queue"))
+            objectWillChange.send()
+            return "Dropped \(id) (\(t.label)) from the queue. It never started, so there's nothing to undo."
+        }
+
         guard t.status == .running else { return "\(id) isn't running." }
         let killed = await claude.cancel(taskID: id)
         devTasks.cancel(id)
+        // Stopping a task frees its repo, which is exactly what something in the queue
+        // may have been waiting for.
+        startQueuedTasks()
         devTaskRunning = !devTasks.running.isEmpty
         transcript.append(TranscriptItem(speaker: .system, text: "■ \(id) \(t.label): stopped"))
         objectWillChange.send()
@@ -203,6 +252,9 @@ final class AppState: ObservableObject {
         guard let t = devTasks.task(id) else { return "No task called \(id)." }
         if t.status == .running {
             return "\(id) is still running — stop it first, then undo."
+        }
+        if t.status == .queued {
+            return "\(id) hasn't started yet, so there's nothing to undo. Say stop \(id) to drop it."
         }
         let msg = GitSnapshot.restore(repo: t.repo, taskID: id)
         transcript.append(TranscriptItem(speaker: .system, text: "↩ \(id): \(msg)"))
@@ -249,8 +301,31 @@ final class AppState: ObservableObject {
         responses.onChange = { [weak self] in self?.syncResponseState() }
 
         audio.onMicPCM = { [weak self] data in
-            guard let self, self.client.isConnected else { return }
+            guard let self else { return }
+            // Metering happens whether or not the socket is up: the measurement is of
+            // what the user said, and it is not the network's business. The samples are
+            // not retained — `UtteranceRecorder` keeps a running total and nothing else.
+            //
+            // A second consumer of this stream (an on-device recogniser) would be added
+            // right here; see `LocalTranscriber` for what it would need.
+            self.utterance.ingest(pcm16: data)
+            guard self.client.isConnected else { return }
             self.client.appendAudio(data)
+        }
+
+        // What the user has agreed to keep. Read once here, and re-applied whenever
+        // Settings changes it — see `applyPrivacySettings()`.
+        conversation.privacy = settings.privacy
+        summaries = SummaryService(store: conversation, policy: settings.summaries)
+        summaries.onSummary = { [weak self] summary, delivery in
+            self?.handleSummary(summary, delivery)
+        }
+        // Every start and every end, including the ends that produce nothing — a button
+        // that says "Summarising…" has to hear about the failures too.
+        summaries.onActivity = { [weak self] in
+            guard let self else { return }
+            self.isSummarizing = self.summaries.isSummarizing
+            self.objectWillChange.send()
         }
 
         // Same gate as the on-screen button, so ⌘⇧2 and the button never disagree about
@@ -370,6 +445,14 @@ final class AppState: ObservableObject {
     func disconnect() {
         stopScreenTimer()
         stopResponseWatchdog()
+        // One last summary of whatever was said since the previous one, before the
+        // session id stops meaning anything. Fire-and-forget: it lands in the transcript
+        // and the note file even though the socket is gone.
+        summaries.summarizeNow()
+        stopSummaryClock()
+        utterance.discard()
+        pendingUtteranceAudio = nil
+        conversation.endSession()
         client.disconnect()
         audio.stop()
         connection = .idle
@@ -456,6 +539,11 @@ final class AppState: ObservableObject {
             sessionID = id
             connection = .live
             frameItemIDs.removeAll()
+            // Entries are filed under the id the API knows this conversation by, so a
+            // transcript on disk can be lined up with anything the API reports later.
+            conversation.beginSession(id: id)
+            summaries.begin(session: id)
+            startSummaryClock()
             cost.startSession()
             client.sendSessionUpdate(settings, nativeTools: tools.realtimeTools())
             // A fresh conversation has no response running, whatever the last one left
@@ -474,6 +562,7 @@ final class AppState: ObservableObject {
 
         case .speechStarted:
             userSpeaking = true
+            utterance.begin()
             // Barge-in. The server already truncates its own response because
             // turn_detection.interrupt_response is true, so sending response.cancel
             // here just races it ("Cancellation failed: no active response found").
@@ -488,15 +577,28 @@ final class AppState: ObservableObject {
 
         case .speechStopped:
             userSpeaking = false
+            // Parked until the transcript for this utterance arrives, which is a
+            // separate event and usually about a second later.
+            pendingUtteranceAudio = utterance.end()
             responses.userSpeechStopped()
 
         case .userTranscript(let t):
             let clean = t.trimmingCharacters(in: .whitespacesAndNewlines)
             if !clean.isEmpty {
-                transcript.append(TranscriptItem(speaker: .user, text: clean))
+                // The durable record first, because it is the one that can be refused:
+                // whatever comes back is what was actually kept, redactions and all.
+                let entry = conversation.record(speaker: .user,
+                                                text: clean,
+                                                source: .realtimeAPI,
+                                                audio: pendingUtteranceAudio)
+                transcript.append(TranscriptItem(speaker: .user,
+                                                 text: clean,
+                                                 sessionID: sessionID,
+                                                 entryID: entry?.id))
                 lastUserSaid = clean
                 reconsiderDevOffer()
             }
+            pendingUtteranceAudio = nil
 
         case .assistantDelta(let d):
             if let i = assistantIndex, i < transcript.count {
@@ -575,6 +677,14 @@ final class AppState: ObservableObject {
             stopScreenTimer()
             stopDevNarration()
             stopResponseWatchdog()
+            // Same close-out as a deliberate disconnect: a dropped socket ends the
+            // conversation just as thoroughly, and leaving the clock ticking would keep
+            // summarising a session that is over.
+            summaries.summarizeNow()
+            stopSummaryClock()
+            utterance.discard()
+            pendingUtteranceAudio = nil
+            conversation.endSession()
             responses.reset(reason: "socket closed: \(why)")
             cost.endSession()
         }
@@ -609,6 +719,16 @@ final class AppState: ObservableObject {
                     result = await self.cancelTask((args["task_id"] as? String) ?? "")
                 case "undo_task":
                     result = self.undoTask((args["task_id"] as? String) ?? "")
+                case "summarize_conversation":
+                    result = self.summarizeSessionNow(showPanel: false)
+                case "memory_status":
+                    result = self.conversation.spokenStatus
+                case "pause_recording":
+                    result = self.setRecording(paused: true)
+                case "resume_recording":
+                    result = self.setRecording(paused: false)
+                case "forget_conversation":
+                    result = self.forgetThisConversation()
                 default:
                     result = await NativeTools.run(name, args: args)
                 }
@@ -648,16 +768,53 @@ final class AppState: ObservableObject {
         let resumeID = (args?["resume_task"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
         let resuming = resumeID.flatMap { devTasks.task($0) }
 
-        // Capacity and repo-exclusivity are the registry's call, and refusing here is
-        // far better than letting two runs shred each other's files mid-build.
-        if resuming == nil, let why = devTasks.rejectionFor(repo: repo) {
-            note("Refused a task: \(why.spokenExplanation)")
+        // Capacity and repo-exclusivity are still the registry's call — but the answer
+        // to "not now" is a queue rather than a refusal. Two runs in one checkout shred
+        // each other's builds, which is why the rule exists; making the user personally
+        // wait for the first one is not what the rule was for.
+        let blocker = devTasks.rejectionFor(repo: repo)
+        let mayStartNow: Bool
+        if let r = resuming {
+            // Continuing a task that is STILL RUNNING would put a second `claude`
+            // process under one task id — same repo, same session, both writing.
+            switch (r.status, blocker) {
+            case (.running, _):                 mayStartNow = false
+            case (_, .none):                    mayStartNow = true
+            case (_, .repoBusy(let id, _)):     mayStartNow = id == r.id
+            case (_, .atCapacity):              mayStartNow = false
+            }
+        } else {
+            mayStartNow = blocker == nil
+        }
+
+        guard mayStartNow else {
+            let request = DevTaskRequest(instruction: instruction,
+                                         permissionMode: mode,
+                                         resumeTaskID: resuming?.id)
+            let queuedTask = devTasks.enqueue(label: resuming?.label ?? label,
+                                              repo: repo,
+                                              request: request)
+            let position = devTasks.queuePosition(queuedTask.id) ?? devTasks.queued.count
+            let why = blocker?.queuedExplanation
+                ?? "\(resuming?.id ?? "That task") is still running, so this follow-up is "
+                 + "queued behind it and starts when it finishes."
+            transcript.append(TranscriptItem(
+                speaker: .system,
+                text: "⋯ \(queuedTask.id) queued #\(position) · \(label) · \(repo): \(instruction)"))
+            objectWillChange.send()
+
             client.sendToolOutput(callID: callID, output: [
-                "status": "refused",
-                "reason": why.spokenExplanation,
-                "note": "Tell the user this in one sentence and offer to wait or use another repo."
+                "status": "queued",
+                "task_id": queuedTask.id,
+                "position": position,
+                "reason": why,
+                "note": "Task \(queuedTask.id) is QUEUED at position \(position) and starts BY "
+                      + "ITSELF as soon as it can. Tell the user in one sentence that it is "
+                      + "queued and what it is waiting on. Do not offer to wait or to retry — "
+                      + "it is automatic, and it reports back when it finishes like any other "
+                      + "task. They can reorder the queue in the tasks panel."
             ])
-            requestResponse("tool-refused-capacity")
+            requestResponse("tool-queued")
             return
         }
 
@@ -672,30 +829,49 @@ final class AppState: ObservableObject {
             transcript.append(TranscriptItem(speaker: .system,
                                              text: "→ \(task.id) \(label) · \(repo): \(instruction)"))
         }
+        objectWillChange.send()
+
+        launchDevTask(task,
+                      instruction: instruction,
+                      mode: mode,
+                      resumeSessionID: resuming?.claudeSessionID)
+
+        client.sendToolOutput(callID: callID, output: [
+            "status": "dispatched",
+            "task_id": task.id,
+            "repo": repo,
+            "note": "Task \(task.id) is now RUNNING in \(repo). It keeps running until you receive "
+                  + "a message saying it finished or failed. Other tasks may be running or queued "
+                  + "too — refer to them by id. If the user asks what is happening, answer from the "
+                  + "most recent progress note. Tell the user you're on it in a few words now."
+        ])
+        requestResponse("tool-dispatched")
+    }
+
+    /// Actually starts a job: restore point, process, progress feed, and the queue drain
+    /// that follows it.
+    ///
+    /// Split out of the tool call because it now has two callers — a dispatch that could
+    /// run immediately, and the queue starting the next task on its own minutes later.
+    /// Both need identically the same before-and-after, and a queue whose jobs skipped
+    /// the git snapshot would be a queue whose jobs cannot be undone.
+    private func launchDevTask(_ task: DevTask,
+                               instruction: String,
+                               mode: String,
+                               resumeSessionID: String?) {
         let taskID = task.id
-        let resumeSession = resuming?.claudeSessionID
+        let label = task.label
+        let repo = task.repo
 
         // Restore point BEFORE anything is touched, so "undo that" is one sentence.
-        let snapshot = GitSnapshot.take(repo: repo, taskID: taskID)
-        if snapshot == nil {
+        if GitSnapshot.take(repo: repo, taskID: taskID) == nil {
             note("\(taskID): no git repo at \(repo) — this task has no undo.")
         }
-        objectWillChange.send()
 
         devTaskRunning = true
         devTaskSummary = label
         startDevNarration()
-
-        client.sendToolOutput(callID: callID, output: [
-            "status": "dispatched",
-            "task_id": taskID,
-            "repo": repo,
-            "note": "Task \(taskID) is now RUNNING in \(repo). It keeps running until you receive "
-                  + "a message saying it finished or failed. Other tasks may be running too — refer "
-                  + "to them by id. If the user asks what is happening, answer from the most recent "
-                  + "progress note. Tell the user you're on it in a few words now."
-        ])
-        requestResponse("tool-dispatched")
+        objectWillChange.send()
 
         Task { [weak self] in
             guard let self else { return }
@@ -703,7 +879,7 @@ final class AppState: ObservableObject {
                                           task: instruction,
                                           repo: repo,
                                           permissionMode: mode,
-                                          resumeSessionID: resumeSession) { step in
+                                          resumeSessionID: resumeSessionID) { step in
                 Task { @MainActor [weak self] in self?.appendDevStep(step, taskID: taskID) }
             }
             await MainActor.run {
@@ -712,14 +888,19 @@ final class AppState: ObservableObject {
                 self.devTasks.pruneFinished()
                 if let c = r.costUSD { self.cost.addClaudeCode(c) }
 
+                let mark = r.deniedTools.isEmpty ? (r.ok ? "✓" : "✗") : "⚠︎"
+                self.transcript.append(TranscriptItem(
+                    speaker: .system, text: "\(mark) \(taskID) \(label): " + r.text))
+
+                // The freed repo (or slot) is exactly what the queue was waiting for, so
+                // the next job starts here — before the summary of what just happened is
+                // written, so that summary can say what is running now.
+                let started = self.startQueuedTasks()
+
                 let still = self.devTasks.running
                 self.devTaskRunning = !still.isEmpty
                 self.devTaskSummary = still.first?.label
                 if still.isEmpty { self.stopDevNarration(); self.devStepBuffer.removeAll() }
-
-                let mark = r.deniedTools.isEmpty ? (r.ok ? "✓" : "✗") : "⚠︎"
-                self.transcript.append(TranscriptItem(
-                    speaker: .system, text: "\(mark) \(taskID) \(label): " + r.text))
 
                 var note: String
                 if !r.deniedTools.isEmpty {
@@ -735,6 +916,15 @@ final class AppState: ObservableObject {
                     note = "[Task \(taskID) (\(label)) FAILED. Error: \(r.text)] Tell the user it failed "
                         + "and why, briefly."
                 }
+                if !started.isEmpty {
+                    note += " The queue moved on by itself: "
+                        + started.map { "\($0.id) (\($0.label))" }.joined(separator: ", ")
+                        + " just started. Mention that in a few words."
+                }
+                let waiting = self.devTasks.queued
+                if !waiting.isEmpty {
+                    note += " Still queued: " + waiting.map(\.id).joined(separator: ", ") + "."
+                }
                 if !still.isEmpty {
                     note += " Still running: " + still.map { "\($0.id) (\($0.label))" }.joined(separator: ", ") + "."
                 }
@@ -743,6 +933,40 @@ final class AppState: ObservableObject {
                 self.objectWillChange.send()
             }
         }
+    }
+
+    /// Starts every queued task that may now run, and returns the ones that did.
+    ///
+    /// The registry decides what "may run" means — one job per repo, `maxConcurrent`
+    /// overall — so this cannot start a second job in a checkout however it is called.
+    @discardableResult
+    private func startQueuedTasks() -> [DevTask] {
+        var started: [DevTask] = []
+        while let next = devTasks.startNextQueued() {
+            guard let request = next.request else {
+                // Cannot happen through `enqueue`, and if it ever did, a task stuck in
+                // `running` with nothing running would be far worse than a failure.
+                devTasks.finish(next.id, ok: false, result: "Lost what this task was meant to do.")
+                continue
+            }
+            let resumeSession = request.resumeTaskID.flatMap { devTasks.task($0)?.claudeSessionID }
+            transcript.append(TranscriptItem(
+                speaker: .system,
+                text: "▶ \(next.id) \(next.label) · \(next.repo): starting (was queued)"))
+            launchDevTask(next,
+                          instruction: request.instruction,
+                          mode: request.permissionMode,
+                          resumeSessionID: resumeSession)
+            started.append(next)
+        }
+        if !started.isEmpty { objectWillChange.send() }
+        return started
+    }
+
+    /// Reorders the queue. `-1` is sooner, `+1` is later.
+    func moveQueuedTask(_ id: String, by delta: Int) {
+        guard devTasks.moveQueued(id, by: delta) else { return }
+        objectWillChange.send()
     }
 
     /// Appends one live Claude Code step to the transcript, collapsing consecutive
@@ -831,16 +1055,161 @@ final class AppState: ObservableObject {
     private func closeAssistantTurn() {
         if let i = assistantIndex, i < transcript.count {
             transcript[i].streaming = false
-            if transcript[i].text.trimmingCharacters(in: .whitespaces).isEmpty {
+            let said = transcript[i].text.trimmingCharacters(in: .whitespaces)
+            if said.isEmpty {
                 transcript.remove(at: i)
+            } else {
+                // Recorded once, when the turn is complete — not per delta. A barge-in
+                // closes the turn early, and the partial text is still what was spoken,
+                // so it is still the truth of the conversation.
+                let entry = conversation.record(speaker: .assistant,
+                                                text: said,
+                                                source: .assistantStream)
+                transcript[i].sessionID = sessionID
+                transcript[i].entryID = entry?.id
             }
         }
         assistantIndex = nil
     }
 
     private func note(_ s: String) {
-        transcript.append(TranscriptItem(speaker: .system, text: s))
+        transcript.append(TranscriptItem(speaker: .system, text: s, sessionID: sessionID))
         FileHandle.standardError.write(Data("[app] \(s)\n".utf8))
+    }
+
+    // MARK: - Conversation memory
+
+    /// Ticks the summariser. Slow on purpose — `SummaryJob` decides whether anything is
+    /// due, and the answer is almost always no, so this only has to be often enough that
+    /// a summary is not noticeably late.
+    private func startSummaryClock() {
+        stopSummaryClock()
+        let t = Timer(timeInterval: 15, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                // Never summarise into the middle of a turn: it competes for the moment
+                // the app should be listening, and the last line is usually incomplete.
+                let busy = self.userSpeaking || self.isResponding || self.audio.isPlayingAudio
+                self.summaries.tick(busy: busy)
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        summaryTimer = t
+    }
+
+    private func stopSummaryClock() {
+        summaryTimer?.invalidate()
+        summaryTimer = nil
+    }
+
+    /// A finished summary: onto the screen, into the note, and back into the model's
+    /// context so it can refer to what was said an hour ago without the whole history
+    /// still being on the wire.
+    private func handleSummary(_ summary: ConversationSummary, _ delivery: SummaryService.Delivery) {
+        var line = "✎ summary: " + summary.text
+        if let receipt = delivery.noteReceipt { line += " (" + receipt + ")" }
+        transcript.append(TranscriptItem(speaker: .system, text: line, sessionID: summary.sessionID))
+        latestSummary = summary
+        summaryProblem = nil
+        isSummarizing = summaries.isSummarizing
+
+        // Context only — filed WITHOUT asking for a spoken turn. A summary that made the
+        // assistant start talking unprompted every few minutes would be a worse app.
+        if delivery.fileIntoChat, case .live = connection {
+            client.sendSystemNote(
+                "[Running summary of this conversation so far: \(summary.text)] "
+                + "Context only — do not reply to this message.")
+        }
+        objectWillChange.send()
+    }
+
+    // MARK: - The summary panel
+
+    /// The session the Summary button acts on: the live one, or the last one recorded.
+    var summarySession: String? { conversation.summarizableSessionID }
+
+    /// Every summary held this launch, newest first. Not filtered to the current session
+    /// on purpose — the reason to open this panel is usually to re-read the recap of a
+    /// conversation that has already ended.
+    var visibleSummaries: [ConversationSummary] { conversation.allSummaries }
+
+    /// Enough has been said to be worth summarising, and the user is not mid-sentence.
+    var canSummarizeSession: Bool {
+        guard !isSummarizing, !userSpeaking, let id = summarySession else { return false }
+        return conversation.conversationalCount(inSession: id) >= SummaryJob.minimumForRecap
+    }
+
+    var summaryButtonHelp: String {
+        if isSummarizing { return "Writing a summary of this conversation…" }
+        if userSpeaking { return "Finish what you're saying and it'll summarise the whole thing." }
+        if settings.privacy.paused {
+            return "Recording is paused, so there's nothing kept to summarise. Turn it back on in Settings."
+        }
+        guard let id = summarySession,
+              conversation.conversationalCount(inSession: id) >= SummaryJob.minimumForRecap else {
+            return "Talk for a bit first — there's nothing to summarise yet."
+        }
+        return "Summarise this conversation, save it as a note, and keep it here to re-read."
+    }
+
+    /// "Summarise what we've been talking about" — the button, and the spoken request.
+    ///
+    /// One implementation for both, so the two can never disagree about what "this
+    /// conversation" means. Answers immediately; the summary itself lands a moment later
+    /// through `handleSummary`.
+    ///
+    /// - Parameter showPanel: the button opens the panel, because "nothing happened" is
+    ///   a worse answer than a panel saying why. A spoken request does not: the answer
+    ///   is going to be read aloud, and a sheet appearing over an ambient scene because
+    ///   somebody said a sentence is the app interrupting itself.
+    @discardableResult
+    func summarizeSessionNow(showPanel: Bool = true) -> String {
+        if showPanel { showSummary = true }
+        guard let id = summarySession else {
+            summaryProblem = "Nothing has been recorded yet, so there's nothing to summarise."
+            return summaryProblem!
+        }
+        let said = summaries.summarizeSession(id)
+        isSummarizing = summaries.isSummarizing
+        // A request that did not start is a request that was refused, and the reason is
+        // the only useful thing to show.
+        summaryProblem = isSummarizing ? nil : said
+        objectWillChange.send()
+        return said
+    }
+
+    /// Re-reads the privacy and summary settings after the user changes them. Called
+    /// from Settings rather than observed, so the moment a switch is flipped is the
+    /// moment it takes effect — including retention, which deletes on the way down.
+    func applyPrivacySettings() {
+        conversation.privacy = settings.privacy
+        summaries.policy = settings.summaries
+        conversation.purgeExpiredFiles()
+        objectWillChange.send()
+    }
+
+    /// Deletes this conversation, on screen and on disk.
+    @discardableResult
+    func forgetThisConversation() -> String {
+        guard let id = conversation.currentSessionID else {
+            return "There's nothing recorded for this conversation."
+        }
+        let dropped = conversation.forget(session: id)
+        transcript.removeAll { $0.sessionID == id && $0.speaker != .system }
+        objectWillChange.send()
+        return dropped > 0
+            ? "Forgotten — \(dropped) line\(dropped == 1 ? "" : "s") deleted, and the file with them."
+            : "Nothing was being kept for this conversation."
+    }
+
+    /// The voice-reachable privacy switch. Pausing takes effect on the next line
+    /// recorded, which is the next thing either of us says.
+    func setRecording(paused: Bool) -> String {
+        settings.privacy.paused = paused
+        applyPrivacySettings()
+        return paused
+            ? "Recording paused. Nothing else from this conversation will be kept until you say resume."
+            : "Recording again. " + settings.privacy.summaryLine
     }
 
     // MARK: - Screen
@@ -1027,10 +1396,19 @@ final class AppState: ObservableObject {
             // whole path now avoids.
             if !auto { requestResponse("screenshot") }
             let label = displays.count > 1 ? " · \(frame.display.name)" : ""
+            let caption = (auto ? "Screen frame (auto)" : "Sent a screenshot") + label
+            // A manual capture is a turn — the user asked something by showing it, and a
+            // summary that omits "they shared their screen" is missing the reason the
+            // next three lines happened. Continuous-mode frames are not: one every few
+            // seconds would bury the conversation in its own wallpaper.
+            let entry = auto ? nil
+                             : conversation.record(speaker: .user, text: caption, source: .app)
             transcript.append(TranscriptItem(
                 speaker: .user,
-                text: (auto ? "Screen frame (auto)" : "Sent a screenshot") + label,
-                image: frame.thumbnail))
+                text: caption,
+                image: frame.thumbnail,
+                sessionID: sessionID,
+                entryID: entry?.id))
             lastCaptureNote = String(format: "%.0f KB", Double(frame.bytes) / 1024)
             lastCaptureDisplay = frame.display.name
             // A pick that silently fell back (display unplugged between the pick and the

@@ -144,10 +144,15 @@ struct NeatToggle: View {
 
 /// Which screen the assistant is looking at, as a one-click menu.
 ///
-/// Lives next to Show screen / Watch rather than only in Settings, because with two
-/// monitors "which screen is it seeing?" is a question you ask mid-conversation, and the
-/// answer has to be readable without opening anything. The label is always the display
-/// that would be captured right now — never just "Screen".
+/// Lives under the controls rather than only in Settings, because with two monitors
+/// "which screen is it seeing?" is a question you ask mid-conversation, and the answer
+/// has to be readable without opening anything. The label is always the display that
+/// would be captured right now — never just "Screen".
+///
+/// Drawn quietly on purpose. It is a statement of what is being shared, and the row
+/// above it is where the actions are; giving it the same filled-pill weight as a button
+/// made the stage read as four controls when it has three. It gains its outline on
+/// hover, so it still tells you it can be clicked at the moment you go to click it.
 struct ScreenPicker: View {
     var displays: [DisplayOption]
     /// The display that would be captured right now, whether picked or followed.
@@ -156,6 +161,8 @@ struct ScreenPicker: View {
     var followsActive: Bool
     /// `nil` restores follow-the-active-display.
     var onSelect: (CGDirectDisplayID?) -> Void
+
+    @State private var hovering = false
 
     var body: some View {
         Menu {
@@ -176,26 +183,28 @@ struct ScreenPicker: View {
             // control looking clickable and doing nothing.
             HStack(spacing: 6) {
                 Image(systemName: followsActive ? "display" : "display.and.arrow.down")
-                    .font(.system(size: 10.5))
+                    .font(.system(size: 9.5))
                 // "Showing X" and not just "X": on its own line the name alone would read
                 // as a status readout rather than the thing you can change.
                 Text("Showing \(label)")
                     .lineLimit(1)
                 if displays.count > 1 {
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 7.5, weight: .bold))
-                        .foregroundStyle(Theme.textFaint)
+                        .font(.system(size: 7, weight: .bold))
+                        .foregroundStyle(Theme.textFaint.opacity(0.8))
                 }
             }
-            .font(.system(size: 11.5, weight: .medium))
-            .foregroundStyle(Theme.textDim)
-            .padding(.horizontal, 10).padding(.vertical, 5)
+            .font(.system(size: 10.5))
+            .foregroundStyle(Theme.textFaint)
+            .padding(.horizontal, 9).padding(.vertical, 4)
             .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(Theme.fill)
-                    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .stroke(Theme.hairlineHi, lineWidth: 1)))
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(hovering ? Theme.fill : Color.clear)
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(hovering ? Theme.hairline : Color.clear, lineWidth: 1)))
             .contentShape(Rectangle())
+            .onHover { hovering = $0 }
+            .animation(Theme.ease, value: hovering)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)

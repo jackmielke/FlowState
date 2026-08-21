@@ -1,4 +1,5 @@
 import SwiftUI
+import VibeVoiceCore
 
 struct TranscriptView: View {
     var items: [TranscriptItem]
@@ -29,14 +30,25 @@ struct TranscriptView: View {
     private func row(_ item: TranscriptItem) -> some View {
         switch item.speaker {
         case .system:
-            HStack(spacing: 7) {
+            // Live task steps arrive indented, and the indent is the only thing saying
+            // they belong to the line above. Markdown trims leading whitespace, so it is
+            // measured before parsing and re-applied as real padding.
+            let indent = CGFloat(item.text.prefix { $0 == " " }.count) * 3
+            HStack(alignment: .top, spacing: 7) {
                 Circle().fill(Theme.textFaint).frame(width: 3, height: 3)
-                Text(item.text)
-                    .font(.system(size: 11, weight: .regular, design: .monospaced))
-                    .foregroundStyle(Theme.textFaint)
-                    .textSelection(.enabled)
+                    .padding(.top, 5)
+                // Monospaced, because these lines are ids, paths and tool names — but
+                // still markdown, because a Claude Code result lands here verbatim and
+                // arrives full of bold and bullets.
+                MarkdownText(text: item.text,
+                             size: 11,
+                             color: Theme.textFaint,
+                             design: .monospaced,
+                             lineSpacing: 2,
+                             blockSpacing: 4)
             }
             .padding(.vertical, 1)
+            .padding(.leading, indent)
 
         default:
             let isUser = item.speaker == .user
@@ -71,12 +83,13 @@ struct TranscriptView: View {
                             .stroke(Theme.hairlineHi, lineWidth: 1))
                 }
                 if !item.text.isEmpty {
-                    Text(item.text)
-                        .font(.system(size: 13))
-                        .foregroundStyle(isUser ? Theme.text.opacity(0.88) : Theme.text)
-                        .lineSpacing(3)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
+                    // The model writes markdown whether or not it is asked to, and an
+                    // assistant turn arrives a few characters at a time — so a bold span
+                    // is half-written for a second or two and must not flash asterisks.
+                    MarkdownText(text: item.text,
+                                 size: 13,
+                                 color: isUser ? Theme.text.opacity(0.88) : Theme.text,
+                                 streaming: item.streaming)
                 }
             }
             .padding(.leading, 2)

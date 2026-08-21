@@ -1,4 +1,5 @@
 import SwiftUI
+import VibeVoiceCore
 
 struct SettingsView: View {
     @ObservedObject var state: AppState
@@ -418,6 +419,92 @@ struct SettingsView: View {
                         }
                     }
 
+                    section("Memory & privacy") {
+                        caption("What Vantage keeps of a conversation. The transcript on "
+                                + "screen always shows what was said — these control what "
+                                + "survives it.")
+
+                        privacyToggle("Keep a transcript of what I say", \.privacy.captureUserSpeech)
+                        privacyToggle("Keep a transcript of my replies", \.privacy.captureAssistantSpeech)
+                        privacyToggle("Keep how long and how loud each utterance was",
+                                      \.privacy.captureAudioMetadata)
+                        privacyToggle("Redact keys, emails and long numbers",
+                                      \.privacy.redactSensitiveText)
+                        privacyToggle("Save to disk", \.privacy.persistToDisk)
+
+                        sliderRow(Binding(
+                            get: { state.settings.privacy.retentionHours },
+                            set: { state.settings.privacy.retentionHours = $0 } ),
+                            0...(24 * 30),
+                            state.settings.privacy.retentionHours > 0
+                                ? "keep \(TranscriptPrivacy.humanHours(state.settings.privacy.retentionHours))"
+                                : "keep forever") {
+                            state.applyPrivacySettings()
+                        }
+                        caption("Turning this down deletes what is already past the window, "
+                                + "not just what comes next.")
+
+                        // The audio opt-in, kept visibly separate from everything above
+                        // it: this is the only switch here that would put a recording of
+                        // a room on disk.
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Keep audio clips")
+                                    .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                                Text("Not implemented yet — see AudioClipRecorder.")
+                                    .font(.system(size: 10.5)).foregroundStyle(Theme.textFaint)
+                            }
+                            Spacer()
+                            NeatToggle(isOn: privacyBinding(\.privacy.keepAudioClips), tint: Theme.voice)
+                        }
+
+                        HStack {
+                            Text("Pause recording")
+                                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                            Spacer()
+                            NeatToggle(isOn: privacyBinding(\.privacy.paused), tint: Theme.voice)
+                        }
+                        caption(state.conversation.privacy.summaryLine
+                                + " \(state.conversation.entryCount) line(s) held, "
+                                + "\(state.conversation.bytesOnDisk / 1024) KB on disk.")
+
+                        Text(ConversationStore.conversationsDirectory.path)
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(Theme.textDim)
+                            .textSelection(.enabled)
+
+                        HStack(spacing: 10) {
+                            Button("Forget this conversation") {
+                                _ = state.forgetThisConversation()
+                            }
+                            .buttonStyle(GhostButtonStyle(tint: Theme.accentInk))
+                            Button("Delete everything") {
+                                state.conversation.forgetEverything()
+                            }
+                            .buttonStyle(GhostButtonStyle(tint: Theme.accentInk))
+                        }
+                    }
+
+                    section("Summaries") {
+                        HStack {
+                            Text("Summarise as we go")
+                                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                            Spacer()
+                            NeatToggle(isOn: privacyBinding(\.summaries.enabled), tint: Theme.voice)
+                        }
+                        sliderRow(Binding(
+                            get: { state.settings.summaries.everySeconds },
+                            set: { state.settings.summaries.everySeconds = $0 } ),
+                            60...1800,
+                            String(format: "every %.0f min", state.settings.summaries.everySeconds / 60)) {
+                            state.applyPrivacySettings()
+                        }
+                        caption("Or sooner, once \(state.settings.summaries.everyNEntries) turns "
+                                + "have piled up. Summaries are written locally and filed back "
+                                + "into the conversation silently, so I can refer to what was "
+                                + "said earlier without the whole history staying on the wire.")
+                    }
+
                     VStack(alignment: .leading, spacing: 6) {
                         Text("API key")
                             .font(.system(size: 10.5, weight: .bold)).tracking(1.0)
@@ -448,6 +535,25 @@ struct SettingsView: View {
     private func binding<T>(_ kp: WritableKeyPath<AppSettings, T>) -> Binding<T> {
         Binding(get: { state.settings[keyPath: kp] },
                 set: { state.settings[keyPath: kp] = $0 })
+    }
+
+    /// Like `binding`, but tells AppState afterwards. Privacy settings are not merely
+    /// stored — turning retention down deletes, turning persistence off wipes the files —
+    /// so they have to be pushed through rather than read at some later moment.
+    private func privacyBinding(_ kp: WritableKeyPath<AppSettings, Bool>) -> Binding<Bool> {
+        Binding(get: { state.settings[keyPath: kp] },
+                set: {
+                    state.settings[keyPath: kp] = $0
+                    state.applyPrivacySettings()
+                })
+    }
+
+    private func privacyToggle(_ label: String, _ kp: WritableKeyPath<AppSettings, Bool>) -> some View {
+        HStack {
+            Text(label).font(.system(size: 12.5)).foregroundStyle(Theme.text)
+            Spacer()
+            NeatToggle(isOn: privacyBinding(kp), tint: Theme.voice)
+        }
     }
 
     @ViewBuilder
