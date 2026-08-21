@@ -33,6 +33,16 @@ enum NativeTools {
                        + "have stopped or finished first.",
             parameters: [ToolParameter("task_id", description: "The task id, e.g. T1.", required: true)],
             effect: .writes(confirmation: "Want me to roll that back?")),
+
+        ToolSpec(
+            name: "set_queue_paused",
+            summary: "Pause the task queue",
+            description: "Pause or resume the Claude Code task queue. Pausing lets whatever "
+                       + "is already running finish, then stops anything queued from starting "
+                       + "by itself. Use when the user says pause the queue, hold off, stop "
+                       + "starting new ones, or resume.",
+            parameters: [ToolParameter("paused", type: "boolean",
+                                       description: "true to pause, false to resume.", required: true)]),
     ]
 
     /// Conversation-memory tools. Also answered by AppState, for the same reason as the

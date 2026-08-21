@@ -252,6 +252,28 @@ final class AppState: ObservableObject {
                                   + NativeTools.taskControlSpecs
                                   + NativeTools.memorySpecs)
 
+    /// Pause or resume the queue. Announced in the transcript, because a queue that
+    /// silently stopped taking work would look like the app had died.
+    @discardableResult
+    func setQueuePaused(_ paused: Bool) -> String {
+        guard paused != devTasks.isPaused else { return devTasks.pauseExplanation }
+        devTasks.setPaused(paused)
+        objectWillChange.send()
+        if paused {
+            let line = devTasks.pauseExplanation
+            note(line)
+            return line
+        }
+        note("Queue resumed.")
+        // Anything that was waiting can go now.
+        let started = startQueuedTasks()
+        return started.isEmpty
+            ? "Queue resumed. Nothing was waiting."
+            : "Queue resumed — started " + started.map(\.id).joined(separator: ", ") + "."
+    }
+
+    var isQueuePaused: Bool { devTasks.isPaused }
+
     /// Stops a running task. The subprocess gets SIGTERM; the run then falls out of its
     /// stream with no result event, which is reported as "Stopped."
     @discardableResult
@@ -832,6 +854,8 @@ final class AppState: ObservableObject {
                     result = await self.cancelTask((args["task_id"] as? String) ?? "")
                 case "undo_task":
                     result = self.undoTask((args["task_id"] as? String) ?? "")
+                case "set_queue_paused":
+                    result = self.setQueuePaused((args["paused"] as? Bool) ?? true)
                 case "summarize_conversation":
                     result = self.summarizeSessionNow(showPanel: false)
                 case "memory_status":

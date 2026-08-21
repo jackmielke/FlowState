@@ -30,6 +30,29 @@ struct TaskPanel: View {
                 Text("TASKS")
                     .font(.system(size: 10, weight: .bold, design: .rounded)).tracking(1.4)
                     .foregroundStyle(Theme.textFaint)
+
+                // Only offered when there is a queue to hold back. A pause button with
+                // nothing to pause is furniture.
+                if !queued.isEmpty || state.isQueuePaused {
+                    Button { state.setQueuePaused(!state.isQueuePaused) } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: state.isQueuePaused ? "play.fill" : "pause.fill")
+                                .font(.system(size: 8))
+                            Text(state.isQueuePaused ? "RESUME" : "PAUSE")
+                                .font(.system(size: 8.5, weight: .bold, design: .rounded))
+                                .tracking(0.6)
+                        }
+                        .foregroundStyle(state.isQueuePaused ? Theme.onAccent : Theme.textDim)
+                        .padding(.horizontal, 7).padding(.vertical, 3)
+                        .background(Capsule().fill(state.isQueuePaused
+                                                   ? Theme.accent.opacity(0.9) : Theme.fill))
+                    }
+                    .buttonStyle(.plain)
+                    .help(state.isQueuePaused
+                          ? "Start taking queued tasks again"
+                          : "Finish what is running, then stop starting queued tasks")
+                }
+
                 Spacer()
                 if !queued.isEmpty {
                     Text("\(queued.count) queued")

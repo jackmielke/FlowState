@@ -112,6 +112,32 @@ public final class DevTaskRegistry {
     /// what makes reordering a swap rather than a re-sort.
     public var queued: [DevTask] { tasks.filter { $0.status == .queued } }
 
+    /// While paused, nothing new starts.
+    ///
+    /// A running task is deliberately NOT interrupted: pausing a queue means "stop
+    /// taking on more", not "abandon what is half-done". Stopping something already
+    /// underway is what the stop button is for, and conflating the two would make pause
+    /// a destructive action nobody would risk pressing.
+    public private(set) var isPaused = false
+
+    public func pause() { isPaused = true }
+    public func resume() { isPaused = false }
+    public func setPaused(_ p: Bool) { isPaused = p }
+
+    /// What to say about the pause, given what is actually waiting.
+    public var pauseExplanation: String {
+        guard isPaused else { return "" }
+        let n = queued.count
+        let running = self.running.count
+        if running > 0 && n > 0 {
+            return "Queue paused. Finishing the \(running == 1 ? "current task" : "\(running) running tasks"), "
+                 + "then stopping — \(n) waiting."
+        }
+        if running > 0 { return "Queue paused. Finishing the current task, then stopping." }
+        if n > 0 { return "Queue paused. \(n) task\(n == 1 ? "" : "s") waiting." }
+        return "Queue paused. Nothing waiting."
+    }
+
     public func task(_ id: String) -> DevTask? { tasks.first { $0.id == id } }
 
     /// Why a new task in `repo` cannot start, or nil if it can.
@@ -170,6 +196,9 @@ public final class DevTaskRegistry {
     /// and one further down the queue for a free repo goes first. Call it in a loop
     /// after every completion; it returns nil as soon as nothing else may start.
     public func startNextQueued(now: Date = Date()) -> DevTask? {
+        // Checked HERE rather than at the call site so a pause cannot be routed around:
+        // every path to starting queued work goes through this one function.
+        guard !isPaused else { return nil }
         for waiting in queued where canStart(repo: waiting.repo) {
             guard let i = index(waiting.id) else { continue }
             tasks[i].status = .running

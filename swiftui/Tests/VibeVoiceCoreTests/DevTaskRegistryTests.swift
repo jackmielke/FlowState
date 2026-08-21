@@ -253,3 +253,48 @@ final class DevTaskRegistryTests: XCTestCase {
 
     private let base = Date(timeIntervalSince1970: 1_700_000_000)
 }
+
+extension DevTaskRegistryTests {
+
+    private func queuedRegistry() -> (DevTaskRegistry, DevTask) {
+        let r = DevTaskRegistry(maxConcurrent: 3)
+        let running = r.start(label: "first", repo: "~/a")
+        _ = r.enqueue(label: "second", repo: "~/a",
+                      request: DevTaskRequest(instruction: "x", permissionMode: "acceptEdits"))
+        return (r, running)
+    }
+
+    func test_pauseStopsTheNextTaskFromStarting() {
+        let (r, running) = queuedRegistry()
+        r.pause()
+        r.finish(running.id, ok: true, result: "done")
+        XCTAssertNil(r.startNextQueued(), "paused queues start nothing")
+        XCTAssertEqual(r.queued.count, 1, "and the task is still waiting, not dropped")
+    }
+
+    func test_resumeReleasesIt() {
+        let (r, running) = queuedRegistry()
+        r.pause()
+        r.finish(running.id, ok: true, result: "done")
+        XCTAssertNil(r.startNextQueued())
+        r.resume()
+        XCTAssertEqual(r.startNextQueued()?.label, "second")
+    }
+
+    /// Pause means "take on nothing more", not "abandon what is underway". Conflating
+    /// the two would make it a destructive button nobody would risk pressing.
+    func test_pauseNeverInterruptsSomethingAlreadyRunning() {
+        let (r, running) = queuedRegistry()
+        r.pause()
+        XCTAssertEqual(r.task(running.id)?.status, .running)
+        XCTAssertEqual(r.running.count, 1)
+    }
+
+    func test_theExplanationSaysWhatIsActuallyHappening() {
+        let (r, running) = queuedRegistry()
+        r.pause()
+        XCTAssertTrue(r.pauseExplanation.contains("1 waiting"), r.pauseExplanation)
+        r.finish(running.id, ok: true, result: "done")
+        XCTAssertTrue(r.pauseExplanation.contains("1 task waiting"), r.pauseExplanation)
+    }
+}
