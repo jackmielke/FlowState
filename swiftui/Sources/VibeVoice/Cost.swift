@@ -63,7 +63,25 @@ final class CostMeter: ObservableObject {
         textIn = 0; audioIn = 0; imageIn = 0; cachedIn = 0; textOut = 0; audioOut = 0
     }
 
+    /// Stops the per-minute clock but KEEPS the totals.
+    ///
+    /// Called on disconnect, where the numbers are still the answer to "what did that
+    /// conversation cost" — clearing them the moment the socket drops would throw away
+    /// the thing the meter exists to tell you.
     func endSession() { startedAt = nil }
+
+    /// Clears everything, for when the conversation itself changes.
+    ///
+    /// `endSession` alone left the previous conversation's dollars, turns and tokens on
+    /// screen after switching, because it only stopped the clock. Same shape of bug as
+    /// the summary panel showing another conversation's notes: a per-conversation number
+    /// outliving the conversation.
+    func reset() {
+        startedAt = nil
+        usd = 0; imageUSD = 0; turns = 0
+        claudeCodeUSD = 0; claudeCodeRuns = 0
+        textIn = 0; audioIn = 0; imageIn = 0; cachedIn = 0; textOut = 0; audioOut = 0
+    }
 
     /// Applies one `response.done.usage` payload.
     func add(usage: [String: Any], rates: Rates) {

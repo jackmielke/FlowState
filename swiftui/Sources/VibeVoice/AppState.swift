@@ -1407,7 +1407,7 @@ final class AppState: ObservableObject {
         assistantItemID = nil
         latestSummary = nil
         summaryProblem = nil
-        cost.endSession()
+        cost.reset()
         note(wasLive
              ? "New conversation. The previous one is saved — hit Connect to start talking."
              : "New conversation. The previous one is saved under its own name.")
@@ -1423,7 +1423,7 @@ final class AppState: ObservableObject {
         let load = conversation.openSession(id)
         summaries.begin(session: id)
         summaryProblem = nil
-        cost.endSession()
+        cost.reset()
 
         guard let archive = load.archive else {
             // The file is there and would not open. Do NOT blank the screen and do NOT
