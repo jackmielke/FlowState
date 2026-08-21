@@ -29,7 +29,6 @@ final class FloatingPanelController: ObservableObject {
     /// Breathing room kept between the pane and the window edge.
     private let margin: CGFloat = 14
     /// How near an edge — or the centre line — counts as meaning to line up with it.
-    private let snapDistance: CGFloat = 26
     /// Top-left the drag started from. A drag has to be measured from where the pane
     /// *was*, not from wherever the pointer happens to be, or clamping at one edge
     /// would make the pane jump when the pointer comes back.
@@ -85,7 +84,11 @@ final class FloatingPanelController: ObservableObject {
         dragChanged(translation, in: container)
         dragAnchor = nil
         isDragging = false
-        snap(in: container)
+        // Deliberately no snapping. Edge-and-centre snapping on release is what made
+        // this feel glitchy: you let go and the pane jumps somewhere you did not put it.
+        // A macOS window stays exactly where it is dropped, and that is the whole
+        // expectation being matched here. Clamping still applies, so it cannot be lost
+        // off-screen — that is a safety net, not a magnet.
         save()
     }
 
@@ -106,24 +109,6 @@ final class FloatingPanelController: ObservableObject {
     /// Dropped near an edge or the centre line, the pane lines up with it. Only the axis
     /// that is actually close is affected, so a pane dropped against the left edge keeps
     /// whatever height the user chose.
-    private func snap(in container: CGSize) {
-        guard var p = custom else { return }
-        let s = size(in: container)
-        let leading  = margin
-        let trailing = container.width - s.width - margin
-        let top      = margin
-        let bottom   = container.height - s.height - margin
-        let centreX  = (container.width - s.width) / 2
-
-        if abs(p.x - leading)  < snapDistance { p.x = leading }
-        else if abs(p.x - trailing) < snapDistance { p.x = trailing }
-        else if abs(p.x - centreX)  < snapDistance { p.x = centreX }
-
-        if abs(p.y - top) < snapDistance { p.y = top }
-        else if abs(p.y - bottom) < snapDistance { p.y = bottom }
-
-        custom = clamp(p, s, in: container)
-    }
 
     // MARK: Persistence
     //
@@ -201,12 +186,12 @@ struct FloatingPanel<Content: View>: View {
                 // under it, but scoped to the bar — the settings body itself is not
                 // draggable, or every slider would move the window instead.
                 .highPriorityGesture(
-                    DragGesture(minimumDistance: 2, coordinateSpace: .local)
+                    DragGesture(minimumDistance: 0, coordinateSpace: .local)
                         .onChanged { panel.dragChanged($0.translation, in: container) }
                         .onEnded { v in
-                            withAnimation(Self.settle) {
-                                panel.dragEnded(v.translation, in: container)
-                            }
+                            // Not animated: the pane is already under the cursor, so
+                            // animating "to" that spot only adds visible lag.
+                            panel.dragEnded(v.translation, in: container)
                         })
 
             Divider().overlay(Theme.hairline)
@@ -218,13 +203,13 @@ struct FloatingPanel<Content: View>: View {
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Theme.accent.opacity(panel.isDragging ? 0.55 : 0.32), lineWidth: 1))
+                .stroke(Theme.hairline, lineWidth: 1))
         // Two shadows: one that lifts the pane off the app, one accent-tinted glow that
         // does the job the dimming layer used to do — it marks the pane as the active
         // thing without taking the app behind it away.
-        .shadow(color: Theme.shadow, radius: panel.isDragging ? 34 : 26,
-                y: panel.isDragging ? 18 : 12)
-        .shadow(color: Theme.accent.opacity(0.14), radius: 24)
+        // One steady shadow. It used to grow and gain an accent glow mid-drag, which is
+        // motion nobody asked for on top of the motion they did.
+        .shadow(color: Theme.shadow, radius: 26, y: 12)
         // The window is movable by its background; without this, dragging the pane would
         // drag the whole window out from under it.
         .background(WindowDragBlocker())
@@ -243,8 +228,11 @@ struct FloatingPanel<Content: View>: View {
 
 /// The pane's title bar, and the only part of it that drags.
 ///
-/// It looks grabbable on purpose — a grip, a hand cursor, a bar tint of its own — because
-/// a pane that can be moved and does not say so gets moved by accident or never at all.
+/// Deliberately plain, like a macOS title bar: a title, a close button, and the whole bar
+/// draggable. It used to carry six grip dots and a tinted bar of its own to advertise that
+/// it moved — but a title bar is already the most learned affordance on the platform, and
+/// decorating it made the pane look like a widget rather than a window. The hand cursor on
+/// hover says the same thing without adding furniture.
 private struct PanelGrabBar: View {
     let title: String
     let isDragging: Bool
@@ -257,7 +245,6 @@ private struct PanelGrabBar: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            grip
             Text(title)
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(Theme.text)
@@ -269,8 +256,7 @@ private struct PanelGrabBar: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 11)
-        .background(Theme.panelHi)
-        // The whole bar drags, not just the grip — including the gaps between things.
+        // The whole bar drags, including the gaps between things.
         .contentShape(Rectangle())
         .overlay(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -305,24 +291,6 @@ private struct PanelGrabBar: View {
         .accessibilityAction(named: "Reset position") { onReset() }
     }
 
-    private var grip: some View {
-        VStack(spacing: 3) {
-            ForEach(0..<2) { _ in
-                HStack(spacing: 3) {
-                    ForEach(0..<3) { _ in
-                        Circle()
-                            .fill(hovering || isDragging ? Theme.accent : Theme.textFaint)
-                            .frame(width: 3, height: 3)
-                    }
-                }
-            }
-        }
-        .padding(.horizontal, 5).padding(.vertical, 6)
-        .background(RoundedRectangle(cornerRadius: 5, style: .continuous)
-            .fill(hovering || isDragging ? Theme.fillHi : Theme.fill))
-        .animation(.easeOut(duration: 0.15), value: hovering)
-        .accessibilityHidden(true)
-    }
 }
 
 // MARK: - AppKit glue
