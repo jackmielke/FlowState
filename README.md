@@ -69,7 +69,7 @@ Maintainers: `swiftui/release.sh` builds the notarized DMG.
 
 - The OpenAI key lives in `~/.config/vibe-voice/config.json`, mode `0600`, outside the
   repo. It is never bundled into the binary — verifiable with
-  `strings Vantage.app/Contents/MacOS/VibeVoice | grep sk-`.
+  `strings FlowState.app/Contents/MacOS/VibeVoice | grep sk-`.
 - The app mints a short-lived `ek_…` token per session and puts **only that** on the wire.
 - Dev Mode runs Claude Code as **you**, under **your** account. FlowState never sees your
   Anthropic credentials, and no coding usage is billed to anyone else.
