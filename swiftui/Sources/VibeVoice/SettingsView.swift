@@ -7,7 +7,7 @@ import VibeVoiceCore
 /// prompt (`kDefaultPrompt`, Settings.swift) and in the system prompt sent to the model —
 /// neither is touched by this, because a prompt the user has edited must never be
 /// rewritten by a label change.
-let kAssistantDisplayName = "Flowstate"
+let kAssistantDisplayName = "FlowState"
 
 /// The name macOS itself shows for this app in System Settings, read from the bundle.
 ///
@@ -18,7 +18,7 @@ let kAssistantDisplayName = "Flowstate"
 let kSystemAppName: String =
     (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
     ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String)
-    ?? "Vantage"
+    ?? "FlowState"
 
 struct SettingsView: View {
     @ObservedObject var state: AppState

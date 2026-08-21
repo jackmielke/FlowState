@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Build a signed, notarized Vantage.dmg that anyone can double-click.
+# Build a signed, notarized FlowState.dmg that anyone can double-click.
 #
 #   ./release.sh
 #
 # WHY NOT THE MAC APP STORE
-# App Store apps must be sandboxed, and Vantage cannot be. Dev Mode spawns the user's
+# App Store apps must be sandboxed, and FlowState cannot be. Dev Mode spawns the user's
 # own `claude` binary; native tools run `/usr/bin/shortcuts`; undo runs `/usr/bin/git`
 # against whatever repo the user names. A sandboxed process may not execute arbitrary
 # binaries outside its container, so shipping on the App Store would mean deleting the
@@ -30,7 +30,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP="VibeVoice.app"
-PRODUCT="Vantage"
+PRODUCT="FlowState"
 DMG="$PRODUCT.dmg"
 STAGING=".release-staging"
 PROFILE="${NOTARY_PROFILE:-notary}"

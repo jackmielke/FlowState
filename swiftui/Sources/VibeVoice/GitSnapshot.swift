@@ -152,7 +152,7 @@ enum GitCommitter {
         let subject = "\(label) [\(taskID)]"
         let body = summary.split(separator: "\n").prefix(6).joined(separator: "\n")
         var args = ["commit", "-m", subject, "-m", body,
-                    "-m", "Dispatched by voice through Vantage Dev Mode.", "--"]
+                    "-m", "Dispatched by voice through FlowState Dev Mode.", "--"]
         args += paths
         let c = run(repo, args)
         guard c.ok else {

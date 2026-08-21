@@ -232,7 +232,7 @@ struct ScreenPicker: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .help(helpText)
-        .accessibilityLabel("Screen shown to Vantage: \(label)")
+        .accessibilityLabel("Screen shown to FlowState: \(label)")
     }
 
     private var label: String {
@@ -242,7 +242,7 @@ struct ScreenPicker: View {
 
     private var helpText: String {
         guard let active else { return "No display is available to capture." }
-        let what = "Vantage sees \(active.name) — \(active.resolution)."
+        let what = "FlowState sees \(active.name) — \(active.resolution)."
         return followsActive
             ? what + " Following whichever display this window is on; pick one to pin it."
             : what + " Pinned, so moving this window does not change what it sees."
@@ -363,7 +363,7 @@ struct QualityToggle: View {
     }
 }
 
-/// The two switches that decide how Vantage thinks and sounds, one tap from the stage.
+/// The two switches that decide how FlowState thinks and sounds, one tap from the stage.
 ///
 /// Model and voice were Settings-only, which made the two things most worth swapping
 /// mid-conversation the two things that cost a sheet to reach. They sit where the audio

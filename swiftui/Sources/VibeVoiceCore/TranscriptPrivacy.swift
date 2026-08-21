@@ -1,6 +1,6 @@
 import Foundation
 
-/// What Vantage is allowed to remember about a conversation.
+/// What FlowState is allowed to remember about a conversation.
 ///
 /// The default is deliberately not "record nothing" — a voice assistant that cannot
 /// remember what you said two minutes ago is a worse assistant, and the transcript is

@@ -83,7 +83,7 @@ struct SessionBar: View {
             Button("Save") { state.renameConversation(state.currentSessionID, to: draftTitle) }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Leave it empty to go back to the name Vantage picks from what was said.")
+            Text("Leave it empty to go back to the name FlowState picks from what was said.")
         }
         .alert("Delete this conversation?", isPresented: $confirmingDelete) {
             Button("Delete", role: .destructive) {

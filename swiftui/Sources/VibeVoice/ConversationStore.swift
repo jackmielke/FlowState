@@ -264,7 +264,7 @@ final class ConversationStore: ObservableObject {
 
     // MARK: - Disk
 
-    /// Where everything Vantage keeps lives. Settings, transcripts, notes, the index.
+    /// Where everything FlowState keeps lives. Settings, transcripts, notes, the index.
     ///
     /// `VIBEVOICE_HOME` moves the lot somewhere else for the length of one launch. That
     /// exists so this half of the app can be exercised for real — quit it, start it

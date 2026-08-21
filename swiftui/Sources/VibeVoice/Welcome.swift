@@ -3,7 +3,7 @@ import VibeVoiceCore
 
 /// First run.
 ///
-/// Two things stand between someone opening Vantage and talking to it: an OpenAI key,
+/// Two things stand between someone opening FlowState and talking to it: an OpenAI key,
 /// and — only if they want Dev Mode — their own Claude Code. Everything here exists so a
 /// friend who was handed this app never has to be told what to edit in which file.
 ///
@@ -38,7 +38,7 @@ struct WelcomeView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     step(1, "Your OpenAI key", done: keyOK) {
-                        Text("Vantage talks to OpenAI's realtime model. The key stays on this Mac, in a file only you can read, and goes nowhere except api.openai.com.")
+                        Text("FlowState talks to OpenAI's realtime model. The key stays on this Mac, in a file only you can read, and goes nowhere except api.openai.com.")
                             .font(.system(size: 12)).foregroundStyle(Theme.textDim)
                             .fixedSize(horizontal: false, vertical: true)
 
@@ -78,7 +78,7 @@ struct WelcomeView: View {
                     }
 
                     step(2, "Your Claude Code — optional", done: claude == .ready) {
-                        Text("Dev Mode lets you say \"add a dark mode toggle\" and have it actually happen in your own repo. It runs Claude Code on YOUR machine under YOUR account — Vantage never sees your Anthropic credentials.")
+                        Text("Dev Mode lets you say \"add a dark mode toggle\" and have it actually happen in your own repo. It runs Claude Code on YOUR machine under YOUR account — FlowState never sees your Anthropic credentials.")
                             .font(.system(size: 12)).foregroundStyle(Theme.textDim)
                             .fixedSize(horizontal: false, vertical: true)
 
@@ -98,7 +98,7 @@ struct WelcomeView: View {
                     }
 
                     step(3, "Permissions, when you need them", done: false) {
-                        Text("The microphone is asked for on Connect. Screen access is only needed if you want it to look at your screen — macOS has no Allow button for that one, so Vantage adds itself to the list and you switch it on in System Settings.")
+                        Text("The microphone is asked for on Connect. Screen access is only needed if you want it to look at your screen — macOS has no Allow button for that one, so FlowState adds itself to the list and you switch it on in System Settings.")
                             .font(.system(size: 12)).foregroundStyle(Theme.textDim)
                             .fixedSize(horizontal: false, vertical: true)
                     }

@@ -1,6 +1,6 @@
 # Conversation memory — sessions, transcript capture, privacy, and rolling summaries
 
-What Vantage keeps of a conversation, what it refuses to keep, how you get back to one
+What FlowState keeps of a conversation, what it refuses to keep, how you get back to one
 you had yesterday, and how a long session gets condensed into something it can still
 refer to an hour later.
 
@@ -124,7 +124,7 @@ still be lined up with anything the API reports later.
 
 New-every-launch is the default because what you say now should not be silently appended
 to a conversation from Tuesday. Nothing is lost either way — the setting only decides
-which conversation is in front of you when Vantage opens.
+which conversation is in front of you when FlowState opens.
 
 **Switching closes an open socket, deliberately.** The realtime model carries the previous
 conversation in its own context; keeping the socket open across a switch would produce a

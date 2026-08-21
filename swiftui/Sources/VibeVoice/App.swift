@@ -15,7 +15,7 @@ struct VibeVoiceApp: App {
     @StateObject private var state = AppState()
 
     var body: some Scene {
-        Window("Vantage", id: "main") {
+        Window("FlowState", id: "main") {
             ContentView(state: state)
                 .ignoresSafeArea(.all, edges: .top)
         }
@@ -55,7 +55,7 @@ struct VibeVoiceApp: App {
         // Flow in the menu bar. A separate Scene, placed AFTER the Window and its
         // .commands — chained onto them instead, it silently attaches the command menus
         // to the wrong scene and no status item appears.
-        MenuBarExtra("Vantage", systemImage: state.menuBarSymbol,
+        MenuBarExtra("FlowState", systemImage: state.menuBarSymbol,
                      // Idempotent on purpose: SwiftUI assigns to this during evaluation,
                      // and an unconditional write here re-entered the whole update cycle.
                      isInserted: Binding(
@@ -108,11 +108,11 @@ struct MenuBarMenu: View {
 
         Divider()
 
-        Button("Open Vantage") { Summon.toggle() }
+        Button("Open FlowState") { Summon.toggle() }
         Button("Settings…") { Summon.toggle(); state.showSettings = true }
 
         Divider()
-        Button("Quit Vantage") { NSApplication.shared.terminate(nil) }
+        Button("Quit FlowState") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q", modifiers: .command)
 
     }

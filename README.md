@@ -1,4 +1,4 @@
-# Vantage
+# FlowState
 
 A Mac app you talk to. It can see your screen, and — if you let it — change your code
 while you keep talking.
@@ -38,7 +38,7 @@ you: "the spacing on that button is off, tighten it up"
 
 ## Install
 
-**If someone sent you a `Vantage.dmg`** — open it, drag Vantage to Applications, and
+**If someone sent you a `FlowState.dmg`** — open it, drag FlowState to Applications, and
 double-click. That's it. It's signed and notarized by Apple, so there's no security
 warning and nothing to do in Terminal.
 
@@ -54,7 +54,7 @@ minting a real token — so a bad key fails right there rather than confusingly 
 
 ### Why it isn't on the Mac App Store
 
-App Store apps must be sandboxed, and Vantage can't be. Dev Mode spawns *your* `claude`
+App Store apps must be sandboxed, and FlowState can't be. Dev Mode spawns *your* `claude`
 binary, the tools run `/usr/bin/shortcuts`, and undo runs `git` against whatever repo you
 name — none of which a sandboxed process may do. Shipping on the App Store would mean
 deleting the feature the app exists for.
@@ -71,7 +71,7 @@ Maintainers: `swiftui/release.sh` builds the notarized DMG.
   repo. It is never bundled into the binary — verifiable with
   `strings Vantage.app/Contents/MacOS/VibeVoice | grep sk-`.
 - The app mints a short-lived `ek_…` token per session and puts **only that** on the wire.
-- Dev Mode runs Claude Code as **you**, under **your** account. Vantage never sees your
+- Dev Mode runs Claude Code as **you**, under **your** account. FlowState never sees your
   Anthropic credentials, and no coding usage is billed to anyone else.
 - No servers, no telemetry, no analytics. The only host it talks to is `api.openai.com`
   (plus `api.notion.com` if you connect Notion).

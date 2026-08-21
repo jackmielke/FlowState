@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDisplayName</key>
-	<string>Vantage</string>
+	<string>FlowState</string>
 	<key>CFBundleExecutable</key>
 	<string>VibeVoice</string>
 	<key>CFBundleIconFile</key>
@@ -13,7 +13,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Vantage</string>
+	<string>FlowState</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -27,9 +27,9 @@
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Not used.</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>
-	<string>Vantage reads your calendar so you can ask what is coming up.</string>
+	<string>FlowState reads your calendar so you can ask what is coming up.</string>
 	<key>NSCalendarsUsageDescription</key>
-	<string>Vantage reads your calendar so you can ask what is coming up.</string>
+	<string>FlowState reads your calendar so you can ask what is coming up.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Not used.</string>
 	<key>NSHighResolutionCapable</key>
@@ -37,9 +37,9 @@
 	<key>NSHumanReadableCopyright</key>
 	<string>Local-only. No telemetry.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Vantage uses your microphone so you can talk to it.</string>
+	<string>FlowState uses your microphone so you can talk to it.</string>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>Vantage captures your screen so it can see what you are looking at.</string>
+	<string>FlowState captures your screen so it can see what you are looking at.</string>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
 </dict>

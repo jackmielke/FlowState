@@ -7,7 +7,7 @@ let kVoices = ["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "ve
 let kModels = ["gpt-realtime-2.1", "gpt-realtime-2.1-mini", "gpt-realtime-2", "gpt-realtime-1.5", "gpt-realtime", "gpt-realtime-mini"]
 
 let kDefaultPrompt = """
-You are Vantage, a warm and quick voice companion living on this Mac. \
+You are FlowState, a warm and quick voice companion living on this Mac. \
 Keep replies short and conversational — a sentence or two unless asked for more. \
 When you are shown a screenshot, describe what actually matters on it, concretely, \
 and never pretend to see something you cannot.
@@ -21,9 +21,11 @@ and never pretend to see something you cannot.
 /// prompt the user has actually edited is left completely alone.
 let kSupersededPrompts: [String] = [
     kDefaultPrompt
-        .replacingOccurrences(of: "You are Vantage,", with: "You are Vibe,"),
+        .replacingOccurrences(of: "You are FlowState,", with: "You are Vibe,"),
     kDefaultPrompt
-        .replacingOccurrences(of: "You are Vantage,", with: "You are Flow,"),
+        .replacingOccurrences(of: "You are FlowState,", with: "You are Flow,"),
+    kDefaultPrompt
+        .replacingOccurrences(of: "You are FlowState,", with: "You are Vantage,"),
 ]
 
 struct AppSettings: Codable, Equatable {
@@ -67,7 +69,7 @@ struct AppSettings: Codable, Equatable {
     var devNarrateMax: Int = 8
 
     /// Which display the assistant looks at. `0` — the sentinel, since no real display
-    /// has id 0 — means "whichever display Vantage is on right now", which is the
+    /// has id 0 — means "whichever display FlowState is on right now", which is the
     /// behaviour every build before this one had.
     ///
     /// Persisted, but never trusted on its own: CoreGraphics display ids do not survive
@@ -115,7 +117,7 @@ struct AppSettings: Codable, Equatable {
     /// Set once the Dev Mode offer has been declined. Permanent on purpose.
     var devNudgeDismissed: Bool = false
 
-    /// What Vantage is allowed to remember, and for how long. See `TranscriptPrivacy` —
+    /// What FlowState is allowed to remember, and for how long. See `TranscriptPrivacy` —
     /// every switch in it is honoured in one place, `ConversationLog.append`.
     var privacy: TranscriptPrivacy = TranscriptPrivacy()
 
@@ -265,7 +267,7 @@ final class SettingsStore: ObservableObject {
     }
 
     private static var fileURL: URL {
-        // One root for everything Vantage keeps, so `VIBEVOICE_HOME` moves the settings
+        // One root for everything FlowState keeps, so `VIBEVOICE_HOME` moves the settings
         // with the transcripts instead of half of each.
         let base = ConversationStore.root
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)

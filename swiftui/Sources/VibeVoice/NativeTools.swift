@@ -3,7 +3,7 @@ import AppKit
 import EventKit
 import VibeVoiceCore
 
-/// Tools Vantage answers itself, in milliseconds, without spinning up Claude Code.
+/// Tools FlowState answers itself, in milliseconds, without spinning up Claude Code.
 ///
 /// Everything here returns a short plain-language string, because the result is about to
 /// be spoken. No JSON, no file paths, no code — if a tool wants to return a table, it is
@@ -53,7 +53,7 @@ enum NativeTools {
         ToolSpec(
             name: "memory_status",
             summary: "What's being kept",
-            description: "What Vantage is currently recording about this conversation and "
+            description: "What FlowState is currently recording about this conversation and "
                        + "for how long. Use whenever the user asks what you're keeping, "
                        + "whether you're recording, or where the transcript goes."),
 

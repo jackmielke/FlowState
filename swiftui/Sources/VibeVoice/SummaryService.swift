@@ -46,7 +46,7 @@ struct MarkdownNoteSink: NoteSink {
                 try handle.seekToEnd()
                 try handle.write(contentsOf: Data(block.utf8))
             } else {
-                let header = "# Vantage — \(day.string(from: summary.createdAt))\n"
+                let header = "# FlowState — \(day.string(from: summary.createdAt))\n"
                 try Data((header + block).utf8).write(to: url, options: .atomic)
                 try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
             }
