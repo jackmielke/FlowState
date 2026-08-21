@@ -81,7 +81,7 @@ final class AppState: ObservableObject {
     /// Live macOS Screen Recording state. Refreshed on launch, on app activation,
     /// before every capture, and on demand — never assumed from a past failure.
     @Published var screenPermission: ScreenPermission = .unknown
-    @Published var showSettings = true // TEMP-SCREENSHOT
+    @Published var showSettings = false
     /// First run, or any launch with no usable key — there is nothing to do without one.
     @Published var showWelcome = KeyStore.secret(forKey: "OPENAI_API_KEY") == nil
     /// Whether Dev Mode can work at all on this machine.
