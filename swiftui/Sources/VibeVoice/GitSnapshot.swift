@@ -92,3 +92,117 @@ enum GitSnapshot {
                 String(decoding: ed, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
     }
 }
+
+/// Recording what a task changed, so the work is visible to everyone who needs it.
+///
+/// Dev Mode used to edit the working tree and stop. That meant a session's worth of
+/// changes could pile up locally, invisible to the user, to a Claude Code session working
+/// in the same repo, and — because the cloud only ever sees the remote — completely
+/// invisible to anything running off GitHub.
+enum GitCommitter {
+
+    struct Outcome {
+        var committed: Bool
+        var sha: String?
+        var files: Int
+        var branchRef: String?
+        var pushed: Bool
+        var note: String
+    }
+
+    /// Commits ONLY what the task changed, on the current branch.
+    ///
+    /// The snapshot taken before the task is what makes this precise: it captured the
+    /// tree as it stood, including anything the user had already left uncommitted. So
+    /// diffing against it yields exactly the task's own edits, and unrelated work in
+    /// progress is not swept into the commit.
+    ///
+    /// It commits on the CURRENT branch rather than checking out a new one, because the
+    /// point is that the work is immediately visible and buildable by whoever is in the
+    /// repo. A named `refs/vantage/<task>` is written at the same commit, so each task
+    /// still has its own handle to review or revert.
+    static func commitTaskChanges(repo: String,
+                                  taskID: String,
+                                  label: String,
+                                  summary: String,
+                                  push: Bool) -> Outcome {
+        guard GitSnapshot.isRepo(repo) else {
+            return Outcome(committed: false, sha: nil, files: 0, branchRef: nil,
+                           pushed: false, note: "not a git repo")
+        }
+        let snapRef = "refs/vantage/\(taskID)"
+        guard !run(repo, ["rev-parse", "--verify", snapRef]).out.isEmpty else {
+            return Outcome(committed: false, sha: nil, files: 0, branchRef: nil,
+                           pushed: false, note: "no restore point to diff against")
+        }
+
+        // Stage everything briefly to see untracked files, read the difference against
+        // the snapshot, then unstage. Note this clears a pre-existing staged set — an
+        // accepted trade in a mode where the user is talking, not managing an index.
+        _ = run(repo, ["add", "-A"])
+        let changed = run(repo, ["diff", "--cached", "--name-only", snapRef]).out
+        _ = run(repo, ["reset", "-q"])
+
+        let paths = changed.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+        guard !paths.isEmpty else {
+            return Outcome(committed: false, sha: nil, files: 0, branchRef: nil,
+                           pushed: false, note: "task changed nothing")
+        }
+
+        let subject = "\(label) [\(taskID)]"
+        let body = summary.split(separator: "\n").prefix(6).joined(separator: "\n")
+        var args = ["commit", "-m", subject, "-m", body,
+                    "-m", "Dispatched by voice through Vantage Dev Mode.", "--"]
+        args += paths
+        let c = run(repo, args)
+        guard c.ok else {
+            return Outcome(committed: false, sha: nil, files: paths.count, branchRef: nil,
+                           pushed: false, note: "commit failed: \(c.err.prefix(160))")
+        }
+
+        let sha = run(repo, ["rev-parse", "--short", "HEAD"]).out
+        // A handle per task, without moving anyone's working tree.
+        let named = "vantage/\(taskID)-\(slug(label))"
+        _ = run(repo, ["update-ref", "refs/heads/\(named)", "HEAD"])
+
+        var pushed = false
+        var note = "committed \(paths.count) file\(paths.count == 1 ? "" : "s") as \(sha)"
+        if push {
+            let hasRemote = !run(repo, ["remote"]).out.isEmpty
+            if !hasRemote {
+                note += ", not pushed (no remote)"
+            } else {
+                // Never force. A rejected push means someone else moved the branch, and
+                // silently overwriting them would be far worse than saying so.
+                let branch = run(repo, ["rev-parse", "--abbrev-ref", "HEAD"]).out
+                let p = run(repo, ["push", "origin", branch])
+                pushed = p.ok
+                note += pushed ? ", pushed" : ", push failed: \(p.err.suffix(120))"
+            }
+        }
+        return Outcome(committed: true, sha: sha, files: paths.count,
+                       branchRef: named, pushed: pushed, note: note)
+    }
+
+    private static func slug(_ s: String) -> String {
+        let allowed = s.lowercased().map { $0.isLetter || $0.isNumber ? $0 : "-" }
+        return String(allowed).split(separator: "-").prefix(4).joined(separator: "-")
+    }
+
+    private static func run(_ repo: String, _ args: [String]) -> (ok: Bool, out: String, err: String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        p.arguments = args
+        p.currentDirectoryURL = URL(fileURLWithPath: (repo as NSString).expandingTildeInPath)
+        let o = Pipe(), e = Pipe()
+        p.standardOutput = o
+        p.standardError = e
+        do { try p.run() } catch { return (false, "", error.localizedDescription) }
+        let od = o.fileHandleForReading.readDataToEndOfFile()
+        let ed = e.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return (p.terminationStatus == 0,
+                String(decoding: od, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines),
+                String(decoding: ed, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+}

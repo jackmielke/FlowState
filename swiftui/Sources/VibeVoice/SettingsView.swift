@@ -373,6 +373,27 @@ struct SettingsView: View {
                             .foregroundStyle(Theme.text)
                             .padding(9)
                             .surface(10)
+                        HStack {
+                            Text("Commit each task when it finishes")
+                                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                            Spacer()
+                            NeatToggle(isOn: Binding(
+                                get: { state.settings.devAutoCommit },
+                                set: { state.settings.devAutoCommit = $0 }))
+                        }
+                        HStack {
+                            Text("…and push it")
+                                .font(.system(size: 12.5))
+                                .foregroundStyle(state.settings.devAutoCommit ? Theme.text : Theme.textDim)
+                            Spacer()
+                            NeatToggle(isOn: Binding(
+                                get: { state.settings.devAutoPush && state.settings.devAutoCommit },
+                                set: { state.settings.devAutoPush = $0 }))
+                                .disabled(!state.settings.devAutoCommit)
+                                .opacity(state.settings.devAutoCommit ? 1 : 0.4)
+                        }
+                        caption("Only what the task itself changed is committed — anything you already had in progress is left alone, because the restore point taken beforehand is what it diffs against. Commits land on your current branch, and each task also gets a vantage/T1-… ref to review or revert. Pushing is the only way the work reaches a Claude Code running in the cloud, which can see the remote and nothing else. Failed or permission-blocked tasks are never committed.")
+
                         caption("Runs claude -p in that folder with --permission-mode acceptEdits, so it writes files without asking. Keep it on a repo you can git checkout.")
 
                         HStack {

@@ -885,6 +885,26 @@ final class AppState: ObservableObject {
             await MainActor.run {
                 self.devTasks.setSessionID(r.sessionID, for: taskID)
                 self.devTasks.finish(taskID, ok: r.ok, result: r.text, deniedTools: r.deniedTools)
+
+                // Record the work so it is visible beyond this Mac. Only on success:
+                // committing a failed or permission-blocked run would put a half-finished
+                // change into history and, worse, onto the remote.
+                var commitNote = ""
+                if r.ok && r.deniedTools.isEmpty && self.settings.devAutoCommit {
+                    let out = GitCommitter.commitTaskChanges(
+                        repo: repo, taskID: taskID, label: label,
+                        summary: r.text, push: self.settings.devAutoPush)
+                    if out.committed {
+                        commitNote = " " + out.note
+                        self.transcript.append(TranscriptItem(
+                            speaker: .system,
+                            text: "⎇ \(taskID): \(out.note)"
+                                + (out.branchRef.map { " · \($0)" } ?? "")))
+                    } else if out.note != "task changed nothing" {
+                        self.transcript.append(TranscriptItem(
+                            speaker: .system, text: "⎇ \(taskID): not committed — \(out.note)"))
+                    }
+                }
                 self.devTasks.pruneFinished()
                 if let c = r.costUSD { self.cost.addClaudeCode(c) }
 
@@ -910,8 +930,11 @@ final class AppState: ObservableObject {
                         + "auto-allow in Settings under Dev Mode, then ask if they want you to retry.] "
                         + "Partial result: \(r.text)"
                 } else if r.ok {
-                    note = "[Task \(taskID) (\(label)) FINISHED. Result: \(r.text)] Tell the user what "
-                        + "changed, in one or two sentences. Name the task if others are still running."
+                    note = "[Task \(taskID) (\(label)) FINISHED. Result: \(r.text)"
+                        + (commitNote.isEmpty ? "" : " Git:\(commitNote).")
+                        + "] Tell the user what changed, in one or two sentences. If it was "
+                        + "committed and pushed, say so in a few words. Name the task if "
+                        + "others are still running."
                 } else {
                     note = "[Task \(taskID) (\(label)) FAILED. Error: \(r.text)] Tell the user it failed "
                         + "and why, briefly."
