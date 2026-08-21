@@ -114,6 +114,11 @@ struct AppSettings: Codable, Equatable {
     /// which can see the remote and nothing else.
     var devAutoPush: Bool = true
 
+    /// The floating widget: a small always-on-top panel that follows you between apps
+    /// and Spaces, so FlowState is reachable without its window in front.
+    var hudEnabled: Bool = false
+    var hudStyle: HUDStyle = .pill
+
     /// Set once the Dev Mode offer has been declined. Permanent on purpose.
     var devNudgeDismissed: Bool = false
 
@@ -143,7 +148,7 @@ struct AppSettings: Codable, Equatable {
         case devNarrate, devNarrateInterval, devNarrateMax, devPermissionMode
         case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
         case photoRotateSeconds, menuBarEnabled, summonHotkey, devNudgeDismissed
-        case devAutoCommit, devAutoPush
+        case devAutoCommit, devAutoPush, hudEnabled, hudStyle
         case privacy, summaries, resumeLastSession
     }
 }
@@ -195,6 +200,8 @@ extension AppSettings {
         devNudgeDismissed = v(.devNudgeDismissed, d.devNudgeDismissed)
         devAutoCommit     = v(.devAutoCommit, d.devAutoCommit)
         devAutoPush       = v(.devAutoPush, d.devAutoPush)
+        hudEnabled        = v(.hudEnabled, d.hudEnabled)
+        hudStyle          = v(.hudStyle, d.hudStyle)
         ambientMode       = v(.ambientMode, d.ambientMode)
         privacy           = v(.privacy, d.privacy)
         summaries         = v(.summaries, d.summaries)

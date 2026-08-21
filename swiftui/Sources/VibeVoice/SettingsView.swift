@@ -225,6 +225,41 @@ struct SettingsView: View {
                         }
                     }
 
+                    section("Floating widget") {
+                        HStack {
+                            Text("Keep a widget on top")
+                                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                            Spacer()
+                            NeatToggle(isOn: Binding(
+                                get: { state.settings.hudEnabled },
+                                set: { state.settings.hudEnabled = $0; state.applyHUD() }))
+                        }
+                        caption("A small panel that floats above other apps and follows you between Spaces and full-screen windows. Drag it anywhere; clicking the orb opens FlowState. It never takes focus, so it cannot interrupt what you are typing.")
+
+                        if state.settings.hudEnabled {
+                            HStack(spacing: 6) {
+                                ForEach(HUDStyle.allCases) { st in
+                                    Button {
+                                        state.settings.hudStyle = st
+                                        state.applyHUD()
+                                    } label: {
+                                        Text(st.label)
+                                            .font(.system(size: 11.5, weight: .medium, design: .rounded))
+                                            .frame(maxWidth: .infinity)
+                                            .padding(.vertical, 6)
+                                            .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                                .fill(state.settings.hudStyle == st
+                                                      ? Theme.accent.opacity(0.9) : Theme.fill))
+                                            .foregroundStyle(state.settings.hudStyle == st
+                                                             ? Theme.onAccent : Theme.text)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            caption(state.settings.hudStyle.blurb)
+                        }
+                    }
+
                     section("Anywhere") {
                         HStack {
                             Text("Show in the menu bar")

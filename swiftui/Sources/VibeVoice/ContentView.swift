@@ -104,7 +104,7 @@ struct ContentView: View {
         .onContinuousHover { _ in state.noteActivity() }
         .frame(minWidth: 940, minHeight: 620)
         .preferredColorScheme(sceneIsDark ? .dark : state.settings.appearance.colorScheme)
-        .onAppear { state.applyEffectiveAppearance() }
+        .onAppear { state.applyEffectiveAppearance(); state.applyHUD() }
         .onChange(of: state.settings.backdrop) { _, _ in state.applyEffectiveAppearance() }
         .onChange(of: state.settings.appearance) { _, _ in state.applyEffectiveAppearance() }
         // Settings is a floating pane, not a sheet: most of what it changes — backdrop,

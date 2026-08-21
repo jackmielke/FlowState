@@ -89,6 +89,11 @@ final class AppState: ObservableObject {
 
     func refreshClaudeAvailability() { claudeAvailability = ClaudeCode.availability() }
 
+    /// The floating widget. Created lazily and only while it is switched on.
+    private lazy var hud = HUDController(state: self)
+
+    func applyHUD() { hud.apply() }
+
     /// The Dev Mode offer, if one is warranted right now. See `DevModeHint`.
     @Published private(set) var devOffer: DevModeHint.Trigger?
     private var assistantTurns = 0
@@ -434,6 +439,10 @@ final class AppState: ObservableObject {
         for name in settings.disabledTools { tools.setEnabled(false, for: name) }
 
         applySummonHotkey()
+        // NOT applyHUD() here. Building the widget's hosting view during init means
+        // constructing a view that observes this very object while SwiftUI is still
+        // assembling the scene graph, which crashes the app on launch. ContentView calls
+        // it once it is on screen.
         startAmbientClock()
 
         refreshScreenPermission(reason: "launch")
