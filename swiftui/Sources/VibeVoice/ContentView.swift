@@ -24,6 +24,13 @@ struct ContentView: View {
     /// light/dark setting, which goes back to governing Midnight and Paper.
     private var sceneIsDark: Bool { state.settings.backdrop.place != nil }
 
+    /// Elapsed recording time, taken from the samples actually captured rather than the
+    /// wall clock, so it reports the length of the file being written.
+    private var recordingClock: String {
+        let s = Int(state.recorder.duration)
+        return String(format: "%d:%02d", s / 60, s % 60)
+    }
+
     /// Which photo a rotating folder is on. Derived from the clock rather than a timer,
     /// so it advances on its own and survives a redraw without extra state.
     private var photoIndex: Int {
@@ -170,6 +177,21 @@ struct ContentView: View {
                     .help(state.isCancellingResponse
                           ? "Still stopping — click again to force the session back to idle"
                           : "Stop this reply")
+                }
+
+                Button {
+                    state.isRecording ? { _ = state.stopRecording() }() : { _ = state.startRecording() }()
+                } label: {
+                    Image(systemName: state.isRecording ? "stop.circle.fill" : "record.circle")
+                        .foregroundStyle(state.isRecording ? Theme.bad : Theme.textDim)
+                }
+                .buttonStyle(IconButtonStyle())
+                .help(state.isRecording ? "Stop recording and save it" : "Record this conversation")
+
+                if state.isRecording {
+                    Text(recordingClock)
+                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Theme.bad)
                 }
 
                 Button { Task { await state.captureAndSend(auto: false) } } label: {

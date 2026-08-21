@@ -153,6 +153,9 @@ final class AppState: ObservableObject {
 
     let audio = AudioEngine()
     let cost = CostMeter()
+    /// Records both halves of the conversation. Fed from the same PCM the socket sees.
+    let recorder = SessionRecorder()
+    @Published var recordings: [SessionRecorder.Recording] = []
     let settingsStore = SettingsStore()
     /// The durable transcript: what was said, when, in which session, and what the
     /// microphone looked like while it was said. Privacy is applied on the way in.
@@ -273,6 +276,45 @@ final class AppState: ObservableObject {
     }
 
     var isQueuePaused: Bool { devTasks.isPaused }
+
+    // MARK: - Recording
+
+    var isRecording: Bool { recorder.isRecording }
+
+    /// Start capturing. The mic has to be running for there to be anything to capture,
+    /// so this says so rather than producing a file of silence.
+    @discardableResult
+    func startRecording() -> String {
+        guard !recorder.isRecording else { return "Already recording." }
+        guard audio.running else {
+            return "Nothing to record yet — hit Connect first, then record."
+        }
+        _ = recorder.start(title: currentSessionTitle)
+        note("Recording this conversation.")
+        objectWillChange.send()
+        return "Recording."
+    }
+
+    @discardableResult
+    func stopRecording() -> String {
+        guard recorder.isRecording else { return "Not recording." }
+        let seconds = Int(recorder.duration)
+        guard let url = recorder.stop() else {
+            note("Recording stopped — too short to keep.")
+            objectWillChange.send()
+            return "That was too short to save."
+        }
+        refreshRecordings()
+        note("Saved \(url.lastPathComponent) · \(seconds)s")
+        objectWillChange.send()
+        return "Saved \(seconds) seconds as \(url.lastPathComponent)."
+    }
+
+    func refreshRecordings() { recordings = SessionRecorder.library() }
+
+    func revealRecordings() {
+        NSWorkspace.shared.activateFileViewerSelecting(recordings.prefix(1).map(\.url))
+    }
 
     /// Stops a running task. The subprocess gets SIGTERM; the run then falls out of its
     /// stream with no result event, which is reported as "Stopped."
@@ -748,6 +790,7 @@ final class AppState: ObservableObject {
 
         case .audio(let pcm):
             audio.enqueue(pcm16: pcm)
+            recorder.appendAssistant(pcm)
 
         case .toolCall(let callID, let name, let argumentsJSON):
             handleToolCall(callID: callID, name: name, argumentsJSON: argumentsJSON)

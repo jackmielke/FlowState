@@ -225,6 +225,45 @@ struct SettingsView: View {
                         }
                     }
 
+                    section("Recordings") {
+                        HStack {
+                            Text(state.isRecording ? "Recording now" : "Not recording")
+                                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                            Spacer()
+                            Button(state.isRecording ? "Stop" : "Record") {
+                                _ = state.isRecording ? state.stopRecording() : state.startRecording()
+                            }
+                            .buttonStyle(GhostButtonStyle(tint: state.isRecording ? Theme.badInk : Theme.accentInk))
+                        }
+                        caption("Captures both halves — your voice and its replies — into one WAV. Nothing extra is recorded to do it: both sides already pass through the app as audio on their way to and from OpenAI.")
+
+                        if state.recordings.isEmpty {
+                            caption("Nothing recorded yet.")
+                        } else {
+                            ForEach(state.recordings.prefix(8)) { r in
+                                HStack(spacing: 8) {
+                                    Image(systemName: "waveform")
+                                        .font(.system(size: 10)).foregroundStyle(Theme.textFaint)
+                                    Text(r.title)
+                                        .font(.system(size: 11.5)).foregroundStyle(Theme.text)
+                                        .lineLimit(1).truncationMode(.middle)
+                                    Spacer()
+                                    Text(r.lengthLabel)
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundStyle(Theme.textFaint)
+                                    Button {
+                                        NSWorkspace.shared.open(r.url)
+                                    } label: { Image(systemName: "play.fill").font(.system(size: 9)) }
+                                        .buttonStyle(.plain).foregroundStyle(Theme.accentInk)
+                                        .help("Play")
+                                }
+                            }
+                            Button("Show in Finder") { state.revealRecordings() }
+                                .buttonStyle(GhostButtonStyle())
+                        }
+                    }
+                    .onAppear { state.refreshRecordings() }
+
                     section("Floating widget") {
                         HStack {
                             Text("Keep a widget on top")
