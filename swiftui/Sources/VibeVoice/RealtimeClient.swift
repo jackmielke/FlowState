@@ -25,6 +25,10 @@ enum RealtimeEvent {
     case speechStarted
     case speechStopped
     case userTranscript(String)
+    /// `conversation.item.input_audio_transcription.failed` — the utterance was heard
+    /// and could not be turned into words. Emitted rather than swallowed because a line
+    /// is already on screen waiting for it, and nothing else will ever close it.
+    case userTranscriptFailed(String)
     case assistantDelta(String)
     /// `response.done` — carries `response.status` (completed / cancelled / failed / incomplete).
     case responseDone(status: String)
@@ -317,6 +321,12 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
 
         case "conversation.item.input_audio_transcription.completed":
             emit(.userTranscript((obj["transcript"] as? String) ?? ""))
+
+        case "conversation.item.input_audio_transcription.failed":
+            let e = obj["error"] as? [String: Any]
+            let why = (e?["message"] as? String) ?? "transcription failed"
+            FileHandle.standardError.write(Data("[realtime] transcription failed: \(why)\n".utf8))
+            emit(.userTranscriptFailed(why))
 
         case "response.output_audio_transcript.delta", "response.audio_transcript.delta", "response.output_text.delta":
             emit(.assistantDelta((obj["delta"] as? String) ?? ""))

@@ -152,6 +152,8 @@ struct ContentView: View {
 
                 costReadout
 
+                QualityToggle(mode: state.settings.qualityMode) { state.setQualityMode($0) }
+
                 if state.isResponding || state.isCancellingResponse {
                     Button { state.stopResponse() } label: {
                         Image(systemName: "stop.fill")
@@ -460,15 +462,25 @@ struct ContentView: View {
                     .padding(.top, 12)
             }
 
-            Text(state.audio.running ? state.audio.formatDescription : "audio idle · nothing is captured until you connect")
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(Theme.textFaint.opacity(0.8))
+            ModelVoiceBar(model: $state.settings.model,
+                          voice: $state.settings.voice,
+                          audioDetail: audioDetail,
+                          onChange: { state.applySettingsLive() })
                 .padding(.top, 14)
 
             Spacer(minLength: 14)
         }
         .padding(.horizontal, 28)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// The negotiated audio format. It had its own line under the stage; it is now the
+    /// tooltip of the row that took that spot, so the detail is one hover away instead
+    /// of spending a line on something you read once.
+    private var audioDetail: String {
+        state.audio.running
+            ? state.audio.formatDescription
+            : "audio idle · nothing is captured until you connect"
     }
 
     private var headline: String {
@@ -601,33 +613,9 @@ struct ContentView: View {
                 Divider().overlay(Theme.hairline)
             }
 
-            HStack(spacing: 7) {
-                Text("TRANSCRIPT")
-                    .font(.system(size: 9.5, weight: .bold, design: .rounded)).tracking(1.4)
-                    .foregroundStyle(Theme.textFaint)
-                Spacer()
-                // The way back to a recap that has already scrolled past. Only appears
-                // once there is one, so a plain conversation keeps a plain header.
-                if hasSummaries {
-                    Button { state.showSummary = true } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "text.alignleft").font(.system(size: 8.5))
-                            Text("\(state.visibleSummaries.count)")
-                                .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                        }
-                        .foregroundStyle(Theme.accentInk)
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(Capsule().fill(Theme.fill))
-                        .contentShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .help("Summaries of this conversation")
-                }
-                Text("\(state.transcript.count)")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(Theme.textFaint.opacity(0.7))
-            }
-            .padding(.horizontal, 18).padding(.top, 15).padding(.bottom, 9)
+            // Which conversation this is, and the way into another one. It replaces a
+            // "TRANSCRIPT" label that named what the user could already see.
+            SessionBar(state: state)
 
             Divider().overlay(Theme.hairline)
 
@@ -641,7 +629,7 @@ struct ContentView: View {
                         Text("Nothing said yet")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(Theme.textFaint)
-                        Text("Your words and Vantage's replies land here\nas you talk.")
+                        Text("Your words and Vantage's replies land here as you\ntalk, and stay here after a restart.")
                             .font(.system(size: 11))
                             .multilineTextAlignment(.center)
                             .foregroundStyle(Theme.textFaint.opacity(0.7))

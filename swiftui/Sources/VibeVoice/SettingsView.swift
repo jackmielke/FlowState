@@ -210,10 +210,7 @@ struct SettingsView: View {
                         HStack(spacing: 8) {
                             ForEach(QualityMode.allCases, id: \.self) { m in
                                 Button {
-                                    var s = state.settings
-                                    m.apply(to: &s)
-                                    state.settings = s
-                                    state.applySettingsLive()
+                                    state.setQualityMode(m)
                                 } label: {
                                     Text(m.label)
                                         .font(.system(size: 12, weight: .semibold))
@@ -440,6 +437,48 @@ struct SettingsView: View {
                         }
                     }
 
+                    section("Conversations") {
+                        caption("Each conversation is saved on its own — its transcript, "
+                                + "its summaries, its own name in the switcher at the top "
+                                + "of the sidebar. Nothing here deletes anything; it only "
+                                + "decides which one is in front of you when Vantage opens.")
+
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Pick up where I left off")
+                                    .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                                Text(state.settings.resumeLastSession
+                                     ? "Launching reopens the last conversation, with its history."
+                                     : "Launching starts a new conversation. The last one stays in the switcher.")
+                                    .font(.system(size: 10.5)).foregroundStyle(Theme.textFaint)
+                            }
+                            Spacer()
+                            NeatToggle(isOn: binding(\.resumeLastSession), tint: Theme.voice)
+                        }
+
+                        HStack(spacing: 10) {
+                            Button("New conversation") { state.newConversation() }
+                                .buttonStyle(GhostButtonStyle(tint: Theme.accentInk))
+                            // Reads this conversation's file again and folds back anything
+                            // missing. Costs nothing when nothing is missing.
+                            Button("Reload transcript") { state.refreshTranscript() }
+                                .buttonStyle(GhostButtonStyle(tint: Theme.voiceInk))
+                            Text(savedConversationsLine)
+                                .font(.system(size: 11)).foregroundStyle(Theme.textFaint)
+                        }
+
+                        if let problem = state.conversation.lastReadError {
+                            caption("Last read back: " + problem)
+                        }
+                        // Should be zero. It counts lines that were put on screen waiting
+                        // for their text and never got it — so when it is not zero, the
+                        // number is the only evidence that happened.
+                        if state.abandonedTranscriptUpdates > 0 {
+                            caption("\(state.abandonedTranscriptUpdates) line(s) never came "
+                                    + "back transcribed this session.")
+                        }
+                    }
+
                     section("Memory & privacy") {
                         caption("What Vantage keeps of a conversation. The transcript on "
                                 + "screen always shows what was said — these control what "
@@ -551,6 +590,13 @@ struct SettingsView: View {
         // The sheet is its own AppKit window; without this it can render one frame
         // behind the main window after a theme switch.
         .preferredColorScheme(state.settings.appearance.colorScheme)
+    }
+
+    private var savedConversationsLine: String {
+        let n = state.sessions.count
+        guard n > 0 else { return "Nothing saved yet." }
+        return "\(n) saved" + (state.settings.privacy.persistToDisk
+                               ? "." : " — but \"Save to disk\" is off, so they go when Vantage quits.")
     }
 
     private func binding<T>(_ kp: WritableKeyPath<AppSettings, T>) -> Binding<T> {

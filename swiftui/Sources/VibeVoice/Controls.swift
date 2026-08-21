@@ -309,6 +309,144 @@ struct AppearanceToggle: View {
     }
 }
 
+/// Header cost control: one click flips Quality ↔ Budget.
+///
+/// It lives beside the meter because that is where the number it moves is. The mode is
+/// the biggest cost dial in the app, and with it reachable only from Settings, noticing
+/// the spend and doing something about it were two different places.
+struct QualityToggle: View {
+    var mode: QualityMode
+    var onSelect: (QualityMode) -> Void
+
+    var body: some View {
+        Button {
+            withAnimation(Theme.ease) { onSelect(mode.next) }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: mode.symbol)
+                    .font(.system(size: 8.5))
+                    .contentTransition(.symbolEffect(.replace))
+                Text(mode.label.uppercased())
+                    .font(.system(size: 9.5, weight: .bold, design: .rounded)).tracking(0.8)
+            }
+            .foregroundStyle(mode == .quality ? Theme.accentInk : Theme.textDim)
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(Capsule().fill(Theme.fill)
+                .overlay(Capsule().stroke(Theme.hairline, lineWidth: 1)))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help("\(mode.label) mode — \(mode.blurb) Click for \(mode.next.label).")
+        .accessibilityLabel("Cost mode: \(mode.label)")
+    }
+}
+
+/// The two switches that decide how Vantage thinks and sounds, one tap from the stage.
+///
+/// Model and voice were Settings-only, which made the two things most worth swapping
+/// mid-conversation the two things that cost a sheet to reach. They sit where the audio
+/// format line used to — the same quiet status row, now saying something you can act on.
+/// That line is not lost: the negotiated format is this row's tooltip.
+struct ModelVoiceBar: View {
+    @Binding var model: String
+    @Binding var voice: String
+    /// What the audio stack actually negotiated, or why it is silent.
+    var audioDetail: String
+    /// Called after a pick, so a live session hears about it.
+    var onChange: () -> Void
+
+    @State private var showModel = false
+    @State private var showVoice = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            SwitchPill(symbol: "cpu", title: "Model", value: model) { showModel = true }
+                .popover(isPresented: $showModel, arrowEdge: .bottom) {
+                    popoverBody(title: "Model",
+                                note: "Changing the model takes effect on the next connect.") {
+                        ChipPicker(options: kModels,
+                                   selection: pick($model, close: $showModel),
+                                   tint: Theme.voice, columns: 2)
+                    }
+                }
+
+            SwitchPill(symbol: "waveform", title: "Voice", value: voice) { showVoice = true }
+                .popover(isPresented: $showVoice, arrowEdge: .bottom) {
+                    popoverBody(title: "Voice",
+                                note: "marin and cedar are the newest and best. A live session takes the new voice on its next reply.") {
+                        ChipPicker(options: kVoices,
+                                   selection: pick($voice, close: $showVoice),
+                                   columns: 4)
+                    }
+                }
+        }
+        .help(audioDetail)
+    }
+
+    /// Writes the pick through, tells the session, and closes the popover — a picker
+    /// that stays open after a one-of-many choice reads as if it did not take.
+    private func pick(_ value: Binding<String>, close: Binding<Bool>) -> Binding<String> {
+        Binding(get: { value.wrappedValue },
+                set: { value.wrappedValue = $0; onChange(); close.wrappedValue = false })
+    }
+
+    private func popoverBody<C: View>(title: String, note: String,
+                                      @ViewBuilder _ content: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text(title.uppercased())
+                .font(.system(size: 10.5, weight: .bold)).tracking(1.0)
+                .foregroundStyle(Theme.textFaint)
+            content()
+            Text(note)
+                .font(.system(size: 11)).foregroundStyle(Theme.textFaint)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .frame(width: 320)
+    }
+}
+
+/// One quiet pill: a label, what it is set to, and a chevron that says it opens.
+/// Drawn like `ScreenPicker` — outline on hover only — because it shares that row and
+/// should not read as another button competing with the ones above it.
+private struct SwitchPill: View {
+    let symbol: String
+    let title: String
+    let value: String
+    let tap: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: tap) {
+            HStack(spacing: 6) {
+                Image(systemName: symbol).font(.system(size: 9.5))
+                Text(title)
+                Text(value)
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(Theme.textDim)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 7, weight: .bold))
+                    .foregroundStyle(Theme.textFaint.opacity(0.8))
+            }
+            .font(.system(size: 10.5))
+            .foregroundStyle(Theme.textFaint)
+            .padding(.horizontal, 9).padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(hovering ? Theme.fill : Color.clear)
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(hovering ? Theme.hairline : Color.clear, lineWidth: 1)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(Theme.ease, value: hovering)
+        .accessibilityLabel("\(title): \(value)")
+    }
+}
+
 /// The explicit form of the same choice, for Settings.
 struct AppearancePicker: View {
     @Binding var mode: AppearanceMode

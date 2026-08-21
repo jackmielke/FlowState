@@ -180,6 +180,49 @@ public final class ConversationLog {
         if summaries.count > 50 { summaries.removeFirst(summaries.count - 50) }
     }
 
+    /// Puts a conversation read back off disk into memory.
+    ///
+    /// Deliberately not `append`: these lines were admitted, redacted and stored by the
+    /// policy that was in force when they were said. Running them through the door a
+    /// second time would re-redact already-redacted text, and — worse — would drop the
+    /// user's entire history the moment they paused recording, because `append` refuses
+    /// everything while paused. What privacy still governs on the way back in is
+    /// retention, which is applied here: a transcript past its window does not come back
+    /// to life because somebody clicked on it.
+    ///
+    /// Idempotent by entry id, so restoring a session that is already open is a no-op
+    /// rather than a duplicate transcript.
+    ///
+    /// - Returns: how many entries were actually added.
+    @discardableResult
+    public func restore(entries incoming: [ConversationEntry],
+                        summaries incomingSummaries: [ConversationSummary] = [],
+                        now: Date = Date()) -> Int {
+        let known = Set(entries.map(\.id))
+        let fresh = incoming.filter {
+            !known.contains($0.id) && !privacy.hasExpired($0.at, now: now)
+        }
+        if !fresh.isEmpty {
+            entries.append(contentsOf: fresh)
+            entries.sort { $0.at < $1.at }
+            // Same ceiling as the live path, and the same casualty: the oldest lines.
+            // The file on disk stays complete either way.
+            if entries.count > maxEntries { entries.removeFirst(entries.count - maxEntries) }
+        }
+
+        let knownSummaries = Set(summaries.map(\.id))
+        let freshSummaries = incomingSummaries.filter {
+            !knownSummaries.contains($0.id) && !privacy.hasExpired($0.createdAt, now: now)
+        }
+        if !freshSummaries.isEmpty {
+            summaries.append(contentsOf: freshSummaries)
+            summaries.sort { $0.createdAt < $1.createdAt }
+            if summaries.count > 50 { summaries.removeFirst(summaries.count - 50) }
+        }
+
+        return fresh.count
+    }
+
     // MARK: - Reading
 
     public func entries(inSession id: String) -> [ConversationEntry] {

@@ -23,6 +23,7 @@ you: "the spacing on that button is off, tighten it up"
 | **It sees your screen** | On demand (⌘⇧2), or continuously. Multi-monitor: it follows whichever screen your cursor is on |
 | **Dev Mode** | Say what you want changed; it dispatches to Claude Code on *your* machine. Up to three tasks at once across different repos, with live progress and an undo |
 | **A queue, not a refusal** | Ask for a second change to the same repo and it waits its turn instead of being turned away — reorder or drop what's queued, and the next one starts on its own |
+| **Conversations that keep** | Every conversation is saved under a name taken from what you actually asked for, and comes back after a restart. New one with ⌘N; switch between them from the top of the transcript |
 | **Recaps** | One button writes a summary of the conversation, keeps it where you can re-read it, and saves it as a markdown note |
 | **Native tools** | Calendar, clipboard, Notion, and any macOS Shortcut you own — answered in milliseconds, not by spinning up an agent |
 | **Live cost meter** | Real token counts from the API, and dollars per minute. Budget mode cuts it to roughly a third |

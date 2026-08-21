@@ -122,6 +122,18 @@ struct AppSettings: Codable, Equatable {
     /// When a running conversation gets summarised, and where the summary goes.
     var summaries: SummaryPolicy = SummaryPolicy()
 
+    /// What to open on launch.
+    ///
+    /// OFF — the default — means every launch starts a new conversation, and the last
+    /// one is one click away in the switcher with its history intact. That is the
+    /// honest default for a voice assistant: you sit down and start talking, and what
+    /// you say now is not silently appended to a conversation from Tuesday. Nothing is
+    /// lost either way; this only decides which conversation is in front of you.
+    ///
+    /// ON reopens the most recent non-empty conversation instead, for people who treat
+    /// it as one long running thread.
+    var resumeLastSession: Bool = false
+
     enum CodingKeys: String, CodingKey {
         case voice, model, systemPrompt, speed, continuousScreen, screenInterval
         case vadThreshold, silenceDurationMs, transcribeUser, devMode, devRepo
@@ -130,7 +142,7 @@ struct AppSettings: Codable, Equatable {
         case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
         case photoRotateSeconds, menuBarEnabled, summonHotkey, devNudgeDismissed
         case devAutoCommit, devAutoPush
-        case privacy, summaries
+        case privacy, summaries, resumeLastSession
     }
 }
 
@@ -184,6 +196,7 @@ extension AppSettings {
         ambientMode       = v(.ambientMode, d.ambientMode)
         privacy           = v(.privacy, d.privacy)
         summaries         = v(.summaries, d.summaries)
+        resumeLastSession = v(.resumeLastSession, d.resumeLastSession)
     }
 }
 
@@ -197,6 +210,11 @@ enum QualityMode: String, Codable, CaseIterable {
             ? "Mini model, smaller frames, tighter history. Roughly a third the cost."
             : "Full model, full-size frames. Best listening and vision."
     }
+
+    var symbol: String { self == .budget ? "leaf.fill" : "sparkles" }
+
+    /// There are only two, so the one-click header control just flips between them.
+    var next: QualityMode { self == .budget ? .quality : .budget }
 
     /// Applied on top of whatever else is set, so switching modes is one control.
     func apply(to s: inout AppSettings) {
@@ -239,8 +257,9 @@ final class SettingsStore: ObservableObject {
     }
 
     private static var fileURL: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("VibeVoice", isDirectory: true)
+        // One root for everything Vantage keeps, so `VIBEVOICE_HOME` moves the settings
+        // with the transcripts instead of half of each.
+        let base = ConversationStore.root
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base.appendingPathComponent("settings.json")
     }

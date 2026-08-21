@@ -13,21 +13,52 @@ import VibeVoiceCore
 /// On disk it is JSONL, one entry per line, one file per session:
 ///
 ///     ~/Library/Application Support/VibeVoice/conversations/<sessionID>.jsonl
+///     ~/Library/Application Support/VibeVoice/sessions.json      ← the index
 ///
 /// JSONL rather than a database because the whole point of a privacy control is that the
 /// user can go and look at what was kept, and delete it with `rm`. A file they can read
 /// in Console.app is worth more here than an index they cannot.
+///
+/// The index is a convenience over those files and never the truth: deleting it costs
+/// nothing but the titles the user typed by hand, because everything else in it can be
+/// derived by reading the transcripts again. See `reloadCatalog()`.
+///
+/// ## Sessions
+///
+/// A session here is the app's own idea of a conversation, minted by `SessionID` and
+/// owned for as long as the user is in it. That is deliberately *not* the realtime API's
+/// `session.created` id, which cannot be the unit of a saved conversation: it does not
+/// exist until a socket opens, it changes on every reconnect — so a dropped connection
+/// used to shatter one conversation into several files — and it is absent entirely when
+/// somebody is reading back a conversation with nothing connected. The API's ids are kept
+/// alongside, in `SessionMeta.realtimeIDs`, so a transcript can still be lined up with
+/// anything the API reports later.
 @MainActor
 final class ConversationStore: ObservableObject {
 
     let log: ConversationLog
 
-    /// The session entries are being filed under. Set from `session.created`, so it is
-    /// the same id the API knows the conversation by.
-    @Published private(set) var currentSessionID: String?
+    /// The conversation entries are being filed under. Always set: there is no state in
+    /// which the user is not in *some* conversation, and making this optional only moved
+    /// the question to every call site.
+    @Published private(set) var currentSessionID: String
+    /// When the current conversation began. Its fallback title, before anything is said.
+    @Published private(set) var currentSessionStartedAt: Date
+    /// Every saved conversation, most recently used first. What the switcher shows.
+    @Published private(set) var sessions: [SessionMeta] = []
     /// Bumped on every write, so views can observe without holding the entries.
     @Published private(set) var entryCount = 0
     @Published private(set) var lastWriteError: String?
+    /// Set when a transcript on disk could not be read back in full. Surfaced in
+    /// Settings — a history that silently half-loads is worse than one that says so.
+    @Published private(set) var lastReadError: String?
+
+    /// The catalogue of conversations. Rules in Core, file here.
+    private let catalog = SessionCatalog()
+    /// Realtime session ids seen while the current conversation has been open. Applied to
+    /// the catalogue as soon as it has a row to apply them to — which is the first time
+    /// anything is actually recorded, since an empty conversation is not written down.
+    private var currentRealtimeIDs: [String] = []
 
     var privacy: TranscriptPrivacy {
         get { log.privacy }
@@ -37,35 +68,128 @@ final class ConversationStore: ObservableObject {
             // Turning retention down has to bite immediately, not at the next launch.
             log.purgeExpired()
             // Turning persistence OFF is a request to stop keeping things, and leaving
-            // yesterday's files sitting there would make it a lie.
-            if wasPersisting && !newValue.persistToDisk { deleteAllOnDisk() }
+            // yesterday's files sitting there would make it a lie. The list goes with
+            // them: a switcher still offering conversations whose transcripts have just
+            // been deleted is a menu of things that open empty.
+            //
+            // What is on screen right now is untouched. It is in memory, it was already
+            // said, and hiding it would not un-say it.
+            if wasPersisting && !newValue.persistToDisk {
+                deleteAllOnDisk()
+                catalog.removeAll()
+                publishSessions()
+            }
         }
     }
 
-    init(privacy: TranscriptPrivacy = TranscriptPrivacy()) {
+    init(privacy: TranscriptPrivacy = TranscriptPrivacy(), now: Date = Date()) {
         self.log = ConversationLog(privacy: privacy)
+        self.currentSessionID = SessionID.mint(at: now)
+        self.currentSessionStartedAt = now
         log.purgeExpired()
         purgeExpiredFiles()
+        reloadCatalog(now: now)
     }
 
     // MARK: - Session lifecycle
 
-    /// Begins recording under the realtime session's own id.
-    func beginSession(id: String) {
+    /// Starts a fresh conversation. Nothing is written until something is said, so this
+    /// costs no file and leaves no row in the list until it has earned one.
+    ///
+    /// The previous conversation is not closed in any meaningful sense — it is on disk,
+    /// it is in the list, and reopening it picks up exactly where it stopped.
+    @discardableResult
+    func startNewSession(at: Date = Date()) -> String {
+        currentSessionID = SessionID.mint(at: at)
+        currentSessionStartedAt = at
+        currentRealtimeIDs = []
+        return currentSessionID
+    }
+
+    /// Reopens a saved conversation and puts its history back in memory.
+    ///
+    /// - Returns: what was read, and — crucially — whether reading actually worked. A
+    ///   conversation whose file could not be opened this instant is NOT an empty
+    ///   conversation, and the caller must be able to tell the difference: one means
+    ///   "there is nothing to show", the other means "do not touch what is on screen,
+    ///   and try again". Before this returned a load rather than an archive, a transient
+    ///   read error blanked the transcript and said "nothing was kept of it".
+    @discardableResult
+    func openSession(_ id: String, now: Date = Date()) -> ArchiveLoad {
+        let load = loadArchive(for: id)
+        guard let archive = load.archive else {
+            // The session still becomes the current one — the user asked to be in it,
+            // and refusing to move would strand them. What is on screen stays until a
+            // retry succeeds.
+            currentSessionID = id
+            currentSessionStartedAt = catalog.meta(id)?.createdAt ?? now
+            currentRealtimeIDs = []
+            publishSessions()
+            return load
+        }
+        log.restore(entries: archive.entries, summaries: archive.summaries, now: now)
+
         currentSessionID = id
+        currentSessionStartedAt = archive.entries.first?.at
+            ?? catalog.meta(id)?.createdAt
+            ?? now
+        currentRealtimeIDs = []
+
+        // A conversation that was on disk but not in the index gets its row now, so
+        // opening one from a rebuilt list does not leave it nameless.
+        if catalog.meta(id) == nil, !archive.isEmpty {
+            catalog.upsert(ConversationArchive.meta(for: id,
+                                                    archive: archive,
+                                                    fallbackDate: currentSessionStartedAt,
+                                                    now: now))
+        }
+        entryCount = log.entries.count
+        publishSessions()
+        return load
+    }
+
+    /// Notes the realtime session this conversation is currently running under.
+    ///
+    /// Called on every `session.created`, including reconnects, which is why the id is
+    /// appended to a list rather than replacing one.
+    func link(realtimeSession id: String) {
+        guard !currentRealtimeIDs.contains(id) else { return }
+        currentRealtimeIDs.append(id)
+        if catalog.link(realtimeID: id, to: currentSessionID) != nil {
+            publishSessions()
+            saveIndex()
+        }
         log.purgeExpired()
     }
 
-    /// A session id for entries produced with no socket open — a note filed before
-    /// connecting, a summary asked for after disconnecting. Prefixed so it is obvious in
-    /// a directory listing which files came from a real conversation.
-    func beginLocalSession() {
-        currentSessionID = "local-" + UUID().uuidString.prefix(8).lowercased()
+    /// The user's own name for a conversation. An empty string hands the title back to
+    /// the generator rather than leaving a blank row in the list.
+    func rename(session id: String, to title: String, now: Date = Date()) {
+        guard catalog.rename(id,
+                             to: title,
+                             entries: log.entries(inSession: id),
+                             summaries: log.summaries(inSession: id),
+                             now: now) != nil else { return }
+        publishSessions()
+        saveIndex()
     }
 
-    func endSession() {
-        currentSessionID = nil
+    /// The title to put at the top of the sidebar right now.
+    var currentTitle: String {
+        catalog.meta(currentSessionID)?.title
+            ?? SessionTitle.timeLabel(for: currentSessionStartedAt)
     }
+
+    var currentMeta: SessionMeta? { catalog.meta(currentSessionID) }
+
+    /// The conversation to reopen on launch when the user has asked for that. Empty
+    /// conversations are skipped — resuming into a blank one is a new one with extra
+    /// steps.
+    var mostRecentSession: SessionMeta? { catalog.mostRecentNonEmpty }
+
+    /// Titles as the switcher should show them, with same-titled conversations
+    /// disambiguated by when they happened.
+    func displayTitles() -> [String: String] { SessionCatalog.displayTitles(sessions) }
 
     // MARK: - Writing
 
@@ -80,10 +204,7 @@ final class ConversationStore: ObservableObject {
                 source: TranscriptSource,
                 audio: UtteranceAudio? = nil,
                 at: Date = Date()) -> ConversationEntry? {
-        let sid = currentSessionID ?? {
-            beginLocalSession()
-            return currentSessionID!
-        }()
+        let sid = currentSessionID
 
         guard let entry = log.append(sessionID: sid,
                                      speaker: speaker,
@@ -93,18 +214,53 @@ final class ConversationStore: ObservableObject {
                                      audio: audio) else { return nil }
         entryCount = log.entries.count
         appendToDisk(entry)
+        noteInCatalog(sessionID: sid, at: entry.at, conversational: entry.isConversational)
         return entry
     }
 
     func record(_ summary: ConversationSummary) {
         log.append(summary: summary)
         appendToDisk(summary)
+        // A summary is not a turn, so it does not raise the count — but it is activity,
+        // and it is exactly the context the title generator wants when the user has been
+        // answering in single words.
+        noteInCatalog(sessionID: summary.sessionID,
+                      at: summary.createdAt,
+                      conversational: false)
+    }
+
+    /// Keeps the index in step with what was just written: the count, the clock, and the
+    /// title while it is still allowed to improve.
+    private func noteInCatalog(sessionID sid: String, at: Date, conversational: Bool) {
+        catalog.record(sessionID: sid,
+                       at: at,
+                       conversational: conversational,
+                       entries: log.entries(inSession: sid),
+                       summaries: log.summaries(inSession: sid))
+        if sid == currentSessionID {
+            for realtimeID in currentRealtimeIDs {
+                catalog.link(realtimeID: realtimeID, to: sid)
+            }
+        }
+        publishSessions()
+        saveIndex()
     }
 
     // MARK: - Disk
 
+    /// Where everything Vantage keeps lives. Settings, transcripts, notes, the index.
+    ///
+    /// `VIBEVOICE_HOME` moves the lot somewhere else for the length of one launch. That
+    /// exists so this half of the app can be exercised for real — quit it, start it
+    /// again, check the conversation came back — without a test run rummaging through
+    /// somebody's actual conversations. Unset, which is every normal launch, it is
+    /// Application Support as before.
     nonisolated static var root: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let env = ProcessInfo.processInfo.environment["VIBEVOICE_HOME"] ?? ""
+        if !env.isEmpty {
+            return URL(fileURLWithPath: (env as NSString).expandingTildeInPath, isDirectory: true)
+        }
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("VibeVoice", isDirectory: true)
     }
 
@@ -116,41 +272,119 @@ final class ConversationStore: ObservableObject {
         root.appendingPathComponent("notes", isDirectory: true)
     }
 
+    /// The session index. Next to the transcripts rather than inside their folder, so
+    /// "delete the conversations directory" cannot leave an index describing files that
+    /// no longer exist.
+    nonisolated static var sessionsIndexURL: URL {
+        root.appendingPathComponent("sessions.json")
+    }
+
     func transcriptURL(for sessionID: String) -> URL {
-        // Session ids come from the API, but a path is a path — never build one from a
-        // string that has not been reduced to something that cannot escape the folder.
-        let safe = sessionID.filter { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
-        return Self.conversationsDirectory
-            .appendingPathComponent(safe.isEmpty ? "unknown" : safe)
+        // Session ids are minted by this app, but a path is a path — never build one from
+        // a string that has not been reduced to something that cannot escape the folder.
+        Self.conversationsDirectory
+            .appendingPathComponent(SessionID.sanitize(sessionID))
             .appendingPathExtension("jsonl")
+    }
+
+    /// The three things reading a transcript can mean, kept apart on purpose.
+    ///
+    /// `missing` and `failed` used to be the same answer — an empty archive — and that
+    /// single line was the whole bug behind "it opened the conversation and everything
+    /// was gone". A file that is not there is a conversation with nothing in it. A file
+    /// that would not open *this instant* is a conversation whose contents are still on
+    /// the disk, and the only correct response is to leave the screen alone and read it
+    /// again.
+    enum ArchiveLoad {
+        case loaded(ConversationArchive.Archive)
+        /// No transcript file. A conversation that was never persisted, or was deleted.
+        case missing
+        /// The file exists and could not be read. Transient until proven otherwise.
+        case failed(String)
+
+        /// What was read, or nil when nothing could be.
+        ///
+        /// `missing` deliberately yields an empty archive rather than nil: there is
+        /// genuinely nothing to show, and callers should render that.
+        var archive: ConversationArchive.Archive? {
+            switch self {
+            case .loaded(let a): return a
+            case .missing:       return .init()
+            case .failed:        return nil
+            }
+        }
+
+        var error: String? {
+            if case .failed(let why) = self { return why }
+            return nil
+        }
+    }
+
+    /// Reads one conversation back off disk, saying which of the three things happened.
+    func loadArchive(for sessionID: String) -> ArchiveLoad {
+        let url = transcriptURL(for: sessionID)
+        guard FileManager.default.fileExists(atPath: url.path) else { return .missing }
+        do {
+            let data = try Data(contentsOf: url)
+            let archive = ConversationArchive.parse(data)
+            if archive.skippedLines > 0 {
+                lastReadError = "\(archive.skippedLines) unreadable line(s) in \(url.lastPathComponent)"
+            } else if lastReadError != nil {
+                // A read that came back clean retires the last complaint, or Settings
+                // keeps showing an error about a file that has since been fine.
+                lastReadError = nil
+            }
+            return .loaded(archive)
+        } catch {
+            let why = "could not read \(url.lastPathComponent): \(error.localizedDescription)"
+            lastReadError = why
+            FileHandle.standardError.write(Data("[conversation] \(why)\n".utf8))
+            return .failed(why)
+        }
+    }
+
+    /// The retry-safe read. Same answer as `loadArchive`, but a file that is momentarily
+    /// unreadable gets a few more chances before the user is told anything.
+    ///
+    /// Transcripts are appended to while they are being read, and `sessions.json` is
+    /// replaced atomically underneath whoever is looking at it, so a single failed read
+    /// says almost nothing. Backing off between attempts costs a few hundred
+    /// milliseconds in the case that was going to fail anyway, and saves the far more
+    /// common case from ever surfacing.
+    func reloadArchive(for sessionID: String, attempts: Int = 3) async -> ArchiveLoad {
+        var last: ArchiveLoad = .missing
+        for attempt in 0..<max(1, attempts) {
+            last = loadArchive(for: sessionID)
+            switch last {
+            case .loaded, .missing:
+                return last
+            case .failed:
+                // 120 ms, 240 ms, 480 ms. Short enough to be invisible behind a refresh,
+                // long enough to outlast a file being rewritten.
+                let backoff = UInt64(120_000_000) << UInt64(attempt)
+                try? await Task.sleep(nanoseconds: backoff)
+            }
+        }
+        return last
+    }
+
+    /// Reads one conversation back off disk. Empty when there is no file *or* when the
+    /// file would not open — kept for callers that genuinely cannot act on the
+    /// difference. Anything that puts a transcript on screen must use `loadArchive`.
+    func archive(for sessionID: String) -> ConversationArchive.Archive {
+        loadArchive(for: sessionID).archive ?? .init()
     }
 
     private func appendToDisk(_ entry: ConversationEntry) {
         guard privacy.persistToDisk else { return }
-        guard let line = Self.jsonLine(["kind": "entry"], encoding: entry) else { return }
+        guard let line = ConversationArchive.line(for: entry) else { return }
         write(line, to: transcriptURL(for: entry.sessionID))
     }
 
     private func appendToDisk(_ summary: ConversationSummary) {
         guard privacy.persistToDisk else { return }
-        guard let line = Self.jsonLine(["kind": "summary"], encoding: summary) else { return }
+        guard let line = ConversationArchive.line(for: summary) else { return }
         write(line, to: transcriptURL(for: summary.sessionID))
-    }
-
-    /// Encodes one record with a `kind` tag, so a reader can tell entries from summaries
-    /// without guessing from which keys are present.
-    private static func jsonLine<T: Encodable>(_ tags: [String: String], encoding value: T) -> Data? {
-        let enc = JSONEncoder()
-        enc.dateEncodingStrategy = .iso8601
-        enc.outputFormatting = [.sortedKeys]
-        guard let data = try? enc.encode(value),
-              var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else { return nil }
-        for (k, v) in tags { obj[k] = v }
-        guard var line = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
-        else { return nil }
-        line.append(0x0A)
-        return line
     }
 
     private func write(_ line: Data, to url: URL) {
@@ -176,6 +410,103 @@ final class ConversationStore: ObservableObject {
         }
     }
 
+    // MARK: - The index
+
+    /// Rebuilds the session list from the index and, where they disagree, from the
+    /// transcripts themselves.
+    ///
+    /// The files win every disagreement. A row with no file is a conversation that has
+    /// been deleted out from under us — by retention, by `rm`, by "delete everything" —
+    /// and a file with no row is a conversation from a build before this one, or from an
+    /// index that got lost. Both are recoverable, and neither should cost the user
+    /// anything.
+    /// Rebuilds the list from disk on demand.
+    ///
+    /// The same work `init` does, exposed because the files can change under a running
+    /// app — retention deletes one, another window writes one, somebody drops a
+    /// transcript into the folder by hand — and "quit and reopen it" is not an answer.
+    /// Safe to call repeatedly: it is a rebuild, not a merge, so running it twice leaves
+    /// the same list.
+    func reloadCatalogFromDisk(now: Date = Date()) {
+        purgeExpiredFiles()
+        reloadCatalog(now: now)
+    }
+
+    private func reloadCatalog(now: Date = Date()) {
+        catalog.removeAll()
+
+        if privacy.persistToDisk,
+           let data = try? Data(contentsOf: Self.sessionsIndexURL),
+           let saved = try? ConversationArchive.decoder().decode([SessionMeta].self, from: data) {
+            for meta in saved { catalog.upsert(meta) }
+        }
+
+        let fm = FileManager.default
+        let files = (try? fm.contentsOfDirectory(
+            at: Self.conversationsDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]))?
+            .filter { $0.pathExtension == "jsonl" } ?? []
+
+        var onDisk = Set<String>()
+        // Newest first, so the cap below keeps what somebody might plausibly want back.
+        let ordered = files.sorted {
+            let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            return a > b
+        }
+
+        for url in ordered.prefix(Self.maxIndexedSessions) {
+            let id = url.deletingPathExtension().lastPathComponent
+            onDisk.insert(id)
+            guard catalog.meta(id) == nil else { continue }
+            // Only files the index does not already describe are parsed, so a normal
+            // launch reads no transcripts at all.
+            let parsed = ConversationArchive.parse((try? Data(contentsOf: url)) ?? Data())
+            guard !parsed.isEmpty else { continue }
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? now
+            catalog.upsert(ConversationArchive.meta(for: id,
+                                                    archive: parsed,
+                                                    fallbackDate: modified,
+                                                    now: now))
+        }
+
+        // Rows whose transcript is gone. Only meaningful when transcripts are being
+        // written at all — with persistence off there are no files to compare against,
+        // and the whole list is this launch's memory.
+        if privacy.persistToDisk {
+            for meta in catalog.all where !onDisk.contains(meta.id) && meta.id != currentSessionID {
+                catalog.remove(meta.id)
+            }
+        }
+
+        publishSessions()
+        saveIndex()
+    }
+
+    /// A ceiling on how many transcripts a cold launch will parse to rebuild a lost
+    /// index. Well past what anybody scrolls to, and short of "read the whole disk".
+    private static let maxIndexedSessions = 200
+
+    private func publishSessions() {
+        sessions = catalog.recents
+    }
+
+    private func saveIndex() {
+        guard privacy.persistToDisk else { return }
+        let enc = ConversationArchive.encoder()
+        guard let data = try? enc.encode(catalog.recents) else { return }
+        do {
+            try FileManager.default.createDirectory(at: Self.root, withIntermediateDirectories: true)
+            try data.write(to: Self.sessionsIndexURL, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                                   ofItemAtPath: Self.sessionsIndexURL.path)
+        } catch {
+            lastWriteError = error.localizedDescription
+        }
+    }
+
     // MARK: - Forgetting
 
     /// Deletes everything about one session, in memory and on disk.
@@ -183,7 +514,10 @@ final class ConversationStore: ObservableObject {
     func forget(session id: String) -> Int {
         let dropped = log.forget(session: id)
         try? FileManager.default.removeItem(at: transcriptURL(for: id))
+        catalog.remove(id)
         entryCount = log.entries.count
+        publishSessions()
+        saveIndex()
         return dropped
     }
 
@@ -191,7 +525,9 @@ final class ConversationStore: ObservableObject {
     func forgetEverything() {
         log.forgetEverything()
         entryCount = 0
+        catalog.removeAll()
         deleteAllOnDisk()
+        publishSessions()
     }
 
     private func deleteAllOnDisk() {
@@ -199,6 +535,8 @@ final class ConversationStore: ObservableObject {
         for dir in [Self.conversationsDirectory, AudioClipRecorder.directory] {
             try? fm.removeItem(at: dir)
         }
+        // The index describes files that no longer exist, so it goes with them.
+        try? fm.removeItem(at: Self.sessionsIndexURL)
     }
 
     /// Applies the retention window to files, not just to memory. Runs on launch and
@@ -210,21 +548,28 @@ final class ConversationStore: ObservableObject {
         guard let files = try? fm.contentsOfDirectory(
             at: Self.conversationsDirectory,
             includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        var removed = false
         for url in files {
             let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
                 .contentModificationDate
             if let modified, privacy.hasExpired(modified) {
                 try? fm.removeItem(at: url)
+                // The row goes with the file, or the switcher offers conversations that
+                // open empty.
+                if catalog.remove(url.deletingPathExtension().lastPathComponent) { removed = true }
             }
+        }
+        if removed {
+            publishSessions()
+            saveIndex()
         }
     }
 
     // MARK: - Reading back
 
-    /// The session a Summary button should act on: the live one, or the last one on
-    /// record. A conversation does not stop being worth summarising the moment the
-    /// socket closes — that is usually when somebody wants the recap.
-    var summarizableSessionID: String? { currentSessionID ?? log.sessionIDs.last }
+    /// The session a Summary button should act on. Always the current conversation now
+    /// that one is always open — kept as an optional because callers still ask.
+    var summarizableSessionID: String? { currentSessionID }
 
     /// How many of a session's lines a summary could actually be built from — user and
     /// assistant speech, never the app's own narration.

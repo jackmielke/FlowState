@@ -6,6 +6,19 @@ import VibeVoiceCore
 
 enum Speaker { case user, assistant, system }
 
+extension TranscriptSpeaker {
+    /// The stored speaker, back as the one the views switch on. Two enums rather than
+    /// one because the record is persisted and must not depend on AppKit — see
+    /// `TranscriptSpeaker` — but restoring a conversation has to cross that line.
+    var asSpeaker: Speaker {
+        switch self {
+        case .user:      return .user
+        case .assistant: return .assistant
+        case .system:    return .system
+        }
+    }
+}
+
 struct TranscriptItem: Identifiable {
     let id = UUID()
     let speaker: Speaker
@@ -13,15 +26,30 @@ struct TranscriptItem: Identifiable {
     var image: NSImage?
     var streaming: Bool = false
     var at: Date = Date()
-    /// The conversation this line belongs to — the realtime `session.created` id, or a
-    /// locally minted one when nothing is connected. Carried on the view model as well
-    /// as on the stored record so a line on screen can always be traced to the file it
-    /// was written to.
+    /// The conversation this line belongs to — the app's own session id, the one the
+    /// transcript file is named after. Carried on the view model as well as on the
+    /// stored record so a line on screen can always be traced to the file it was written
+    /// to, and so "forget this conversation" clears both instead of leaving the words on
+    /// screen after deleting the file under them.
+    ///
+    /// Deliberately not the realtime `session.created` id: that changes on every
+    /// reconnect, so half a conversation would stop matching the other half.
     var sessionID: String?
     /// The durable record this line produced, or nil when privacy refused to keep it.
     /// The difference is visible: an unrecorded line is still shown, because the live
     /// transcript reports what was said rather than what was kept.
     var entryID: UUID?
+    /// True while this line is a placeholder waiting for its text.
+    ///
+    /// The user's words are put on screen the moment they stop speaking, which is a
+    /// second or more before the transcription of them exists. Without the placeholder
+    /// the assistant's reply appears above the question that prompted it, and the app
+    /// looks like it answered something nobody asked. See `PendingTranscripts`.
+    var pending: Bool = false
+    /// Set when the placeholder was given up on — the transcription never arrived.
+    /// The line stays, because they did say something and the reply below it is about
+    /// whatever that was.
+    var unheard: Bool = false
 }
 
 @MainActor
@@ -53,7 +81,7 @@ final class AppState: ObservableObject {
     /// Live macOS Screen Recording state. Refreshed on launch, on app activation,
     /// before every capture, and on demand — never assumed from a past failure.
     @Published var screenPermission: ScreenPermission = .unknown
-    @Published var showSettings = false
+    @Published var showSettings = true // TEMP-SCREENSHOT
     /// First run, or any launch with no usable key — there is nothing to do without one.
     @Published var showWelcome = KeyStore.secret(forKey: "OPENAI_API_KEY") == nil
     /// Whether Dev Mode can work at all on this machine.
@@ -97,6 +125,8 @@ final class AppState: ObservableObject {
     /// this instant. See `refreshActiveDisplay()`.
     @Published private var windowDisplayID: CGDirectDisplayID?
     @Published var lastCaptureNote: String?
+    /// The realtime session id, from `session.created`. Shown in the header and in the
+    /// menu bar; it says whether a socket is open, not which conversation this is.
     @Published var sessionID: String?
     @Published var devTaskRunning = false
     @Published var devTaskSummary: String?
@@ -274,7 +304,30 @@ final class AppState: ObservableObject {
     private var devSpokenUpdates = 0
     private var lastNarrationAt = Date.distantPast
     private var screenTimer: Timer?
-    private var assistantIndex: Int?
+    /// The assistant line currently being streamed into, by identity rather than by
+    /// position.
+    ///
+    /// It was an array index, which was only ever correct because nothing but `append`
+    /// ever touched the transcript. The moment a line can be *inserted* — which is what
+    /// putting the user's words in the right place requires — every index below it moves
+    /// and the next delta is appended to somebody else's sentence. An id cannot go
+    /// stale that way; it can only stop resolving, which is a case the code already has
+    /// to handle.
+    private var assistantItemID: UUID?
+    /// Placeholders on screen waiting for their text, and the deadline that says when
+    /// one is never coming. See `PendingTranscripts`.
+    private let pendingTranscripts = PendingTranscripts()
+    /// The user line currently waiting for its transcription, if any.
+    private var pendingUserItemID: UUID?
+    /// How long a placeholder may wait before it is given up on and reported.
+    ///
+    /// Transcription normally lands about a second after speech stops. Twelve seconds is
+    /// far past anything healthy and still short enough that a user staring at a blank
+    /// line gets an answer while they are still looking at it.
+    private static let transcriptCommitTimeout: TimeInterval = 12
+    /// Placeholders that were never filled in, this launch. Should be zero; shown in
+    /// Settings so that when it is not, somebody can see it.
+    @Published private(set) var abandonedTranscriptUpdates = 0
     private var bag = Set<AnyCancellable>()
 
     var settings: AppSettings {
@@ -327,6 +380,11 @@ final class AppState: ObservableObject {
             self.isSummarizing = self.summaries.isSummarizing
             self.objectWillChange.send()
         }
+
+        // Which conversation we are in, before anything can be recorded into the wrong
+        // one. The store already minted a fresh session id in its own init, so the
+        // default — a new conversation every launch — needs nothing done to it.
+        restoreSessionOnLaunch()
 
         // Same gate as the on-screen button, so ⌘⇧2 and the button never disagree about
         // whether the app is accepting a new question.
@@ -452,12 +510,18 @@ final class AppState: ObservableObject {
         stopSummaryClock()
         utterance.discard()
         pendingUtteranceAudio = nil
-        conversation.endSession()
+        // The conversation is NOT ended here. A session is the app's own idea of a
+        // conversation now, not the socket's — closing the socket is putting the phone
+        // down, not throwing away what was said.
         client.disconnect()
         audio.stop()
         connection = .idle
         sessionID = nil
-        assistantIndex = nil
+        closeAssistantTurn()
+        // Nothing more is coming down a socket that is closed, so any line still waiting
+        // for its text is waiting forever. Say so now rather than leaving a blinking dot
+        // on screen until the app is quit.
+        resolveAllPending(reason: "the connection closed")
         // Local-only: the socket is gone, so nothing may be sent — and a request left
         // queued here would otherwise fire into the NEXT session.
         responses.reset(reason: "disconnect")
@@ -466,6 +530,16 @@ final class AppState: ObservableObject {
     func applySettingsLive() {
         guard case .live = connection else { return }
         client.sendSessionUpdate(settings, nativeTools: tools.realtimeTools())
+    }
+
+    /// The one place a cost mode is applied, so the header toggle and Settings cannot
+    /// drift apart. The mode is not a single flag — it rewrites the model, the frame
+    /// size and how much history is kept — so it always goes through `apply(to:)`.
+    func setQualityMode(_ mode: QualityMode) {
+        var s = settings
+        mode.apply(to: &s)
+        settings = s
+        applySettingsLive()
     }
 
     // MARK: - Response lifecycle
@@ -520,7 +594,12 @@ final class AppState: ObservableObject {
     private func startResponseWatchdog() {
         stopResponseWatchdog()
         let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.responses.tick() }
+            Task { @MainActor in
+                self?.responses.tick()
+                // Same cadence, same reason: something that was promised and has not
+                // happened. A live session is the only time a placeholder can exist.
+                self?.sweepPendingTranscripts()
+            }
         }
         RunLoop.main.add(t, forMode: .common)
         responseWatchdog = t
@@ -539,10 +618,10 @@ final class AppState: ObservableObject {
             sessionID = id
             connection = .live
             frameItemIDs.removeAll()
-            // Entries are filed under the id the API knows this conversation by, so a
-            // transcript on disk can be lined up with anything the API reports later.
-            conversation.beginSession(id: id)
-            summaries.begin(session: id)
+            // The API's id is recorded against the conversation rather than becoming
+            // its name. Reconnecting continues the same conversation — before this, a
+            // dropped socket silently started a second transcript file mid-sentence.
+            conversation.link(realtimeSession: id)
             startSummaryClock()
             cost.startSession()
             client.sendSessionUpdate(settings, nativeTools: tools.realtimeTools())
@@ -580,32 +659,51 @@ final class AppState: ObservableObject {
             // Parked until the transcript for this utterance arrives, which is a
             // separate event and usually about a second later.
             pendingUtteranceAudio = utterance.end()
+            // The line goes on screen NOW, stamped with when they actually started
+            // talking. Waiting for the words would put the user's turn below the reply
+            // to it — the model starts answering long before the transcription lands.
+            openPendingUserLine(at: pendingUtteranceAudio?.startedAt ?? Date())
             responses.userSpeechStopped()
 
         case .userTranscript(let t):
             let clean = t.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !clean.isEmpty {
+            // The time they SPOKE, not the time the words arrived. This is what puts the
+            // line in the right place both on screen and in the file — the two used to
+            // disagree, because the screen ordered by arrival and the file by timestamp.
+            let spokenAt = pendingUtteranceAudio?.startedAt ?? pendingUserLineAt ?? Date()
+            if clean.isEmpty {
+                // The utterance was heard and held no words. Whatever is on screen for it
+                // must be closed out — this is one of the two ways the placeholder ends.
+                resolvePendingUserLine(unheard: "nothing was said in that one")
+            } else {
                 // The durable record first, because it is the one that can be refused:
                 // whatever comes back is what was actually kept, redactions and all.
                 let entry = conversation.record(speaker: .user,
                                                 text: clean,
                                                 source: .realtimeAPI,
-                                                audio: pendingUtteranceAudio)
-                transcript.append(TranscriptItem(speaker: .user,
-                                                 text: clean,
-                                                 sessionID: sessionID,
-                                                 entryID: entry?.id))
+                                                audio: pendingUtteranceAudio,
+                                                at: spokenAt)
+                commitPendingUserLine(text: clean, at: spokenAt, entryID: entry?.id)
                 lastUserSaid = clean
                 reconsiderDevOffer()
             }
             pendingUtteranceAudio = nil
 
+        case .userTranscriptFailed(let why):
+            // The other way it ends. Without this the placeholder waits out the whole
+            // watchdog for an event that has already been and gone.
+            resolvePendingUserLine(unheard: "that one could not be transcribed")
+            FileHandle.standardError.write(Data("[transcript] user transcription failed: \(why)\n".utf8))
+            pendingUtteranceAudio = nil
+
         case .assistantDelta(let d):
-            if let i = assistantIndex, i < transcript.count {
+            if let id = assistantItemID, let i = transcript.firstIndex(where: { $0.id == id }) {
                 transcript[i].text += d
             } else {
-                transcript.append(TranscriptItem(speaker: .assistant, text: d, streaming: true))
-                assistantIndex = transcript.count - 1
+                let item = TranscriptItem(speaker: .assistant, text: d, streaming: true,
+                                          sessionID: currentSessionID)
+                insertOrdered(item)
+                assistantItemID = item.id
             }
 
         case .responseDone(let status):
@@ -684,7 +782,13 @@ final class AppState: ObservableObject {
             stopSummaryClock()
             utterance.discard()
             pendingUtteranceAudio = nil
-            conversation.endSession()
+            // Whatever the model had said so far is still what it said. Recording it
+            // here is the difference between a dropped connection costing half a
+            // sentence and costing the whole turn.
+            closeAssistantTurn()
+            // The transcription for the utterance in flight is coming down a socket that
+            // no longer exists. Nothing else will ever close that line.
+            resolveAllPending(reason: "the connection dropped")
             responses.reset(reason: "socket closed: \(why)")
             cost.endSession()
         }
@@ -1075,8 +1179,178 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: - Putting a line in the transcript
+
+    /// Adds a line where its timestamp says it belongs.
+    ///
+    /// Everything that reaches the transcript goes through here. Appending was only ever
+    /// right because every line happened to be stamped `now` at the moment it was
+    /// appended — and the user's own words are the one thing that is not: they are
+    /// stamped when they were spoken and arrive a second or two later, by which time the
+    /// reply to them may already be on screen.
+    private func insertOrdered(_ item: TranscriptItem) {
+        let i = TranscriptOrder.insertionIndex(for: item.at, in: transcript.map(\.at))
+        transcript.insert(item, at: i)
+    }
+
+    /// Puts a line back in order after its timestamp changed under it.
+    private func settleLine(at index: Int) {
+        guard transcript.indices.contains(index) else { return }
+        guard !TranscriptOrder.isSettled(index: index, in: transcript.map(\.at)) else { return }
+        let item = transcript.remove(at: index)
+        insertOrdered(item)
+    }
+
+    // MARK: - The user's line, before its words exist
+
+    /// When the line currently waiting for a transcription says it was spoken.
+    private var pendingUserLineAt: Date? {
+        guard let id = pendingUserItemID else { return nil }
+        return transcript.first { $0.id == id }?.at
+    }
+
+    /// Shows the user's turn the instant they stop talking, with nothing in it yet.
+    ///
+    /// Skipped entirely when transcription is off: nothing will ever arrive to fill it
+    /// in, and a placeholder that is guaranteed to be abandoned is worse than no line at
+    /// all.
+    private func openPendingUserLine(at spokenAt: Date) {
+        guard settings.transcribeUser else { return }
+        // Two speech_stopped events without a transcription between them. The older line
+        // is not going to be filled in by the newer utterance's words.
+        if pendingUserItemID != nil {
+            resolvePendingUserLine(unheard: "that one was never transcribed")
+        }
+        var item = TranscriptItem(speaker: .user,
+                                  text: "",
+                                  at: spokenAt,
+                                  sessionID: currentSessionID)
+        item.pending = true
+        insertOrdered(item)
+        pendingUserItemID = item.id
+        pendingTranscripts.open(id: item.id, label: "user transcript", at: spokenAt)
+    }
+
+    /// Fills the placeholder in with what was actually said.
+    ///
+    /// Falls back to inserting a fresh line when there is no placeholder to fill —
+    /// transcription was switched on mid-session, or the watchdog gave up a moment before
+    /// the words arrived. Either way the line lands in time order rather than at the end.
+    private func commitPendingUserLine(text: String, at spokenAt: Date, entryID: UUID?) {
+        defer { pendingUserItemID = nil }
+
+        if let id = pendingUserItemID, let i = transcript.firstIndex(where: { $0.id == id }) {
+            pendingTranscripts.commit(id: id)
+            transcript[i].text = text
+            transcript[i].pending = false
+            transcript[i].unheard = false
+            transcript[i].at = spokenAt
+            transcript[i].sessionID = currentSessionID
+            transcript[i].entryID = entryID
+            settleLine(at: i)
+            return
+        }
+
+        if let id = pendingUserItemID {
+            // The ledger and the transcript disagree, which they never should: the row
+            // was removed without going through `resolvePendingUserLine`.
+            pendingTranscripts.abandon(id: id)
+            logTranscriptFault("committed a user line whose row is gone (id \(id))")
+        }
+        var item = TranscriptItem(speaker: .user,
+                                  text: text,
+                                  at: spokenAt,
+                                  sessionID: currentSessionID,
+                                  entryID: entryID)
+        item.pending = false
+        insertOrdered(item)
+    }
+
+    /// Closes out a placeholder that is never getting its words.
+    ///
+    /// The line stays. They did speak, the assistant is about to reply to whatever it
+    /// was, and deleting the row would leave an answer to a question that appears never
+    /// to have been asked.
+    private func resolvePendingUserLine(unheard reason: String) {
+        guard let id = pendingUserItemID else { return }
+        pendingUserItemID = nil
+        pendingTranscripts.abandon(id: id)
+        abandonedTranscriptUpdates = pendingTranscripts.abandonedCount
+        guard let i = transcript.firstIndex(where: { $0.id == id }) else { return }
+        // An empty placeholder becomes a visible statement of what is missing. One that
+        // somehow already has text is left alone — text on screen is never thrown away.
+        if transcript[i].text.isEmpty {
+            transcript[i].text = "…\u{2009}(\(reason))"
+            transcript[i].unheard = true
+        }
+        transcript[i].pending = false
+    }
+
+    /// Closes out every outstanding placeholder. Used when the ground moves under the
+    /// whole transcript: a disconnect, a new conversation, a session switch.
+    private func resolveAllPending(reason: String, announce: Bool = true) {
+        let stranded = pendingTranscripts.takeAll()
+        abandonedTranscriptUpdates = pendingTranscripts.abandonedCount
+        pendingUserItemID = nil
+        guard !stranded.isEmpty else { return }
+        for p in stranded {
+            guard let i = transcript.firstIndex(where: { $0.id == p.id }) else { continue }
+            if transcript[i].text.isEmpty {
+                if announce {
+                    transcript[i].text = "…\u{2009}(not transcribed — \(reason))"
+                    transcript[i].unheard = true
+                    transcript[i].pending = false
+                } else {
+                    transcript.remove(at: i)
+                }
+            } else {
+                transcript[i].pending = false
+            }
+        }
+        logTranscriptFault("\(stranded.count) transcript update(s) left unfilled — \(reason)")
+    }
+
+    /// The watchdog. Runs at 1 Hz off the response watchdog for as long as a session is
+    /// live, which is exactly as long as placeholders can exist.
+    ///
+    /// This is the backstop for the case the events cannot cover: no `completed`, no
+    /// `failed`, no close — the update was queued and simply never committed. Without it
+    /// that line blinks on screen for the rest of the session.
+    private func sweepPendingTranscripts(now: Date = Date()) {
+        let stale = pendingTranscripts.takeOverdue(now: now,
+                                                   timeout: Self.transcriptCommitTimeout)
+        guard !stale.isEmpty else { return }
+        abandonedTranscriptUpdates = pendingTranscripts.abandonedCount
+        for p in stale {
+            if p.id == pendingUserItemID { pendingUserItemID = nil }
+            logTranscriptFault(String(format: "%@ never arrived after %.1fs",
+                                      p.label, p.waited(now)))
+            guard let i = transcript.firstIndex(where: { $0.id == p.id }) else { continue }
+            if transcript[i].text.isEmpty {
+                transcript[i].text = "…\u{2009}(that one never came back transcribed)"
+                transcript[i].unheard = true
+            }
+            transcript[i].pending = false
+        }
+    }
+
+    /// One place for "the transcript did something it should not have been able to do".
+    ///
+    /// Always stderr, so it is in the log of a build somebody is running. An assertion
+    /// only when `VIBEVOICE_STRICT_TRANSCRIPT` is set: these faults are provoked by a
+    /// dropped socket as readily as by a bug, and a debug build that dies whenever the
+    /// wifi hiccups teaches people to stop running debug builds.
+    private func logTranscriptFault(_ message: String) {
+        FileHandle.standardError.write(Data("[transcript] FAULT: \(message)\n".utf8))
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["VIBEVOICE_STRICT_TRANSCRIPT"] == "1" {
+            assertionFailure("[transcript] \(message)")
+        }
+        #endif
+    }
+
     private func closeAssistantTurn() {
-        if let i = assistantIndex, i < transcript.count {
+        if let id = assistantItemID, let i = transcript.firstIndex(where: { $0.id == id }) {
             transcript[i].streaming = false
             let said = transcript[i].text.trimmingCharacters(in: .whitespaces)
             if said.isEmpty {
@@ -1088,16 +1362,269 @@ final class AppState: ObservableObject {
                 let entry = conversation.record(speaker: .assistant,
                                                 text: said,
                                                 source: .assistantStream)
-                transcript[i].sessionID = sessionID
+                transcript[i].sessionID = currentSessionID
                 transcript[i].entryID = entry?.id
             }
         }
-        assistantIndex = nil
+        assistantItemID = nil
     }
 
     private func note(_ s: String) {
-        transcript.append(TranscriptItem(speaker: .system, text: s, sessionID: sessionID))
+        insertOrdered(TranscriptItem(speaker: .system, text: s, sessionID: currentSessionID))
         FileHandle.standardError.write(Data("[app] \(s)\n".utf8))
+    }
+
+    // MARK: - Conversations
+
+    /// Every saved conversation, most recently used first.
+    var sessions: [SessionMeta] { conversation.sessions }
+
+    /// What the conversation being looked at is called.
+    var currentSessionTitle: String { conversation.currentTitle }
+
+    var currentSessionID: String { conversation.currentSessionID }
+
+    /// Titles for the switcher, with same-named conversations told apart by time.
+    var sessionTitles: [String: String] { conversation.displayTitles() }
+
+    /// Start a fresh conversation.
+    ///
+    /// Nothing is deleted and nothing is lost: the conversation being left is on disk,
+    /// in the list, and one click from being reopened exactly where it stopped.
+    ///
+    /// The socket goes down first when one is up, and that is not a technicality worth
+    /// hiding. The realtime model carries the previous conversation in its own context —
+    /// keeping the socket open across a switch would mean a conversation called "new"
+    /// that still remembers the old one, which is the kind of quiet lie that makes people
+    /// stop trusting an app. A new socket is a genuinely clean slate.
+    func newConversation() {
+        let wasLive = connection == .live || connection == .connecting
+        if wasLive { disconnect() }
+        conversation.startNewSession()
+        summaries.begin(session: conversation.currentSessionID)
+        resolveAllPending(reason: "the conversation was closed", announce: false)
+        transcript.removeAll()
+        assistantItemID = nil
+        latestSummary = nil
+        summaryProblem = nil
+        cost.endSession()
+        note(wasLive
+             ? "New conversation. The previous one is saved — hit Connect to start talking."
+             : "New conversation. The previous one is saved under its own name.")
+        objectWillChange.send()
+    }
+
+    /// Reopen a saved conversation, with its history.
+    func openConversation(_ id: String) {
+        guard id != conversation.currentSessionID else { return }
+        let wasLive = connection == .live || connection == .connecting
+        if wasLive { disconnect() }
+
+        let load = conversation.openSession(id)
+        summaries.begin(session: id)
+        summaryProblem = nil
+        cost.endSession()
+
+        guard let archive = load.archive else {
+            // The file is there and would not open. Do NOT blank the screen and do NOT
+            // claim the conversation is empty — that is a lie about somebody's history.
+            // Clear what belongs to the conversation being left, say what happened, and
+            // go and read it again.
+            transcript.removeAll { $0.sessionID != nil && $0.sessionID != id }
+            assistantItemID = nil
+            note("Opening \(conversation.currentTitle) — its transcript would not open just "
+                 + "now (\(load.error ?? "read failed")). Trying again…")
+            objectWillChange.send()
+            retryLoad(session: id, reason: "openConversation")
+            return
+        }
+
+        rebuildTranscript(from: archive)
+        latestSummary = archive.summaries.last
+
+        let kept = archive.entries.filter(\.isConversational).count
+        if kept == 0 {
+            note("Opened \(conversation.currentTitle). Nothing was kept of it — check "
+                 + "Memory & privacy in Settings if you expected a transcript.")
+        } else {
+            note("Opened \(conversation.currentTitle) · \(kept) line\(kept == 1 ? "" : "s") restored."
+                 + (wasLive ? " Hit Connect to carry on out loud." : ""))
+        }
+        objectWillChange.send()
+    }
+
+    // MARK: - Re-reading a conversation
+
+    /// Reads the conversation on screen back off disk and folds in anything missing.
+    ///
+    /// Safe to call at any time, from anywhere, as many times as you like. It merges by
+    /// record id rather than replacing, so a transcript that is already complete is left
+    /// bit-for-bit alone — no reordering, no re-animating, no scroll jump — and a
+    /// transcript that is missing lines gets exactly those lines back, in the right
+    /// places. That is what makes it usable as a repair for a load that failed, as a
+    /// refresh after the files changed underneath, and as the retry the open path calls.
+    func refreshTranscript() {
+        let id = currentSessionID
+        Task { @MainActor in await reloadTranscript(session: id, reason: "refresh") }
+    }
+
+    /// The retry behind a failed open. Same merge, minus the note when it works.
+    private func retryLoad(session id: String, reason: String) {
+        Task { @MainActor in await reloadTranscript(session: id, reason: reason, announce: true) }
+    }
+
+    private func reloadTranscript(session id: String,
+                                  reason: String,
+                                  announce: Bool = false) async {
+        let load = await conversation.reloadArchive(for: id)
+        // The user can switch conversations while the disk is being read. Whatever came
+        // back describes a conversation they are no longer looking at.
+        guard id == currentSessionID else {
+            FileHandle.standardError.write(
+                Data("[transcript] \(reason): dropped a load for \(id) — moved on\n".utf8))
+            return
+        }
+        switch load {
+        case .loaded(let archive):
+            let added = mergeTranscript(from: archive, session: id)
+            conversation.log.restore(entries: archive.entries, summaries: archive.summaries)
+            if let last = archive.summaries.last { latestSummary = last }
+            if added > 0 {
+                note("Restored \(added) line\(added == 1 ? "" : "s") from the saved transcript.")
+            } else if announce {
+                note("Read \(conversation.currentTitle) back — everything was already here.")
+            }
+            objectWillChange.send()
+        case .missing:
+            if announce {
+                note("There is no saved transcript for this conversation.")
+            }
+        case .failed(let why):
+            // Every attempt is spent. Say so once, in the transcript, rather than
+            // retrying forever behind the user's back.
+            logTranscriptFault("\(reason): could not read \(id) — \(why)")
+            note("Could not read the saved transcript (\(why)). What is on screen is "
+                 + "still here; the file has not been touched.")
+            objectWillChange.send()
+        }
+    }
+
+    /// Folds a conversation read off disk into what is already on screen.
+    ///
+    /// Matched on the durable record id, so a line that is already showing keeps the
+    /// identity it has — SwiftUI does not re-create the row, the scroll position holds,
+    /// and a streaming line in progress is not disturbed. Lines that only ever existed
+    /// on screen (system notes, Claude Code steps, the placeholder waiting for its
+    /// words) are never removed: the file does not know about them, and treating the
+    /// file as the whole truth would delete them on every refresh.
+    ///
+    /// - Returns: how many lines were actually put back.
+    @discardableResult
+    private func mergeTranscript(from archive: ConversationArchive.Archive,
+                                 session id: String) -> Int {
+        let known = Set(transcript.compactMap(\.entryID))
+        var added = 0
+
+        for entry in archive.entries where !known.contains(entry.id) {
+            insertOrdered(TranscriptItem(speaker: entry.speaker.asSpeaker,
+                                         text: entry.text,
+                                         at: entry.at,
+                                         sessionID: entry.sessionID,
+                                         entryID: entry.id))
+            added += 1
+        }
+
+        // Summaries have no record id on the view model, so they are matched on what
+        // actually identifies one: when it was written and what it says.
+        let seenSummaries = Set(transcript.filter { $0.speaker == .system }
+                                          .map { "\($0.at.timeIntervalSince1970)|\($0.text)" })
+        for summary in archive.summaries {
+            let text = "\u{270E} summary: " + summary.text
+            let key = "\(summary.createdAt.timeIntervalSince1970)|\(text)"
+            guard !seenSummaries.contains(key) else { continue }
+            insertOrdered(TranscriptItem(speaker: .system,
+                                         text: text,
+                                         at: summary.createdAt,
+                                         sessionID: summary.sessionID))
+            added += 1
+        }
+
+        if !TranscriptOrder.isOrdered(transcript.map(\.at)) {
+            logTranscriptFault("transcript is out of order after merging \(id)")
+            transcript.sort { $0.at < $1.at }
+        }
+        return added
+    }
+
+    /// The user's own name for a conversation. An empty string gives the title back to
+    /// the generator rather than leaving a blank row.
+    func renameConversation(_ id: String, to title: String) {
+        conversation.rename(session: id, to: title)
+        objectWillChange.send()
+    }
+
+    /// Deletes one conversation outright — memory, file and row.
+    ///
+    /// Deleting the one being looked at leaves the user somewhere, which has to be a new
+    /// conversation rather than nowhere.
+    func deleteConversation(_ id: String) {
+        let wasCurrent = id == conversation.currentSessionID
+        let dropped = conversation.forget(session: id)
+        if wasCurrent {
+            newConversation()
+            note(dropped > 0
+                 ? "Deleted that conversation — \(dropped) line\(dropped == 1 ? "" : "s") and the file with them."
+                 : "Deleted that conversation.")
+        } else {
+            transcript.removeAll { $0.sessionID == id }
+            objectWillChange.send()
+        }
+    }
+
+    /// Rebuilds the on-screen transcript from a conversation read back off disk.
+    ///
+    /// Summaries are put back in the flow at the point they were written, exactly as
+    /// they appeared live — a recap that only exists in the panel after a restart, when
+    /// it was in the transcript before one, would be a history that does not match what
+    /// the user remembers seeing.
+    private func rebuildTranscript(from archive: ConversationArchive.Archive) {
+        assistantItemID = nil
+        resolveAllPending(reason: "the conversation was switched", announce: false)
+
+        var items: [TranscriptItem] = archive.entries.map { entry in
+            TranscriptItem(speaker: entry.speaker.asSpeaker,
+                           text: entry.text,
+                           at: entry.at,
+                           sessionID: entry.sessionID,
+                           entryID: entry.id)
+        }
+        items += archive.summaries.map { summary in
+            TranscriptItem(speaker: .system,
+                           text: "\u{270E} summary: " + summary.text,
+                           at: summary.createdAt,
+                           sessionID: summary.sessionID)
+        }
+        transcript = items.sorted { $0.at < $1.at }
+    }
+
+    /// Which conversation to be in on launch. See `AppSettings.resumeLastSession` for
+    /// what the two answers mean and why the default is the one it is.
+    private func restoreSessionOnLaunch() {
+        if settings.resumeLastSession, let last = conversation.mostRecentSession {
+            let load = conversation.openSession(last.id)
+            if let archive = load.archive {
+                rebuildTranscript(from: archive)
+                latestSummary = archive.summaries.last
+                let kept = archive.entries.filter(\.isConversational).count
+                note("Picking up \(conversation.currentTitle) · \(kept) line\(kept == 1 ? "" : "s") restored.")
+            } else {
+                // A transcript that would not open on launch is the worst moment to give
+                // up on: there is nothing on screen for the user to fall back to.
+                note("Picking up \(conversation.currentTitle) — reading its transcript…")
+                retryLoad(session: last.id, reason: "launch")
+            }
+        }
+        summaries.begin(session: conversation.currentSessionID)
     }
 
     // MARK: - Conversation memory
@@ -1131,8 +1658,15 @@ final class AppState: ObservableObject {
     private func handleSummary(_ summary: ConversationSummary, _ delivery: SummaryService.Delivery) {
         var line = "✎ summary: " + summary.text
         if let receipt = delivery.noteReceipt { line += " (" + receipt + ")" }
-        transcript.append(TranscriptItem(speaker: .system, text: line, sessionID: summary.sessionID))
-        latestSummary = summary
+        // Leaving a conversation writes one last summary of it, and that summary can land
+        // after the user is already looking at a different one. It belongs in the file it
+        // names and in the panel either way — but not on screen in a conversation it is
+        // not about.
+        if summary.sessionID == currentSessionID {
+            transcript.append(TranscriptItem(speaker: .system, text: line,
+                                             sessionID: summary.sessionID))
+            latestSummary = summary
+        }
         summaryProblem = nil
         isSummarizing = summaries.isSummarizing
 
@@ -1154,7 +1688,18 @@ final class AppState: ObservableObject {
     /// Every summary held this launch, newest first. Not filtered to the current session
     /// on purpose — the reason to open this panel is usually to re-read the recap of a
     /// conversation that has already ended.
-    var visibleSummaries: [ConversationSummary] { conversation.allSummaries }
+    /// The summaries of the conversation the panel says it is showing.
+    ///
+    /// This was `allSummaries` — every summary ever written, across every session. The
+    /// panel header is scoped correctly ("This conversation · 24 turns · sess_…"), so the
+    /// header named one conversation while the list underneath showed all of them. Start
+    /// a new conversation, open Summary, and the previous one's notes were still sitting
+    /// there, which is exactly the kind of thing that makes someone stop trusting what an
+    /// app tells them.
+    var visibleSummaries: [ConversationSummary] {
+        guard let id = summarySession else { return [] }
+        return conversation.allSummaries.filter { $0.sessionID == id }
+    }
 
     /// Enough has been said to be worth summarising, and the user is not mid-sentence.
     var canSummarizeSession: Bool {
@@ -1214,9 +1759,7 @@ final class AppState: ObservableObject {
     /// Deletes this conversation, on screen and on disk.
     @discardableResult
     func forgetThisConversation() -> String {
-        guard let id = conversation.currentSessionID else {
-            return "There's nothing recorded for this conversation."
-        }
+        let id = conversation.currentSessionID
         let dropped = conversation.forget(session: id)
         transcript.removeAll { $0.sessionID == id && $0.speaker != .system }
         objectWillChange.send()
@@ -1430,7 +1973,7 @@ final class AppState: ObservableObject {
                 speaker: .user,
                 text: caption,
                 image: frame.thumbnail,
-                sessionID: sessionID,
+                sessionID: currentSessionID,
                 entryID: entry?.id))
             lastCaptureNote = String(format: "%.0f KB", Double(frame.bytes) / 1024)
             lastCaptureDisplay = frame.display.name

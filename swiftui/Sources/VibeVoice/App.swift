@@ -23,7 +23,13 @@ struct VibeVoiceApp: App {
         .windowResizability(.contentMinSize)
         .defaultSize(width: 1080, height: 700)
         .commands {
-            CommandGroup(replacing: .newItem) {}
+            CommandGroup(replacing: .newItem) {
+                // Where every other Mac app puts it. The default File > New is removed
+                // because this app has no documents — but it does have conversations,
+                // and this is the shortcut people will try first.
+                Button("New Conversation") { state.newConversation() }
+                    .keyboardShortcut("n", modifiers: .command)
+            }
             CommandMenu("View") {
                 ForEach(AppearanceMode.allCases, id: \.self) { m in
                     // Spelled-out checkmark rather than a Label/Picker: menu items are
@@ -70,6 +76,7 @@ struct MenuBarMenu: View {
 
     var body: some View {
         Text(state.connection.label + (state.sessionID == nil ? "" : " · session open"))
+        Text(state.currentSessionTitle)
 
         if state.cost.turns > 0 {
             Text("$" + state.cost.formatted + " this session")
@@ -81,6 +88,9 @@ struct MenuBarMenu: View {
             state.toggleConnection()
         }
         .keyboardShortcut("k", modifiers: .command)
+
+        Button("New conversation") { state.newConversation() }
+            .keyboardShortcut("n", modifiers: .command)
 
         Button("Show it my screen") {
             Task { @MainActor in await state.captureAndSend(auto: false) }

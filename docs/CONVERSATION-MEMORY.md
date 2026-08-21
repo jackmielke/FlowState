@@ -1,7 +1,8 @@
-# Conversation memory — transcript capture, privacy, and rolling summaries
+# Conversation memory — sessions, transcript capture, privacy, and rolling summaries
 
-What Vantage keeps of a conversation, what it refuses to keep, and how a long session
-gets condensed into something it can still refer to an hour later.
+What Vantage keeps of a conversation, what it refuses to keep, how you get back to one
+you had yesterday, and how a long session gets condensed into something it can still
+refer to an hour later.
 
 Implemented in `swiftui/`. The other two stacks (`electron/`, `tauri/`) are built to the
 same product spec and would need the same feature; the type names below are the contract.
@@ -66,6 +67,10 @@ that touches the world lives in the app target.** `ResponseCoordinator` is the p
 | `UtteranceAudio` | The shape of an utterance — duration, sample rate, byte count, peak and RMS. Never samples. |
 | `TranscriptPrivacy` | What may be recorded, what gets rewritten, how long it lives. |
 | `ConversationLog` | The bounded in-memory record. Every write goes through privacy here, and nowhere else. |
+| `SessionMeta` / `SessionCatalog` | The list of saved conversations: what each is called, when it was last touched, how many turns it holds, which realtime sessions it ran under. |
+| `SessionTitle` | What a conversation is called, from what was said in it — or from the clock, when nothing was. |
+| `SessionID` | Minting a conversation id that is safe to use as a file name. |
+| `ConversationArchive` | The JSONL format, in both directions, plus rebuilding the session list from the files alone. |
 | `SummaryJob` | When a summary is due, what window it covers, and what prompt describes it. |
 | `SummaryPolicy` | Cadence and destination. |
 | `Summarizer` | The seam a real model plugs into. `ExtractiveSummarizer` is the offline default. |
@@ -74,12 +79,117 @@ that touches the world lives in the app target.** `ResponseCoordinator` is the p
 
 | Type | Owns |
 |---|---|
-| `ConversationStore` | The clock, the JSONL files, session lifecycle, deletion. |
+| `ConversationStore` | The clock, the JSONL files, the index, session lifecycle, deletion. |
 | `UtteranceRecorder` | Metering on the audio thread. Lock-based, like `LevelBox` beside it. |
 | `UserTranscriber` | The transcription seam. `RealtimeAPITranscriber` (live) / `LocalTranscriber` (placeholder). |
 | `AudioClipRecorder` | Where audio *would* be written. Currently refuses, on purpose. |
 | `SummaryService` | Runs the job, calls the summariser, delivers the result. |
 | `NoteSink` | `MarkdownNoteSink` (real) / `NotionNoteSink` (placeholder). |
+
+## Sessions
+
+A session is one conversation. It is the unit everything else here is filed under — a
+transcript file, a set of summaries, a name in the switcher, a "forget this" that means
+something specific.
+
+### Why it is not the API's session id
+
+It used to be. `session.created` arrives on the socket, and entries were filed under
+whatever id it carried. That is wrong in three ways, and the third one was losing data:
+
+1. It does not exist until a socket opens. A conversation has to be able to own a file
+   before anybody has connected — a note filed before connecting, a summary asked for
+   after disconnecting.
+2. It changes on every reconnect. A dropped socket in the middle of a sentence started a
+   **second transcript file**, and neither half knew about the other. Nothing was
+   corrupted; the conversation was simply cut in two, silently.
+3. It is absent entirely when somebody is reading back a saved conversation with nothing
+   connected — which is now a thing you can do.
+
+So the app mints its own: `SessionID.mint` → `chat-20260821-150412-9f3a`. Sortable,
+readable in a directory listing, and safe as a file name. The API's ids are kept
+alongside in `SessionMeta.realtimeIDs`, appended rather than replaced, so a transcript can
+still be lined up with anything the API reports later.
+
+### Default behaviour
+
+| | |
+|---|---|
+| **Launching** | A new conversation. The previous one is saved, named, and one click away in the switcher. |
+| **Launching, with "Pick up where I left off" on** | The most recent conversation with something in it, restored with its history. |
+| **⌘N / New conversation** | A new one. Nothing is deleted. If a socket is open it is closed first — see below. |
+| **Picking one from the switcher** | That conversation's transcript is read off disk and put back on screen. |
+| **Connecting, disconnecting, reconnecting** | All the same conversation. Only the realtime id changes, and that is recorded, not acted on. |
+| **Quitting** | Nothing to do. Every line was already written when it was said. |
+
+New-every-launch is the default because what you say now should not be silently appended
+to a conversation from Tuesday. Nothing is lost either way — the setting only decides
+which conversation is in front of you when Vantage opens.
+
+**Switching closes an open socket, deliberately.** The realtime model carries the previous
+conversation in its own context; keeping the socket open across a switch would produce a
+conversation called "new" that still remembers the old one. That is the kind of quiet lie
+that makes people stop trusting an app. A new socket is a genuinely clean slate, and the
+Connect button is right there.
+
+### Titles
+
+A session id is the right name for a file and a useless name for a human, so every
+conversation also carries a title. `SessionTitle` generates one from three sources, in
+descending order of how much they actually say:
+
+1. **What the user asked for.** The first substantive user line, with the throat-clearing
+   taken off the front — "hey vantage, could you tighten up the spacing on that button"
+   becomes *Tighten up the spacing on that button*. Not simply the first line: openings
+   are "hey" and "you there?" far more often than they are the question, and a sidebar
+   full of conversations called "Hey" is a sidebar nobody reads twice.
+2. **The running summary.** For conversations the user drove entirely in monosyllables —
+   "yes", "do it", "no, the other one" — the summary is the only thing that knows what it
+   was about.
+3. **The clock.** *This afternoon*, *Yesterday morning*, *Friday evening*, *21 Jul
+   afternoon*. Always available, so a conversation is never nameless, and honest about
+   saying nothing when there is nothing to say.
+
+Two rules keep a title findable rather than merely accurate:
+
+- **It settles.** An auto title is regenerated while the conversation is under
+  `SessionTitle.settlesAfter` (10) turns and then frozen. A title that keeps rewriting
+  itself cannot be found twice.
+- **A user's name is final.** Rename it and nothing regenerates it, ever. Clearing the
+  field hands it back to the generator. Two conversations that generate the *same* title
+  get the time appended — but only the duplicates pay for it.
+
+All of it is decidable from its arguments — no clock it did not receive, no locale it did
+not receive, no disk — which is why it is in Core and tested (`SessionTitleTests`).
+
+### The index, and why losing it costs nothing
+
+`sessions.json` holds one `SessionMeta` per conversation. It is a cache over the
+transcripts and never the truth:
+
+- A **file with no row** — from a build before this one, or an index that got lost — is
+  parsed and given a row (`ConversationArchive.meta`). Only files the index does not
+  already describe are read, so a normal launch parses no transcripts at all.
+- A **row with no file** — deleted by retention, by `rm`, by "delete everything" — is
+  dropped, so the switcher never offers a conversation that opens empty.
+
+Deleting `sessions.json` therefore costs exactly one thing: the titles a user typed by
+hand, which were never in the transcript to recover.
+
+### Reading back
+
+`ConversationArchive.parse` is deliberately forgiving. A truncated last line — the app
+quit mid-write — or a record kind from a later version costs that line and nothing else.
+Refusing the file would throw away a whole conversation to protect nobody from a missing
+sentence. The count of what was skipped is surfaced in Settings rather than swallowed.
+
+Restored lines go into `ConversationLog.restore`, **not** `append`. They were already
+admitted, redacted and stored by the policy in force when they were said; running them
+through the door a second time would re-redact redacted text and — worse — would drop the
+user's entire history the moment they paused recording, because `append` refuses
+everything while paused. The one thing privacy still governs on the way back in is
+retention: a transcript past its window does not come back to life because somebody
+clicked on it.
 
 ## Privacy
 
@@ -115,6 +225,8 @@ confirmation; resuming and forgetting do (`ToolSpec.Effect.writes`).
 
 ```
 ~/Library/Application Support/VibeVoice/
+  settings.json                      everything in AppSettings
+  sessions.json                      the session index, 0600 — a cache, never the truth
   conversations/<sessionID>.jsonl    one JSON object per line, 0600
   notes/<yyyy-MM-dd>.md              summaries, appended
   audio/                             would hold clips. Nothing writes here today.
@@ -122,8 +234,13 @@ confirmation; resuming and forgetting do (`ToolSpec.Effect.writes`).
 
 JSONL rather than a database because the point of a privacy control is that the user can
 go and look at what was kept and delete it with `rm`. A file they can read is worth more
-here than an index they cannot. Session ids come from the API but are reduced to
-`[A-Za-z0-9-_]` before becoming a path.
+here than an index they cannot. Session ids are minted by the app and reduced to
+`[A-Za-z0-9-_]` before becoming a path (`SessionID.sanitize`).
+
+`VIBEVOICE_HOME` moves the whole directory somewhere else for the length of one launch.
+It exists so this half of the app can be exercised for real — quit it, start it again,
+check the conversation came back — without a test run rummaging through actual
+conversations.
 
 ## Summarisation
 
@@ -224,10 +341,15 @@ Four seams, each a named type with a comment rather than a TODO:
 ## Not done
 
 - The other two stacks.
-- Re-reading summaries from a previous launch. `SummaryView` shows what is in memory; the
-  `.md` notes and the `.jsonl` files on disk are still write-only. Reading them back is the
-  same missing capability as transcript search, below.
-- Reading a past conversation back — the files are written and never re-read. Search over
-  them is the obvious next feature and needs no new capture work.
+- **Search across conversations.** The files are read back now, one conversation at a
+  time, by name. Searching all of them is the obvious next feature and needs no new
+  capture work — `ConversationArchive.parse` is already the whole reading half.
+- **Switching conversations by voice.** Every other memory control is reachable by voice
+  (`pause_recording`, `forget_conversation`, …); "open the one about the release script"
+  is not, and would need the title search above to be worth anything.
+- Re-reading the `.md` note files from a previous launch. `SummaryView` shows summaries
+  held in memory, which now includes the ones restored with a conversation — but the
+  notes directory is still write-only.
 - Summaries across sessions. `SummaryJob` is per-session by design; a daily digest would
   read the JSONL rather than extend it.
+- Exporting a conversation as anything but the JSONL it already is.

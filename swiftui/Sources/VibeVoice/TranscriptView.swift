@@ -20,10 +20,21 @@ struct TranscriptView: View {
             .onChange(of: items.count) { _, _ in
                 withAnimation(.easeOut(duration: 0.28)) { proxy.scrollTo("BOTTOM", anchor: .bottom) }
             }
-            .onChange(of: items.last?.text) { _, _ in
+            // Following the LAST line's text was only right while every line was appended
+            // in arrival order. A line now goes where its timestamp says, so the line
+            // being written into is often not the last one — a system note lands under a
+            // reply that is still streaming — and the view stopped following mid-sentence.
+            // What it actually needs to follow is however much text exists in total.
+            .onChange(of: writtenLength) { _, _ in
                 withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo("BOTTOM", anchor: .bottom) }
             }
         }
+    }
+
+    /// Total characters on screen. Changes on every delta of whichever line is being
+    /// written into, wherever it sits.
+    private var writtenLength: Int {
+        items.reduce(0) { $0 + $1.text.count }
     }
 
     @ViewBuilder
@@ -61,8 +72,13 @@ struct TranscriptView: View {
                         .font(.system(size: 9.5, weight: .bold, design: .rounded))
                         .tracking(1.1)
                         .foregroundStyle(isUser ? Theme.accentInk : Theme.voiceInk)
-                    if item.streaming {
-                        Circle().fill(Theme.voiceInk)
+                    // The same dot for both halves of the same idea: a line that is
+                    // still being filled in. The assistant's fills in from the left as it
+                    // speaks; the user's is a row that exists before its words do, put
+                    // there the moment they stop talking so their turn never appears
+                    // below the reply to it.
+                    if item.streaming || item.pending {
+                        Circle().fill(isUser ? Theme.accentInk : Theme.voiceInk)
                             .frame(width: 4, height: 4)
                             .opacity(0.9)
                             .modifier(Blink())
@@ -82,7 +98,22 @@ struct TranscriptView: View {
                         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .stroke(Theme.hairlineHi, lineWidth: 1))
                 }
-                if !item.text.isEmpty {
+                if item.pending && item.text.isEmpty {
+                    // Not a spinner and not a guess at what they said — just the shape of
+                    // a line that is coming, so the turn holds its place in the order.
+                    Text("transcribing…")
+                        .font(.system(size: 12, design: .rounded))
+                        .italic()
+                        .foregroundStyle(Theme.textFaint.opacity(0.75))
+                } else if item.unheard {
+                    // Said, not heard. Kept rather than deleted: the reply underneath it
+                    // is about whatever this was, and removing the row would leave an
+                    // answer to a question nobody appears to have asked.
+                    Text(item.text)
+                        .font(.system(size: 12, design: .rounded))
+                        .italic()
+                        .foregroundStyle(Theme.textFaint.opacity(0.75))
+                } else if !item.text.isEmpty {
                     // The model writes markdown whether or not it is asked to, and an
                     // assistant turn arrives a few characters at a time — so a bold span
                     // is half-written for a second or two and must not flash asterisks.
