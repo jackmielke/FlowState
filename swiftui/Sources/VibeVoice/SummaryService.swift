@@ -125,9 +125,10 @@ final class SummaryService {
 
     init(store: ConversationStore,
          policy: SummaryPolicy = SummaryPolicy(),
-         // Default to the offline placeholder. Swapping in a real model is one argument
-         // — see `Summarizer` for what that implementation owes.
-         summarizer: Summarizer = ExtractiveSummarizer(),
+         // A real model by default now. It falls back to the extractive placeholder on
+         // its own when there is no key or the call fails, so this stays offline-safe
+         // while producing notes rather than quoted lines.
+         summarizer: Summarizer = ModelSummarizer(),
          sinks: [NoteSink] = [MarkdownNoteSink()]) {
         self.store = store
         self.job = SummaryJob(policy: policy)
