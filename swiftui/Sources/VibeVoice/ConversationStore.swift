@@ -162,6 +162,22 @@ final class ConversationStore: ObservableObject {
         log.purgeExpired()
     }
 
+    /// True while the title is still machine-written, i.e. safe to improve.
+    func titleIsAuto(session id: String) -> Bool {
+        guard let m = catalog.meta(id) else { return false }
+        return !m.titleIsCustom
+    }
+
+    /// Everything recorded in one session, for naming it.
+    func entries(inSession id: String) -> [ConversationEntry] { log.entries(inSession: id) }
+
+    /// Installs a better generated title. No-op on a title the user set themselves.
+    func setGeneratedTitle(_ title: String, session id: String) {
+        guard catalog.setGeneratedTitle(title, for: id) != nil else { return }
+        publishSessions()
+        saveIndex()
+    }
+
     /// The user's own name for a conversation. An empty string hands the title back to
     /// the generator rather than leaving a blank row in the list.
     func rename(session id: String, to title: String, now: Date = Date()) {

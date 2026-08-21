@@ -225,7 +225,15 @@ enum QualityMode: String, Codable, CaseIterable {
             s.screenshotSize = 960
             s.maxScreenFrames = 2
             s.screenInterval = max(s.screenInterval, 10)
-            s.transcribeUser = false      // a second model per user turn, billed separately
+            // Transcription STAYS ON in Budget mode.
+            //
+            // It was switched off here to save the separate per-utterance transcription
+            // charge, which is a small fraction of what the audio itself costs — and the
+            // price of it was half the transcript. The user's own words simply stopped
+            // appearing, so the panel showed the assistant talking to nobody and read as
+            // broken. Nobody would trade their own side of a conversation for a few
+            // percent.
+            s.transcribeUser = true
             // With no transcription there are no user words to record — the audio
             // metadata still lands, so a session is not silent in the record, but a
             // summary built from one side only is worth less. Left to the user rather

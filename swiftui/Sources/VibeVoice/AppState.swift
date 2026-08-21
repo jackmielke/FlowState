@@ -1670,6 +1670,11 @@ final class AppState: ObservableObject {
         summaryProblem = nil
         isSummarizing = summaries.isSummarizing
 
+        // A fresh summary is the best material a title will ever have, so retitle from it.
+        // Only while the title is still auto-generated: renaming a conversation the user
+        // named themselves would be the app outvoting its owner.
+        retitleFromSummary(sessionID: summary.sessionID, summary: summary.text)
+
         // Context only — filed WITHOUT asking for a spoken turn. A summary that made the
         // assistant start talking unprompted every few minutes would be a worse app.
         if delivery.fileIntoChat, case .live = connection {
@@ -1696,6 +1701,23 @@ final class AppState: ObservableObject {
     /// a new conversation, open Summary, and the previous one's notes were still sitting
     /// there, which is exactly the kind of thing that makes someone stop trusting what an
     /// app tells them.
+    /// Names a conversation from its summary, in the background.
+    ///
+    /// Deliberately fire-and-forget: a title is worth having and never worth waiting for,
+    /// and the deterministic one is already in place, so a failure here changes nothing
+    /// the user can see.
+    private func retitleFromSummary(sessionID: String, summary: String) {
+        guard conversation.titleIsAuto(session: sessionID) else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let entries = self.conversation.entries(inSession: sessionID)
+            guard let title = await ModelTitler.title(summary: summary, entries: entries) else { return }
+            guard self.conversation.titleIsAuto(session: sessionID) else { return }  // renamed while we asked
+            self.conversation.setGeneratedTitle(title, session: sessionID)
+            self.objectWillChange.send()
+        }
+    }
+
     var visibleSummaries: [ConversationSummary] {
         guard let id = summarySession else { return [] }
         return conversation.allSummaries.filter { $0.sessionID == id }

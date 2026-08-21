@@ -67,7 +67,7 @@ actor ClaudeCode {
                 return "Dev Mode can hand coding tasks to it."
             case .notInstalled:
                 return "Install it, then check again:\n    npm i -g @anthropic-ai/claude-code\n"
-                     + "Dev Mode needs it; everything else in Vantage works without it."
+                     + "Dev Mode needs it; everything else in \(kAssistantDisplayName) works without it."
             case .notSignedIn:
                 return "Run `claude` once in a terminal and sign in. Dev Mode uses your own "
                      + "Claude account, so tasks run on your subscription, not anyone else's."

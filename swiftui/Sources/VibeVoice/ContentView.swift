@@ -107,7 +107,15 @@ struct ContentView: View {
         .onAppear { state.applyEffectiveAppearance() }
         .onChange(of: state.settings.backdrop) { _, _ in state.applyEffectiveAppearance() }
         .onChange(of: state.settings.appearance) { _, _ in state.applyEffectiveAppearance() }
-        .sheet(isPresented: $state.showSettings) { SettingsView(state: state) }
+        // Settings is a floating pane, not a sheet: most of what it changes — backdrop,
+        // appearance, the orb, the transcript — can only be judged while you can still
+        // see it, so the app stays visible and live underneath and the pane can be
+        // dragged out of the way of whatever you are looking at.
+        .floatingPanel("Settings", isPresented: $state.showSettings,
+                       ideal: CGSize(width: 440, height: 620),
+                       key: "panel.settings.origin") {
+            SettingsView(state: state)
+        }
         .sheet(isPresented: $state.showWelcome) {
             WelcomeView(state: state) { state.showWelcome = false }
         }

@@ -86,6 +86,19 @@ struct NeatSlider: View {
                 .onEnded { _ in onCommit() })
         }
         .frame(height: 20)
+        // Same reason as NeatToggle: a drag gesture on a Capsule is invisible to
+        // VoiceOver. One adjustable element, stepping a twentieth of the range, with the
+        // label and spoken value supplied by whoever placed it.
+        .accessibilityElement(children: .ignore)
+        .accessibilityAdjustableAction { direction in
+            let step = (range.upperBound - range.lowerBound) / 20
+            switch direction {
+            case .increment: value = min(range.upperBound, value + step)
+            case .decrement: value = max(range.lowerBound, value - step)
+            @unknown default: break
+            }
+            onCommit()
+        }
     }
 }
 
@@ -139,6 +152,15 @@ struct NeatToggle: View {
             )
             .contentShape(Capsule())
             .onTapGesture { withAnimation(.spring(response: 0.28, dampingFraction: 0.75)) { isOn.toggle() } }
+            // Hand-drawn, so nothing here is a control as far as VoiceOver is concerned
+            // until we say so. One element, announced as a switch, with the label supplied
+            // by whoever placed it.
+            .accessibilityElement(children: .ignore)
+            .accessibilityAddTraits(.isToggle)
+            .accessibilityValue(isOn ? "On" : "Off")
+            .accessibilityAction {
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.75)) { isOn.toggle() }
+            }
     }
 }
 
@@ -238,7 +260,7 @@ struct DisplayPicker: View {
     var body: some View {
         VStack(spacing: 6) {
             row(title: "Active display",
-                detail: followsActive ? followDetail : "Follow whichever display Vantage is on",
+                detail: followsActive ? followDetail : "Follow whichever display \(kAssistantDisplayName) is on",
                 symbol: "display",
                 on: followsActive) { onSelect(nil) }
 

@@ -175,6 +175,24 @@ public final class SessionCatalog {
         return meta
     }
 
+    /// Replaces an auto-generated title with a better auto-generated one.
+    ///
+    /// Distinct from `rename` on purpose: rename marks a title CUSTOM, which is right
+    /// when a person types one and wrong for a machine-written one. A generated title
+    /// must stay improvable by the next summary, and must never outrank a title the user
+    /// chose — so this refuses outright when the title is custom.
+    @discardableResult
+    public func setGeneratedTitle(_ raw: String, for id: String) -> SessionMeta? {
+        guard var meta = byID[id], !meta.titleIsCustom else { return nil }
+        let trimmed = SessionTitle.collapseWhitespace(raw)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        meta.title = trimmed
+        meta.titleIsCustom = false
+        byID[id] = meta
+        return meta
+    }
+
     /// The user's own name for a conversation. Empty or whitespace hands the title back
     /// to the generator rather than leaving a blank row.
     @discardableResult

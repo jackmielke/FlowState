@@ -1,9 +1,27 @@
 import SwiftUI
 import VibeVoiceCore
 
+/// What the app calls itself on screen in Settings.
+///
+/// Display only, on purpose. The assistant's actual identity lives in the personality
+/// prompt (`kDefaultPrompt`, Settings.swift) and in the system prompt sent to the model —
+/// neither is touched by this, because a prompt the user has edited must never be
+/// rewritten by a label change.
+let kAssistantDisplayName = "Flowstate"
+
+/// The name macOS itself shows for this app in System Settings, read from the bundle.
+///
+/// Kept separate from `kAssistantDisplayName`: the Privacy & Security instructions have to
+/// name the row the user is actually hunting for in the system list, which is whatever the
+/// bundle is called — telling them to look for a name that isn't there is worse than a
+/// slightly inconsistent one.
+let kSystemAppName: String =
+    (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+    ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String)
+    ?? "Vantage"
+
 struct SettingsView: View {
     @ObservedObject var state: AppState
-    @Environment(\.dismiss) private var dismiss
 
     /// Names the chosen photo, or says how many are in the chosen folder.
     private var photoNote: String {
@@ -19,78 +37,56 @@ struct SettingsView: View {
         return " — " + name
     }
 
+    // The title, the close button and the drag handle are the panel's, not this view's —
+    // see `FloatingPanel`. Settings only owns what is below the bar.
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("Settings")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Theme.text)
-                Spacer()
-                Button { dismiss() } label: { Image(systemName: "xmark") }
-                    .buttonStyle(IconButtonStyle())
-            }
-            .padding(.horizontal, 22).padding(.top, 18).padding(.bottom, 14)
-
-            Divider().overlay(Theme.hairline)
-
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 26) {
+
+                    // The order below is the order of the questions people actually
+                    // arrive with: who is this, what does it look like, what is behind
+                    // it, is it watching my screen, how do I reach it, and only then the
+                    // machinery. Personality is first because it is the one setting that
+                    // changes what the thing *is*.
+
+                    section("Personality") {
+                        HStack {
+                            Text("Assistant name")
+                                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                            Spacer()
+                            Text(kAssistantDisplayName)
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(Theme.accentInk)
+                        }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("Assistant name")
+                        .accessibilityValue(kAssistantDisplayName)
+
+                        caption("\(kAssistantDisplayName) is the name on screen. The instructions "
+                                + "below are what it actually is — tone, length, what it does "
+                                + "with a screenshot. Edit them freely; they take effect on the "
+                                + "next connect, or immediately with Apply to live session.")
+
+                        TextEditor(text: binding(\.systemPrompt))
+                            .font(.system(size: 12.5))
+                            .scrollContentBackground(.hidden)
+                            .foregroundStyle(Theme.text)
+                            .frame(height: 110)
+                            .padding(9)
+                            .surface(10)
+                            .accessibilityLabel("Personality instructions for \(kAssistantDisplayName)")
+                    }
 
                     section("Appearance") {
                         AppearancePicker(mode: Binding(
                             get: { state.settings.appearance },
                             set: { state.settings.appearance = $0; $0.applyToApp() }))
+                            .accessibilityLabel("Appearance")
+                            .accessibilityValue(state.settings.appearance.label)
                         caption(state.settings.appearance == .system
                                 ? "Following macOS — the app flips with your desktop, including on an Auto schedule."
                                 : "Pinned to \(state.settings.appearance.label.lowercased()), whatever macOS is set to. Saved with the rest of your settings.")
-                    }
-
-                    section("Anywhere") {
-                        HStack {
-                            Text("Show in the menu bar")
-                                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
-                            Spacer()
-                            NeatToggle(isOn: Binding(
-                                get: { state.settings.menuBarEnabled },
-                                set: { state.settings.menuBarEnabled = $0 }))
-                        }
-                        caption("Connect, send a screenshot or stop a task without finding the window.")
-
-                        HStack(spacing: 6) {
-                            ForEach(HotkeyCombo.all) { c in
-                                Button {
-                                    state.settings.summonHotkey = c.id
-                                    state.applySummonHotkey()
-                                } label: {
-                                    Text(c.label)
-                                        .font(.system(size: 11.5, weight: .medium, design: .rounded))
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 6)
-                                        .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                            .fill(state.settings.summonHotkey == c.id
-                                                  ? Theme.accent.opacity(0.9) : Theme.fill))
-                                        .foregroundStyle(state.settings.summonHotkey == c.id
-                                                         ? Theme.onAccent : Theme.text)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                            Button {
-                                state.settings.summonHotkey = ""
-                                state.applySummonHotkey()
-                            } label: {
-                                Text("Off")
-                                    .font(.system(size: 11.5, weight: .medium, design: .rounded))
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 6)
-                                    .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                        .fill(state.settings.summonHotkey.isEmpty
-                                              ? Theme.accent.opacity(0.9) : Theme.fill))
-                                    .foregroundStyle(state.settings.summonHotkey.isEmpty
-                                                     ? Theme.onAccent : Theme.text)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        caption("Summons Flow from any app, and hides it again if it is already in front. ⌘⇧2 still sends a screenshot from anywhere. If a shortcut does nothing, another app already owns it — pick a different one.")
                     }
 
                     section("Backdrop") {
@@ -135,6 +131,10 @@ struct SettingsView: View {
                                     }
                                 }
                                 .buttonStyle(.plain)
+                                // The selected backdrop is marked only by a stroke colour,
+                                // which VoiceOver cannot see. Say it instead.
+                                .accessibilityLabel("Backdrop: \(b.label)")
+                                .accessibilityAddTraits(state.settings.backdrop == b ? [.isSelected] : [])
                             }
                         }
                         caption(state.settings.backdrop.blurb + photoNote)
@@ -147,7 +147,8 @@ struct SettingsView: View {
                                 0...600,
                                 state.settings.photoRotateSeconds < 1
                                     ? "no rotation"
-                                    : String(format: "every %.0fs", state.settings.photoRotateSeconds))
+                                    : String(format: "every %.0fs", state.settings.photoRotateSeconds),
+                                accessibilityLabel: "Seconds between photos")
                         }
                         caption("The places are painted rather than photographed, so they stay sharp at any size and add nothing to the app's two megabytes.")
 
@@ -168,6 +169,8 @@ struct SettingsView: View {
                                                              ? Theme.onAccent : Theme.text)
                                     }
                                     .buttonStyle(.plain)
+                                    .accessibilityLabel("Daylight: \(m == "auto" ? "Auto" : m)")
+                                    .accessibilityAddTraits(state.settings.daylightMode == m ? [.isSelected] : [])
                                 }
                             }
                             caption(state.settings.daylightMode == "auto"
@@ -181,9 +184,195 @@ struct SettingsView: View {
                                 NeatToggle(isOn: Binding(
                                     get: { state.settings.ambientMode },
                                     set: { state.settings.ambientMode = $0; state.noteActivity() }))
+                                    .accessibilityLabel("Ambient mode")
                             }
                             caption("After 45 seconds of quiet the panels fade out and leave the scene and the orb. The session keeps running — move the mouse to bring it back.")
                         }
+                    }
+
+                    // Lifted out of Screen and given its own heading: whether something is
+                    // watching your screen every few seconds is not a detail to find by
+                    // scrolling past a permission row. The permission and display choice
+                    // stay together further down, where they belong.
+                    section("Continuous screen mode") {
+                        HStack {
+                            Text("Continuous screen mode")
+                                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                            Spacer()
+                            NeatToggle(isOn: Binding(
+                                get: { state.settings.continuousScreen },
+                                set: { state.settings.continuousScreen = $0; state.syncScreenTimer() }))
+                                .accessibilityLabel("Continuous screen mode")
+                        }
+                        sliderRow(Binding(
+                            get: { state.settings.screenInterval },
+                            set: { state.settings.screenInterval = $0 }),
+                            2...30,
+                            String(format: "every %.0fs", state.settings.screenInterval),
+                            accessibilityLabel: "Seconds between screen frames") {
+                                state.syncScreenTimer()
+                            }
+                        caption("Frames are filed silently as context, so it won't narrate every one. Ask about your screen whenever you like.")
+
+                        if state.screenPermission.blocksCapture {
+                            HStack(spacing: 8) {
+                                Circle().fill(Theme.bad).frame(width: 7, height: 7)
+                                Text("Screen Recording isn't usable yet — fix it under Screen below.")
+                                    .font(.system(size: 11)).foregroundStyle(Theme.textFaint)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .accessibilityElement(children: .combine)
+                        }
+                    }
+
+                    section("Anywhere") {
+                        HStack {
+                            Text("Show in the menu bar")
+                                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                            Spacer()
+                            NeatToggle(isOn: Binding(
+                                get: { state.settings.menuBarEnabled },
+                                set: { state.settings.menuBarEnabled = $0 }))
+                                .accessibilityLabel("Show in the menu bar")
+                        }
+                        caption("Connect, send a screenshot or stop a task without finding the window.")
+
+                        HStack(spacing: 6) {
+                            ForEach(HotkeyCombo.all) { c in
+                                Button {
+                                    state.settings.summonHotkey = c.id
+                                    state.applySummonHotkey()
+                                } label: {
+                                    Text(c.label)
+                                        .font(.system(size: 11.5, weight: .medium, design: .rounded))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 6)
+                                        .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            .fill(state.settings.summonHotkey == c.id
+                                                  ? Theme.accent.opacity(0.9) : Theme.fill))
+                                        .foregroundStyle(state.settings.summonHotkey == c.id
+                                                         ? Theme.onAccent : Theme.text)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Summon shortcut: \(c.label)")
+                                .accessibilityAddTraits(state.settings.summonHotkey == c.id ? [.isSelected] : [])
+                            }
+                            Button {
+                                state.settings.summonHotkey = ""
+                                state.applySummonHotkey()
+                            } label: {
+                                Text("Off")
+                                    .font(.system(size: 11.5, weight: .medium, design: .rounded))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 6)
+                                    .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        .fill(state.settings.summonHotkey.isEmpty
+                                              ? Theme.accent.opacity(0.9) : Theme.fill))
+                                    .foregroundStyle(state.settings.summonHotkey.isEmpty
+                                                     ? Theme.onAccent : Theme.text)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Summon shortcut: off")
+                            .accessibilityAddTraits(state.settings.summonHotkey.isEmpty ? [.isSelected] : [])
+                        }
+                        caption("Summons \(kAssistantDisplayName) from any app, and hides it again if it is already in front. ⌘⇧2 still sends a screenshot from anywhere. If a shortcut does nothing, another app already owns it — pick a different one.")
+                    }
+
+                    section("Dev Mode") {
+                        // Every switch below can change files on this Mac. The block leads
+                        // with what the whole thing is, and no individual switch is left as
+                        // a bare label — each says in one line what turning it on does.
+                        caption("Hands spoken coding tasks to Claude Code running on this Mac, "
+                                + "under your own Claude account — \(kAssistantDisplayName) never "
+                                + "sees your Anthropic credentials. Off, nothing here can touch a file.")
+
+                        devToggle("Let it edit code with Claude Code",
+                                  "The master switch. Runs `claude -p` in the folder below and lets it "
+                                  + "write files without asking, so keep it on a repo you can `git checkout`.",
+                                  isOn: Binding(
+                                    get: { state.settings.devMode && state.claudeAvailability == .ready },
+                                    set: { state.settings.devMode = $0; state.applySettingsLive() }),
+                                  enabled: state.claudeAvailability == .ready)
+
+                        // Offering a switch that cannot work is worse than not offering it:
+                        // every task would fail with something that reads like a bug.
+                        if state.claudeAvailability != .ready {
+                            HStack(spacing: 7) {
+                                Circle().fill(Theme.bad).frame(width: 6, height: 6)
+                                Text(state.claudeAvailability.headline)
+                                    .font(.system(size: 12)).foregroundStyle(Theme.text)
+                                Spacer()
+                                Button("Check again") { state.refreshClaudeAvailability() }
+                                    .buttonStyle(GhostButtonStyle())
+                                    .accessibilityLabel("Check for Claude Code again")
+                            }
+                            Text(state.claudeAvailability.detail)
+                                .font(.system(size: 11.5, design: .monospaced))
+                                .foregroundStyle(Theme.textFaint)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Repository it works in")
+                                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                            TextField("~/dev/vibe-voice", text: Binding(
+                                get: { state.settings.devRepo },
+                                set: { state.settings.devRepo = $0 }))
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(Theme.text)
+                                .padding(9)
+                                .surface(10)
+                                .accessibilityLabel("Repository Dev Mode works in")
+                            Text("Every task runs here, and nowhere else.")
+                                .font(.system(size: 10.5)).foregroundStyle(Theme.textFaint)
+                        }
+
+                        devToggle("Commit each task when it finishes",
+                                  "Only what the task itself changed is committed — anything you already "
+                                  + "had in progress is left alone, because the restore point taken "
+                                  + "beforehand is what it diffs against. Commits land on your current "
+                                  + "branch, and each task also gets a vantage/T1-… ref to review or "
+                                  + "revert. Failed or permission-blocked tasks are never committed.",
+                                  isOn: Binding(
+                                    get: { state.settings.devAutoCommit },
+                                    set: { state.settings.devAutoCommit = $0 }))
+
+                        devToggle("…and push it to the remote",
+                                  "The only way the work reaches a Claude Code running in the cloud, "
+                                  + "which can see the remote and nothing else. Needs the switch above.",
+                                  isOn: Binding(
+                                    get: { state.settings.devAutoPush && state.settings.devAutoCommit },
+                                    set: { state.settings.devAutoPush = $0 }),
+                                  enabled: state.settings.devAutoCommit)
+
+                        devToggle("Auto-allow everything",
+                                  "Off, only file edits are auto-approved — Notion, Slack and shell "
+                                  + "commands still ask, and since nothing can answer a prompt in the "
+                                  + "background, the task just stalls. On, nothing asks, which is what "
+                                  + "makes connectors work by voice. It also means a misheard sentence "
+                                  + "can run anything.",
+                                  isOn: Binding(
+                                    get: { state.settings.devPermissionMode == "bypassPermissions" },
+                                    set: { state.settings.devPermissionMode = $0 ? "bypassPermissions" : "acceptEdits" }),
+                                  tint: Theme.bad)
+
+                        devToggle("Narrate progress out loud",
+                                  "Steps are always fed to the model silently, so you can ask \"what are "
+                                  + "you doing?\" at any point. This only controls whether it volunteers "
+                                  + "updates — each spoken one costs audio, capped at "
+                                  + "\(state.settings.devNarrateMax) per task.",
+                                  isOn: Binding(
+                                    get: { state.settings.devNarrate },
+                                    set: { state.settings.devNarrate = $0 }),
+                                  tint: Theme.voice)
+                        sliderRow(Binding(
+                            get: { state.settings.devNarrateInterval },
+                            set: { state.settings.devNarrateInterval = $0 }),
+                            10...60,
+                            String(format: "every %.0fs", state.settings.devNarrateInterval),
+                            accessibilityLabel: "Seconds between spoken updates")
                     }
 
                     section("Voice") {
@@ -194,16 +383,6 @@ struct SettingsView: View {
                     section("Model") {
                         ChipPicker(options: kModels, selection: binding(\.model), tint: Theme.voice, columns: 3)
                         caption("Changing the model takes effect on the next connect.")
-                    }
-
-                    section("Personality") {
-                        TextEditor(text: binding(\.systemPrompt))
-                            .font(.system(size: 12.5))
-                            .scrollContentBackground(.hidden)
-                            .foregroundStyle(Theme.text)
-                            .frame(height: 110)
-                            .padding(9)
-                            .surface(10)
                     }
 
                     section("Cost mode") {
@@ -225,6 +404,8 @@ struct SettingsView: View {
                                                          ? Theme.onAccent : Theme.text)
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityLabel("Cost mode: \(m.label)")
+                                .accessibilityAddTraits(state.settings.qualityMode == m ? [.isSelected] : [])
                             }
                         }
                         caption(state.settings.qualityMode.blurb)
@@ -232,7 +413,8 @@ struct SettingsView: View {
                     }
 
                     section("Speaking speed") {
-                        sliderRow(binding(\.speed), 0.5...1.5, String(format: "%.2f×", state.settings.speed))
+                        sliderRow(binding(\.speed), 0.5...1.5, String(format: "%.2f×", state.settings.speed),
+                                  accessibilityLabel: "Speaking speed")
                     }
 
                     section("Screen") {
@@ -245,6 +427,7 @@ struct SettingsView: View {
                             Spacer()
                             Button("Check") { Task { await state.recheckScreenPermission() } }
                                 .buttonStyle(GhostButtonStyle())
+                                .accessibilityLabel("Check screen recording permission")
                         }
                         if state.screenPermission == .needsRestart {
                             Button("Relaunch to apply") { state.relaunchForScreenPermission() }
@@ -253,16 +436,17 @@ struct SettingsView: View {
                         } else if state.screenPermission == .denied {
                             Button("Open Privacy Settings") { state.openScreenPrivacySettings() }
                                 .buttonStyle(GhostButtonStyle(tint: Theme.accentInk))
-                            caption("Allow Vantage under Privacy & Security › Screen & System Audio Recording. If it is already checked, this build was re-signed since then — toggle it off and back on.")
+                            caption("Allow \(kSystemAppName) under Privacy & Security › Screen & System Audio Recording — that is the name macOS lists this app under. If it is already checked, this build was re-signed since then — toggle it off and back on.")
                         }
 
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
-                                Text("Screen Vantage sees")
+                                Text("Screen \(kAssistantDisplayName) sees")
                                     .font(.system(size: 12.5)).foregroundStyle(Theme.text)
                                 Spacer()
                                 Button("Rescan") { Task { await state.refreshDisplays() } }
                                     .buttonStyle(GhostButtonStyle())
+                                    .accessibilityLabel("Rescan displays")
                             }
                             if state.displays.isEmpty {
                                 caption(state.screenPermission.blocksCapture
@@ -275,26 +459,11 @@ struct SettingsView: View {
                                               onSelect: { state.selectDisplay($0) })
                                 caption(state.displays.count == 1
                                         ? "Only one display attached. Plug in another and it appears here — one is shared at a time, and the choice applies to single shots and continuous mode alike."
-                                        : "One screen at a time, for single shots and continuous mode alike. Pinning a display keeps it in view even when you move this window to another one; if that display is unplugged, Vantage falls back to the active one instead of failing.")
+                                        : "One screen at a time, for single shots and continuous mode alike. Pinning a display keeps it in view even when you move this window to another one; if that display is unplugged, \(kAssistantDisplayName) falls back to the active one instead of failing.")
                             }
                         }
 
-                        HStack {
-                            Text("Continuous screen mode")
-                                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
-                            Spacer()
-                            NeatToggle(isOn: Binding(
-                                get: { state.settings.continuousScreen },
-                                set: { state.settings.continuousScreen = $0; state.syncScreenTimer() }))
-                        }
-                        sliderRow(Binding(
-                            get: { state.settings.screenInterval },
-                            set: { state.settings.screenInterval = $0 }),
-                            2...30,
-                            String(format: "every %.0fs", state.settings.screenInterval)) {
-                                state.syncScreenTimer()
-                            }
-                        caption("Frames are filed silently as context, so it won't narrate every one. Ask about your screen whenever you like.")
+                        caption("Continuous screen mode and how often it looks are near the top of this window.")
                     }
 
                     section("Notion") {
@@ -302,7 +471,7 @@ struct SettingsView: View {
                             placeholder: "ntn_… integration token",
                             isSet: Notion.isConfigured,
                             onSave: { try? KeyStore.setSecret($0, forKey: "NOTION_TOKEN") })
-                        caption("Create an internal integration at notion.so/my-integrations, then share the pages you want Flow to see with it — it can only read what you share. The token is written to the same 0600 file as your OpenAI key, outside the repo.")
+                        caption("Create an internal integration at notion.so/my-integrations, then share the pages you want \(kAssistantDisplayName) to see with it — it can only read what you share. The token is written to the same 0600 file as your OpenAI key, outside the repo.")
                     }
 
                     section("Tools") {
@@ -327,106 +496,21 @@ struct SettingsView: View {
                                 NeatToggle(isOn: Binding(
                                     get: { state.tools.isEnabled(spec.name) },
                                     set: { state.setToolEnabled($0, spec.name) }))
+                                    .accessibilityLabel(spec.summary)
                             }
                         }
                         caption("Answered by the app itself in milliseconds, so it replies in the same breath — no Claude Code, no subscription usage. Shortcuts are the extensible part: build one in the Shortcuts app and it becomes something you can ask for out loud.")
                     }
 
-                    section("Dev Mode") {
-                        HStack {
-                            Text("Let it edit code with Claude Code")
-                                .font(.system(size: 12.5))
-                                .foregroundStyle(state.claudeAvailability == .ready ? Theme.text : Theme.textDim)
-                            Spacer()
-                            NeatToggle(isOn: Binding(
-                                get: { state.settings.devMode && state.claudeAvailability == .ready },
-                                set: { state.settings.devMode = $0; state.applySettingsLive() }))
-                                .disabled(state.claudeAvailability != .ready)
-                                .opacity(state.claudeAvailability == .ready ? 1 : 0.4)
-                        }
-
-                        // Offering a switch that cannot work is worse than not offering it:
-                        // every task would fail with something that reads like a bug.
-                        if state.claudeAvailability != .ready {
-                            HStack(spacing: 7) {
-                                Circle().fill(Theme.bad).frame(width: 6, height: 6)
-                                Text(state.claudeAvailability.headline)
-                                    .font(.system(size: 12)).foregroundStyle(Theme.text)
-                                Spacer()
-                                Button("Check again") { state.refreshClaudeAvailability() }
-                                    .buttonStyle(GhostButtonStyle())
-                            }
-                            Text(state.claudeAvailability.detail)
-                                .font(.system(size: 11.5, design: .monospaced))
-                                .foregroundStyle(Theme.textFaint)
-                                .textSelection(.enabled)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        TextField("~/dev/vibe-voice", text: Binding(
-                            get: { state.settings.devRepo },
-                            set: { state.settings.devRepo = $0 }))
-                            .textFieldStyle(.plain)
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(Theme.text)
-                            .padding(9)
-                            .surface(10)
-                        HStack {
-                            Text("Commit each task when it finishes")
-                                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
-                            Spacer()
-                            NeatToggle(isOn: Binding(
-                                get: { state.settings.devAutoCommit },
-                                set: { state.settings.devAutoCommit = $0 }))
-                        }
-                        HStack {
-                            Text("…and push it")
-                                .font(.system(size: 12.5))
-                                .foregroundStyle(state.settings.devAutoCommit ? Theme.text : Theme.textDim)
-                            Spacer()
-                            NeatToggle(isOn: Binding(
-                                get: { state.settings.devAutoPush && state.settings.devAutoCommit },
-                                set: { state.settings.devAutoPush = $0 }))
-                                .disabled(!state.settings.devAutoCommit)
-                                .opacity(state.settings.devAutoCommit ? 1 : 0.4)
-                        }
-                        caption("Only what the task itself changed is committed — anything you already had in progress is left alone, because the restore point taken beforehand is what it diffs against. Commits land on your current branch, and each task also gets a vantage/T1-… ref to review or revert. Pushing is the only way the work reaches a Claude Code running in the cloud, which can see the remote and nothing else. Failed or permission-blocked tasks are never committed.")
-
-                        caption("Runs claude -p in that folder with --permission-mode acceptEdits, so it writes files without asking. Keep it on a repo you can git checkout.")
-
-                        HStack {
-                            Text("Auto-allow everything")
-                                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
-                            Spacer()
-                            NeatToggle(isOn: Binding(
-                                get: { state.settings.devPermissionMode == "bypassPermissions" },
-                                set: { state.settings.devPermissionMode = $0 ? "bypassPermissions" : "acceptEdits" }),
-                                tint: Theme.bad)
-                        }
-                        caption("Off, only file edits are auto-approved — Notion, Slack and shell commands still ask, and since nothing can answer a prompt in the background, the task just stalls. On, nothing asks, which is what makes connectors work by voice. It also means a misheard sentence can run anything.")
-
-                        HStack {
-                            Text("Narrate progress out loud")
-                                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
-                            Spacer()
-                            NeatToggle(isOn: Binding(
-                                get: { state.settings.devNarrate },
-                                set: { state.settings.devNarrate = $0 }), tint: Theme.voice)
-                        }
-                        sliderRow(Binding(
-                            get: { state.settings.devNarrateInterval },
-                            set: { state.settings.devNarrateInterval = $0 }),
-                            10...60,
-                            String(format: "every %.0fs", state.settings.devNarrateInterval))
-                        caption("Steps are always fed to the model silently, so you can ask \"what are you doing?\" at any point. This only controls whether it volunteers updates — each spoken one costs audio, capped at \(state.settings.devNarrateMax) per task.")
-                    }
-
                     section("Turn detection") {
                         sliderRow(binding(\.vadThreshold), 0.0...1.0,
-                                  String(format: "threshold %.2f", state.settings.vadThreshold)) {
+                                  String(format: "threshold %.2f", state.settings.vadThreshold),
+                                  accessibilityLabel: "Voice detection threshold") {
                             state.applySettingsLive()
                         }
                         sliderRow(binding(\.silenceDurationMs), 200...1500,
-                                  String(format: "silence %.0f ms", state.settings.silenceDurationMs)) {
+                                  String(format: "silence %.0f ms", state.settings.silenceDurationMs),
+                                  accessibilityLabel: "Silence before a turn ends, in milliseconds") {
                             state.applySettingsLive()
                         }
                         HStack {
@@ -434,6 +518,7 @@ struct SettingsView: View {
                                 .font(.system(size: 12.5)).foregroundStyle(Theme.text)
                             Spacer()
                             NeatToggle(isOn: binding(\.transcribeUser), tint: Theme.voice)
+                                .accessibilityLabel("Transcribe my speech")
                         }
                     }
 
@@ -441,7 +526,7 @@ struct SettingsView: View {
                         caption("Each conversation is saved on its own — its transcript, "
                                 + "its summaries, its own name in the switcher at the top "
                                 + "of the sidebar. Nothing here deletes anything; it only "
-                                + "decides which one is in front of you when Vantage opens.")
+                                + "decides which one is in front of you when \(kAssistantDisplayName) opens.")
 
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
@@ -454,6 +539,7 @@ struct SettingsView: View {
                             }
                             Spacer()
                             NeatToggle(isOn: binding(\.resumeLastSession), tint: Theme.voice)
+                                .accessibilityLabel("Pick up where I left off")
                         }
 
                         HStack(spacing: 10) {
@@ -480,7 +566,7 @@ struct SettingsView: View {
                     }
 
                     section("Memory & privacy") {
-                        caption("What Vantage keeps of a conversation. The transcript on "
+                        caption("What \(kAssistantDisplayName) keeps of a conversation. The transcript on "
                                 + "screen always shows what was said — these control what "
                                 + "survives it.")
 
@@ -498,7 +584,8 @@ struct SettingsView: View {
                             0...(24 * 30),
                             state.settings.privacy.retentionHours > 0
                                 ? "keep \(TranscriptPrivacy.humanHours(state.settings.privacy.retentionHours))"
-                                : "keep forever") {
+                                : "keep forever",
+                            accessibilityLabel: "How long transcripts are kept") {
                             state.applyPrivacySettings()
                         }
                         caption("Turning this down deletes what is already past the window, "
@@ -516,6 +603,7 @@ struct SettingsView: View {
                             }
                             Spacer()
                             NeatToggle(isOn: privacyBinding(\.privacy.keepAudioClips), tint: Theme.voice)
+                                .accessibilityLabel("Keep audio clips")
                         }
 
                         HStack {
@@ -523,6 +611,7 @@ struct SettingsView: View {
                                 .font(.system(size: 12.5)).foregroundStyle(Theme.text)
                             Spacer()
                             NeatToggle(isOn: privacyBinding(\.privacy.paused), tint: Theme.voice)
+                                .accessibilityLabel("Pause recording")
                         }
                         caption(state.conversation.privacy.summaryLine
                                 + " \(state.conversation.entryCount) line(s) held, "
@@ -551,12 +640,14 @@ struct SettingsView: View {
                                 .font(.system(size: 12.5)).foregroundStyle(Theme.text)
                             Spacer()
                             NeatToggle(isOn: privacyBinding(\.summaries.enabled), tint: Theme.voice)
+                                .accessibilityLabel("Summarise as we go")
                         }
                         sliderRow(Binding(
                             get: { state.settings.summaries.everySeconds },
                             set: { state.settings.summaries.everySeconds = $0 } ),
                             60...1800,
-                            String(format: "every %.0f min", state.settings.summaries.everySeconds / 60)) {
+                            String(format: "every %.0f min", state.settings.summaries.everySeconds / 60),
+                            accessibilityLabel: "Minutes between summaries") {
                             state.applyPrivacySettings()
                         }
                         caption("Or sooner, once \(state.settings.summaries.everyNEntries) turns "
@@ -569,6 +660,7 @@ struct SettingsView: View {
                         Text("API key")
                             .font(.system(size: 10.5, weight: .bold)).tracking(1.0)
                             .foregroundStyle(Theme.textFaint)
+                            .accessibilityAddTraits(.isHeader)
                         Text(KeyStore.configURL.path)
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(Theme.textDim)
@@ -585,18 +677,17 @@ struct SettingsView: View {
                 .padding(22)
             }
         }
-        .frame(width: 440, height: 620)
-        .background(Theme.bg)
-        // The sheet is its own AppKit window; without this it can render one frame
-        // behind the main window after a theme switch.
-        .preferredColorScheme(state.settings.appearance.colorScheme)
+        // Width only. The height is the panel's business now: it floats inside the app
+        // window, so it has to be allowed to shrink when the window is short rather than
+        // hang off the bottom edge.
+        .frame(maxWidth: 440)
     }
 
     private var savedConversationsLine: String {
         let n = state.sessions.count
         guard n > 0 else { return "Nothing saved yet." }
         return "\(n) saved" + (state.settings.privacy.persistToDisk
-                               ? "." : " — but \"Save to disk\" is off, so they go when Vantage quits.")
+                               ? "." : " — but \"Save to disk\" is off, so they go when \(kAssistantDisplayName) quits.")
     }
 
     private func binding<T>(_ kp: WritableKeyPath<AppSettings, T>) -> Binding<T> {
@@ -620,6 +711,34 @@ struct SettingsView: View {
             Text(label).font(.system(size: 12.5)).foregroundStyle(Theme.text)
             Spacer()
             NeatToggle(isOn: privacyBinding(kp), tint: Theme.voice)
+                .accessibilityLabel(label)
+        }
+    }
+
+    /// One switch in the Dev Mode block: what it does on the left, the switch on the
+    /// right, and a plain sentence underneath. Nothing in Dev Mode gets a bare label —
+    /// each of these can change files on this Mac, so each says so.
+    private func devToggle(_ title: String,
+                           _ detail: String,
+                           isOn: Binding<Bool>,
+                           tint: Color = Theme.accent,
+                           enabled: Bool = true) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .top) {
+                Text(title)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(enabled ? Theme.text : Theme.textDim)
+                Spacer()
+                NeatToggle(isOn: isOn, tint: tint)
+                    .disabled(!enabled)
+                    .opacity(enabled ? 1 : 0.4)
+                    .accessibilityLabel(title)
+                    .accessibilityHint(detail)
+            }
+            Text(detail)
+                .font(.system(size: 10.5))
+                .foregroundStyle(Theme.textFaint)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -629,6 +748,10 @@ struct SettingsView: View {
             Text(title.uppercased())
                 .font(.system(size: 10.5, weight: .bold)).tracking(1.0)
                 .foregroundStyle(Theme.textFaint)
+                // Uppercased for the eye; VoiceOver should read the real words, and read
+                // them as the heading they are.
+                .accessibilityLabel(title)
+                .accessibilityAddTraits(.isHeader)
             content()
         }
     }
@@ -638,9 +761,12 @@ struct SettingsView: View {
     }
 
     private func sliderRow(_ b: Binding<Double>, _ r: ClosedRange<Double>, _ label: String,
+                           accessibilityLabel: String? = nil,
                            commit: @escaping () -> Void = {}) -> some View {
         HStack(spacing: 14) {
             NeatSlider(value: b, range: r, onCommit: commit)
+                .accessibilityLabel(accessibilityLabel ?? label)
+                .accessibilityValue(label)
             Text(label)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(Theme.textDim)
