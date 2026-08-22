@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import AppKit
+import AVFoundation
 import Combine
 import os
 import VibeVoiceCore
@@ -101,6 +102,34 @@ final class AppState: ObservableObject {
     private lazy var hud = HUDController(state: self)
 
     func applyHUD() { hud.apply() }
+
+    /// The floating camera preview. See `CameraBubbleController`.
+    private lazy var cameraBubble = CameraBubbleController()
+
+    func applyCameraBubble() {
+        settings.cameraBubble ? cameraBubble.show(state: self) : cameraBubble.hide()
+        objectWillChange.send()
+    }
+
+    /// Picked from the bubble's own hover controls, so it has to write the setting and
+    /// rebuild the panel at the size it now claims.
+    func setCameraSize(_ size: CameraSize) {
+        guard settings.cameraSize != size else { return }
+        settings.cameraSize = size
+        applyCameraBubble()
+    }
+
+    /// The overlay both halves read. Assembled here because the corner comes from where
+    /// the bubble was dragged and the size from its controls.
+    var cameraOverlay: CameraOverlay {
+        CameraOverlay(size: settings.cameraSize, corner: settings.cameraCorner)
+    }
+
+    /// Points the bubble at the recording's own camera session while a take is running,
+    /// so it shows what is actually being recorded rather than a second view of it.
+    func cameraBubbleUse(session: AVCaptureSession?) {
+        cameraBubble.useSession(session)
+    }
 
     /// Settings lives in a real window now, not a panel drawn inside this one.
     private lazy var settingsWindow = SettingsWindowController(state: self)
@@ -376,6 +405,9 @@ final class AppState: ObservableObject {
             let writer = VideoTrackWriter()
             writer.displayID = resolvedCaptureDisplayID()
             writer.cameraID = settings.cameraDeviceID
+            // Same description the floating bubble draws itself from, so the circle the
+            // user framed is the circle that lands in the movie.
+            writer.cameraOverlay = cameraOverlay
             // A capture that dies on its own — display unplugged, permission pulled
             // mid-session — would otherwise be discovered only when the movie turns out
             // to end early. Stopping here keeps what was captured and says why.
@@ -400,6 +432,9 @@ final class AppState: ObservableObject {
         recordingIssue = nil
         activePlan = plan
         activeVideo = video
+        // The bubble stops opening its own session and shows the one being recorded —
+        // two sessions on the same device is a device-busy failure mid-take.
+        cameraBubbleUse(session: video?.previewSession)
         note(wanted == .audioOnly
              ? "Recording this conversation."
              : "Recording this conversation — \(wanted.menuLabel.lowercased()), \(plan.summary).")
@@ -518,6 +553,9 @@ final class AppState: ObservableObject {
     @discardableResult
     func finishRecording(reason: String? = nil) -> String {
         let outcome = recorder.stop()
+        // Before the writer is dropped, or the bubble is left previewing a session that
+        // is being torn down and goes black.
+        cameraBubbleUse(session: nil)
         // The writer has closed its file by now, so nothing else should be holding it —
         // and a stale one would keep the storage meter reading a file that is finished.
         activeVideo = nil

@@ -38,6 +38,49 @@ final class MotionBackdropTests: XCTestCase {
         XCTAssertTrue(names.allSatisfy { $0.hasPrefix("motion_") })
     }
 
+    /// Two styles sharing a label would be two identical-looking buttons in the picker,
+    /// and a loop filename collision the moment either of them is given one.
+    func test_labelsAndFilenamesAreUnique() {
+        XCTAssertEqual(Set(MotionStyle.allCases.map(\.label)).count, MotionStyle.allCases.count)
+        XCTAssertEqual(Set(MotionStyle.allCases.map(\.assetBaseName)).count, MotionStyle.allCases.count)
+        XCTAssertFalse(MotionStyle.allCases.contains { $0.blurb.isEmpty })
+    }
+
+    /// The rule every one of these is composed around: a transcript in 11-point grey has
+    /// to stay readable on top of it, so the ground is dark and the *bright* end of the
+    /// palette is the exception rather than the field. A new style whose first stop came
+    /// out pale would pass every other test here and be unusable behind text.
+    func test_everyPaletteRunsDarkToBright() {
+        func luma(_ v: UInt32) -> Double {
+            let r = Double((v >> 16) & 0xFF) / 255
+            let g = Double((v >> 8) & 0xFF) / 255
+            let b = Double(v & 0xFF) / 255
+            return 0.2126 * r + 0.7152 * g + 0.0722 * b
+        }
+        for style in MotionStyle.allCases {
+            let stops = style.palette.map(luma)
+            XCTAssertLessThan(stops[0], 0.10, "\(style.rawValue) has no dark ground to sit text on")
+            XCTAssertGreaterThan(stops[3], stops[0], "\(style.rawValue) palette is not dark to bright")
+            // Monotonic, not just dark-to-bright at the ends: `ramp` walks the four stops
+            // with one number, so a stop out of order is a band that gets darker as the
+            // value rises — visible as a seam across the middle of the picture.
+            XCTAssertEqual(stops, stops.sorted(), "\(style.rawValue) stops are out of order")
+        }
+    }
+
+    /// Every still in the app comes from `stillPhase` — the frozen frame under Reduce
+    /// Motion, the frozen frame behind another window, the preview thumbnails. Zero is the
+    /// one moment all of these look like a flat gradient, so a still taken there advertises
+    /// nothing.
+    func test_stillsAreTakenMidFlowNotAtZero() {
+        for style in MotionStyle.allCases {
+            XCTAssertGreaterThan(style.stillPhase, 0, "\(style.rawValue) freezes at t = 0")
+            // Scaled by the style's own speed, so a slow style gets the same amount of
+            // development rather than the same number of seconds.
+            XCTAssertEqual(style.stillPhase, 12.0 * style.speed, accuracy: 1e-9)
+        }
+    }
+
     // MARK: - Finding a loop
 
     /// Directory order is preference order: a loop the user installed beats one that
@@ -97,6 +140,77 @@ final class MotionBackdropTests: XCTestCase {
                                           exists: { _ in false })
             XCTAssertEqual(src, .painted, "\(style.rawValue) had nothing to fall back to")
         }
+    }
+
+    // MARK: - Loops that are there but do not play
+
+    /// The case this whole predicate exists for: `ocean.mov` is on disk and unplayable, so
+    /// the `ocean.mp4` beside it wins. Existence alone would have picked the broken one and
+    /// drawn black.
+    func test_aBrokenLoopLosesToAGoodOneBesideIt() {
+        let found = MotionAssets.asset(
+            for: .ocean, in: [user],
+            exists: onDisk([user.path + "/ocean.mov", user.path + "/ocean.mp4"]),
+            broken: { $0.path.hasSuffix("ocean.mov") })
+        XCTAssertEqual(found?.path, user.path + "/ocean.mp4")
+    }
+
+    /// And when every candidate is broken the style goes back down the chain rather than
+    /// insisting on a file that cannot be played — a bad download costs you one backdrop,
+    /// not the picture.
+    func test_everyLoopBrokenFallsBackToTheShader() {
+        let src = MotionAssets.source(
+            for: .rain, directories: [user, bundled],
+            assetsEnabled: true, shaderAvailable: true,
+            exists: { _ in true },
+            broken: { _ in true })
+        XCTAssertEqual(src, .shader)
+    }
+
+    /// With no Metal either, it still draws something.
+    func test_everyLoopBrokenAndNoMetalStillDrawsSomething() {
+        let src = MotionAssets.source(
+            for: .embers, directories: [user],
+            assetsEnabled: true, shaderAvailable: false,
+            exists: { _ in true },
+            broken: { _ in true })
+        XCTAssertEqual(src, .painted)
+    }
+
+    /// Nothing is broken until something says so. Every existing caller passes no
+    /// predicate at all and must keep resolving exactly as it did.
+    func test_nothingIsBrokenByDefault() {
+        let src = MotionAssets.source(for: .prism, directories: [user],
+                                      assetsEnabled: true, shaderAvailable: true,
+                                      exists: onDisk([user.path + "/prism.mp4"]))
+        XCTAssertEqual(src, .asset(user.appendingPathComponent("prism.mp4")))
+    }
+
+    // MARK: - What may be installed
+
+    func test_onlyVideoContainersAreAccepted() {
+        XCTAssertNil(MotionAssetPolicy.rejection(name: "loop.mp4", extension: "mp4", bytes: 4_000_000))
+        XCTAssertNil(MotionAssetPolicy.rejection(name: "loop.MOV", extension: "MOV", bytes: nil))
+        XCTAssertNotNil(MotionAssetPolicy.rejection(name: "sky.gif", extension: "gif", bytes: 100))
+        XCTAssertNotNil(MotionAssetPolicy.rejection(name: "sky.png", extension: "png", bytes: nil))
+    }
+
+    /// The safe default. This folder sits beside the transcripts and is filled from a file
+    /// picker, so the 4K master a stock site offers has to be refused before it is copied
+    /// rather than discovered as half a gigabyte of Application Support later.
+    func test_anAbsurdlyLargeLoopIsRefusedBeforeItIsCopied() {
+        let over = MotionAssetPolicy.rejection(name: "master.mov", extension: "mov",
+                                               bytes: MotionAssetPolicy.maxBytes + 1)
+        XCTAssertNotNil(over)
+        XCTAssertTrue(try XCTUnwrap(over).contains("master.mov"), "the refusal has to name the file")
+        XCTAssertNil(MotionAssetPolicy.rejection(name: "master.mov", extension: "mov",
+                                                 bytes: MotionAssetPolicy.maxBytes))
+    }
+
+    /// A size that could not be read is not a reason to refuse — the copy fails honestly
+    /// a moment later if the file is really unreadable.
+    func test_anUnknownSizeIsNotARefusal() {
+        XCTAssertNil(MotionAssetPolicy.rejection(name: "loop.m4v", extension: "m4v", bytes: nil))
     }
 
     // MARK: - Frame budget

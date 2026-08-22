@@ -30,16 +30,19 @@ enum HUDStyle: String, Codable, CaseIterable, Identifiable {
     /// The panel's size. Unchanged, because it is what the window is positioned by — the
     /// *drawn* widget is `surface`, a few points smaller, and the difference is a
     /// transparent margin the glow can spill into instead of being clipped at the edge.
+    /// How much transparent room the glow gets on every side.
+    ///
+    /// `glowRadius` reaches about 21 points at full voice, and the old margin was six —
+    /// so the glow was clipped square exactly when the widget was most alive. The margin
+    /// is click-through (see `HUDContainerView`), so paying for it costs nothing but
+    /// pixels nobody can see.
+    static let glowMargin: CGFloat = 26
+
     var size: CGSize {
-        switch self {
-        case .orb:  return CGSize(width: 78,  height: 78)
-        // Pill and bar are each 40 points wider than they were, which is the mute
-        // button plus the gap before it. Taking the width out of the status line
-        // instead would have truncated "Connecting…" to fit a button next to it.
-        case .pill: return CGSize(width: 248, height: 62)
-        case .bar:  return CGSize(width: 360, height: 62)
-        }
+        CGSize(width: surface.width + Self.glowMargin * 2,
+               height: surface.height + Self.glowMargin * 2)
     }
+
 
     /// The black surface people actually see. Slightly smaller than it used to be: with
     /// the perimeter stroke gone there is nothing holding the extra width, and a solid

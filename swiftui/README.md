@@ -457,7 +457,7 @@ those decisions.
 ### Looking at it without a screenshot
 
 `Scripts/snapshot-ui.sh [outdir]` renders every tab in both appearances, the moving-backdrop
-picker for each of the six styles, and a contact sheet of all six, straight to PNG:
+picker for each of the nine styles, and a contact sheet of all nine, straight to PNG:
 
 ```
 swiftui/Scripts/snapshot-ui.sh /tmp/flowstate-ui
@@ -473,14 +473,19 @@ placeholder rather than as themselves. Everything around them is real.
 
 ## Moving backdrops
 
-**Settings → Look → Backdrop → Motion**, then pick one of six: **Ocean**, **Clouds**, **Aurora**,
-**Fluid**, **Silk**, **Nebula**. Every tile in the picker is the real thing running at
-preview size, because these six differ almost entirely in *how they move* — a still grid
-of them would be six coloured rectangles and a guess.
+**Settings → Look → Backdrop → Motion**, then pick one of nine: **Ocean**, **Clouds**,
+**Aurora**, **Fluid**, **Silk**, **Nebula**, **Rain**, **Embers**, **Prism**. Every tile in
+the picker is the real thing running at preview size, because these differ almost entirely
+in *how they move* — a still grid of them would be nine coloured rectangles and a guess.
+
+The last three are the newest, and they were chosen for their *motion* rather than for
+another palette: Rain falls, Embers rise, Prism slides across. Embers is also the only
+warm-dark one in the set. A tenth style that drifted like Clouds in a different colour
+would add a row to the grid and nothing to the choice.
 
 Picking Motion opens a **Moving background** section under the backdrop grid: the chosen
-style running at full width above the six thumbnails, so it can be judged at something
-like the size it will actually be seen at without closing Settings.
+style running at full width above the thumbnails, so it can be judged at something like
+the size it will actually be seen at without closing Settings.
 
 The **Motion** slider under the grid is amplitude and contrast. It deliberately does not
 touch speed: a backdrop that speeds up is a backdrop you start watching instead of the
@@ -496,15 +501,30 @@ with the painted places, and is the best thing to pair them with.
 
 | | When | Cost |
 |---|---|---|
-| **A video loop** | `Motion/<style>.mp4` exists and the switch is on | Cheapest — the media engine decodes it |
+| **A video loop** | `Motion/<style>.mp4` exists, plays, and the switch is on | Cheapest — the media engine decodes it |
 | **A Metal shader** | Normal case. `Contents/Resources/default.metallib` is in the bundle | ~1% CPU over an idle window |
 | **Drawn in `Canvas`** | No metallib — a bare SPM binary, or a build made without the Metal toolchain | A little less than the painted places |
 
-The third one exists because `ShaderLibrary.default` does not fail politely: it resolves
-lazily and dies at draw time if the library or the function is not there, and there are
-two ordinary ways to be in that position. So the app checks for the metallib rather than
-assuming it, and falls back to a simpler drawing of the same idea — not a degraded shader.
-`swift run` gets you this path; `./build.sh` gets you the shader.
+Underneath all three, always, is a **palette gradient** — three stops of the style's own
+colours, one fill, drawn on the first frame and covered a moment later. It is what a tile
+is before its renderer has anything, and what is left if a renderer never produces
+anything at all. Nothing here is ever an empty rectangle.
+
+The `Canvas` fallback exists because `ShaderLibrary.default` does not fail politely: it
+resolves lazily and dies at draw time if the library or the function is not there, and
+there are two ordinary ways to be in that position. So the app checks for the metallib
+rather than assuming it, and falls back to a simpler drawing of the same idea — not a
+degraded shader. `swift run` gets you this path; `./build.sh` gets you the shader.
+
+**A loop that does not play** falls through the same chain. Resolution picks a loop by
+asking whether the file is *there*, which is the wrong question about half the ways a video
+goes wrong — a truncated download, an audio-only `.mp4`, a container this Mac has no
+decoder for. All three resolve happily and then draw black, full screen, behind the
+conversation. So playability is checked at the player (`isPlayable`, and whether there is a
+video track at all) and at the poster-frame generator, and a file that fails is remembered
+for the rest of the launch: the next redraw takes that style back to the shader, and
+Settings says which file failed and why. In memory only — a file that failed because it was
+still being copied in deserves another try next launch.
 
 Which one you are on is stated in Settings, under the buttons.
 
@@ -525,10 +545,25 @@ Seamless loops look best; the file is played muted and on repeat, and it is expl
 stopped from keeping your display awake. The toggle beside the button goes back to the
 shader without deleting anything.
 
+Two things are refused before anything is copied, and both say why: a container that is not
+`.mov`, `.mp4` or `.m4v`, and anything over **512 MB**. The size cap is the safe default —
+this folder sits beside your transcripts and is filled from a file picker, and a decorative
+backdrop has no business quietly putting the 4K master a stock site offered into
+Application Support. A seamless loop is a few seconds long.
+
 Nothing ships with the app — the bundle is about two megabytes and video is not. Free,
 properly licensed loops are easy to find: [Pexels](https://www.pexels.com/videos/),
 [Coverr](https://coverr.co) and [Mixkit](https://mixkit.co/free-stock-video/) all publish
 under licences that allow this use. Check the licence on the individual clip.
+
+### Where these pictures come from
+
+Every built-in style is a calculation — a shader, or gradients in a `Canvas`. No stock
+footage, no bundled media, nothing with a licence attached and nobody to attribute. That is
+not incidental; it is the constraint a new style has to meet, and it is why the app is two
+megabytes and why every one of these is sharp at 6K. A loop you add yourself is the only
+asset that ever reaches disk, it stays on your Mac, and it stays yours. Settings says so,
+under the picker, rather than leaving it to this file.
 
 ### Performance
 
@@ -563,7 +598,25 @@ Three things keep it that way, all in `MotionBudget`:
    That name is the entire contract between the two files and nothing checks it at compile
    time, in either language — `MotionBackdropTests` at least checks it is unique and
    prefixed.
-3. A `PaintedForm` for it, if none of `swell` / `drift` / `ribbons` fits.
+3. A `PaintedForm` for it, if none of `swell` / `drift` / `ribbons` / `streaks` / `motes` /
+   `bands` fits. Group by *movement*, not by palette: something falling, something rising
+   and something sliding across are three drawings, and painting a new one as drifting
+   blobs in a new colour is how a fallback stops being a picture of the same idea.
+
+Everything else follows: the picker, the thumbnail, the still under Reduce Motion, the
+snapshot contact sheet and the loop filename all come off `MotionStyle.allCases`. The tests
+will hold you to four palette stops, a unique shader name, a unique label, a dark first
+stop, and a palette that runs monotonically dark to bright — the last two because the
+transcript has to stay readable on top of whatever you drew.
+
+Two traps worth knowing about, both of which produced a wrong picture that compiled:
+
+- **Do not derive two coordinates from one hash.** A field of particles whose x and its
+  phase both come from `hash(i)` puts every particle on a perfect diagonal. Use independent
+  offsets — `hash(i)`, `hash(i + 4001)`, `hash(i + 977)`.
+- **Compose for `stillPhase`, not for t = 0.** Every still in the app — Reduce Motion, an
+  occluded window, the thumbnails — is taken at `12 × speed` seconds. If your style is one
+  object crossing an otherwise empty frame, make sure it is *in shot* at that moment.
 
 `build.sh` compiles the shaders. If your Mac says `missing Metal Toolchain`, that is a
 separate Xcode component and the build says so rather than failing:

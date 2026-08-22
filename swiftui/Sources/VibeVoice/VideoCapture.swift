@@ -90,6 +90,14 @@ final class VideoTrackWriter: NSObject, RecordingVideoTrack, @unchecked Sendable
 
     private var stream: SCStream?
     private var session: AVCaptureSession?
+
+    /// The camera session, for the floating bubble to preview. Exposed rather than
+    /// duplicated: a second `AVCaptureSession` on the same device fails with
+    /// device-busy, which would land in the middle of a demo.
+    var previewSession: AVCaptureSession? {
+        lock.lock(); defer { lock.unlock() }
+        return session
+    }
     /// The most recent camera frame, for `.full` to draw into the corner. Held rather
     /// than queued: a composite is only ever as fresh as the screen frame it is drawn
     /// onto, so anything older than "the latest" is of no use to anybody.
@@ -320,7 +328,7 @@ final class VideoTrackWriter: NSObject, RecordingVideoTrack, @unchecked Sendable
         // into the file untouched and a composited one is shrinking a small picture rather
         // than a 4K one. The size comes from the device's own aspect ratio — forcing 16:9
         // onto a 4:3 camera would stretch every face in the recording.
-        let size = CameraCapture.outputSize(for: plan, device: device)
+        let size = CameraCapture.outputSize(for: plan, overlay: cameraOverlay, device: device)
         output.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
             kCVPixelBufferWidthKey as String: size.width,
@@ -458,30 +466,77 @@ final class VideoTrackWriter: NSObject, RecordingVideoTrack, @unchecked Sendable
         guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &out) == kCVReturnSuccess,
               let out else { return nil }
 
-        let width = CGFloat(CVPixelBufferGetWidth(out))
-        let height = CGFloat(CVPixelBufferGetHeight(out))
-        let inset = width * Self.insetWidthFraction
-        let margin = width * Self.insetMarginFraction
-
+        let size = CGSize(width: CVPixelBufferGetWidth(out), height: CVPixelBufferGetHeight(out))
+        let dst = cameraOverlay.rect(in: size)
         let camera = CIImage(cvPixelBuffer: overlay)
-        let scale = inset / max(1, camera.extent.width)
-        let placed = camera
-            .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-            .transformed(by: CGAffineTransform(translationX: width - inset - margin, y: margin))
+        let screen = CIImage(cvPixelBuffer: base)
 
-        let frame = placed.composited(over: CIImage(cvPixelBuffer: base))
+        // Aspect-fill into `dst`, cropped rather than squashed. A 16:9 camera stretched
+        // into a square makes every face in the recording wider than it is, which is the
+        // kind of wrong that is obvious the moment somebody watches it back and
+        // impossible to spot while recording.
+        let placed = Self.aspectFill(camera, into: dst)
+
+        let frame: CIImage
+        if cameraOverlay.size.isFullFrame {
+            frame = placed.cropped(to: CGRect(origin: .zero, size: size))
+        } else if cameraOverlay.circular {
+            // The same circle as the floating preview. Masked rather than drawn into a
+            // rounded layer because this runs per frame on the GPU, and CIBlendWithMask
+            // is one pass.
+            frame = placed
+                .applyingFilter("CIBlendWithMask", parameters: [
+                    kCIInputBackgroundImageKey: screen,
+                    kCIInputMaskImageKey: Self.circleMask(dst),
+                ])
+                .applyingFilter("CISourceOverCompositing", parameters: [
+                    kCIInputBackgroundImageKey: screen,
+                ])
+        } else {
+            frame = placed.composited(over: screen)
+        }
+
         ci.render(frame,
                   to: out,
-                  bounds: CGRect(x: 0, y: 0, width: width, height: height),
+                  bounds: CGRect(origin: .zero, size: size),
                   colorSpace: CGColorSpaceCreateDeviceRGB())
         return out
     }
 
-    /// How wide the camera inset is, as a fraction of the frame. A fifth is big enough to
-    /// read a face on a laptop screen and small enough not to cover the thing being
-    /// demonstrated.
-    static let insetWidthFraction: CGFloat = 0.20
-    static let insetMarginFraction: CGFloat = 0.02
+    /// Scales `image` to cover `dst` entirely, centres it, and crops away the overhang.
+    private static func aspectFill(_ image: CIImage, into dst: CGRect) -> CIImage {
+        let e = image.extent
+        guard e.width > 0, e.height > 0 else { return image }
+        let scale = max(dst.width / e.width, dst.height / e.height)
+        let scaled = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let s = scaled.extent
+        return scaled
+            .transformed(by: CGAffineTransform(translationX: dst.midX - s.midX,
+                                               y: dst.midY - s.midY))
+            .cropped(to: dst)
+    }
+
+    /// A white disc filling `rect`, with one pixel of softness at the edge.
+    ///
+    /// A hard-edged mask aliases into a visibly stepped circle at the sizes this is used
+    /// at, and the step crawls from frame to frame because the camera behind it moves.
+    private static func circleMask(_ rect: CGRect) -> CIImage {
+        let r = rect.width / 2
+        let f = CIFilter(name: "CIRadialGradient", parameters: [
+            "inputCenter": CIVector(x: rect.midX, y: rect.midY),
+            "inputRadius0": r - 1,
+            "inputRadius1": r,
+            "inputColor0": CIColor(red: 1, green: 1, blue: 1, alpha: 1),
+            "inputColor1": CIColor(red: 0, green: 0, blue: 0, alpha: 0),
+        ])
+        // The gradient is infinite; cropping it is what keeps the blend cheap.
+        return f?.outputImage?.cropped(to: rect) ?? CIImage(color: .white).cropped(to: rect)
+    }
+
+    /// Size, corner and shape of the camera inset. Set by `AppState` from the same
+    /// `CameraOverlay` the floating bubble draws itself from — see `CameraOverlay` for
+    /// why there is only one of these.
+    var cameraOverlay = CameraOverlay()
 
     // MARK: - Audio
 

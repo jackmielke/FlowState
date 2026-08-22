@@ -18,7 +18,7 @@ struct MotionBackdropView: View {
     /// Whether a video loop on disk is allowed to stand in for the shader.
     var assetsEnabled: Bool = true
     /// A Settings tile rather than the window behind everything: fewer frames, and the
-    /// voice nudge switched off so six of them are not all pulsing at once.
+    /// voice nudge switched off so nine of them are not all pulsing at once.
     var preview: Bool = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -37,18 +37,29 @@ struct MotionBackdropView: View {
                                              reduceMotion: reduceMotion,
                                              preview: preview)
         GeometryReader { geo in
-            switch src {
-            case .asset(let url):
-                // The player keeps its own clock, so Reduce Motion is honoured by holding
-                // it on one frame rather than by not drawing it.
-                LoopingVideoView(url: url, paused: !power.visible || reduceMotion)
-            case .shader:
-                timeline(interval) { t in shaded(size: geo.size, t: t) }
-            case .painted:
-                timeline(interval) { t in PaintedMotion(style: style,
-                                                        intensity: intensity,
-                                                        energy: preview ? 0 : energy,
-                                                        phase: t) }
+            ZStack {
+                // Always underneath, whichever renderer won. One gradient fill, available
+                // on the first frame, and completely covered a moment later — which is the
+                // whole point: nothing above it has to be able to draw instantly, and if
+                // something above it never draws at all this is still a picture of the
+                // style rather than a black rectangle.
+                MotionPlaceholder(style: style, assetURL: assetURL(src))
+
+                switch src {
+                case .asset(let url):
+                    // The player keeps its own clock, so Reduce Motion is honoured by
+                    // holding it on one frame rather than by not drawing it.
+                    LoopingVideoView(url: url,
+                                     paused: !power.visible || reduceMotion,
+                                     onFailure: { MotionAssetHealth.markBroken($0, reason: $1) })
+                case .shader:
+                    timeline(interval) { t in shaded(size: geo.size, t: t) }
+                case .painted:
+                    timeline(interval) { t in PaintedMotion(style: style,
+                                                            intensity: intensity,
+                                                            energy: preview ? 0 : energy,
+                                                            phase: t) }
+                }
             }
         }
         .clipped()
@@ -67,8 +78,15 @@ struct MotionBackdropView: View {
                 content(MotionClock.phase(at: tl.date) * style.speed)
             }
         } else {
-            content(12.0 * style.speed)
+            content(style.stillPhase)
         }
+    }
+
+    /// The loop behind this view, when there is one — so the placeholder underneath can
+    /// be that file's own first frame rather than a drawing of the style it stands in for.
+    private func assetURL(_ src: MotionSource) -> URL? {
+        if case .asset(let url) = src { return url }
+        return nil
     }
 
     private func shaded(size: CGSize, t: Double) -> some View {
@@ -164,7 +182,8 @@ enum MotionLibrary {
             directories: directories,
             assetsEnabled: assetsEnabled,
             shaderAvailable: shaderAvailable,
-            exists: { FileManager.default.fileExists(atPath: $0.path) })
+            exists: { FileManager.default.fileExists(atPath: $0.path) },
+            broken: MotionAssetHealth.isBroken)
         memo[key] = resolved
         return resolved
     }
@@ -182,7 +201,15 @@ enum MotionLibrary {
     }
 
     /// One line for Settings, so it is never a mystery which of the three is on screen.
-    static func describe(_ source: MotionSource) -> String {
+    ///
+    /// The broken-loop case is stated first because it is the only one of the four the
+    /// user can do something about, and the only one where what is on screen is not what
+    /// they asked for.
+    @MainActor
+    static func describe(_ source: MotionSource, style: MotionStyle) -> String {
+        if let failure = MotionAssetHealth.failure(for: style, in: directories) {
+            return failure + " Falling back to the drawn version — remove or replace the file."
+        }
         switch source {
         case .asset(let url): return "Playing \(url.lastPathComponent) from your Motion folder."
         case .shader:         return "Drawn live on the GPU — one pass, sharp at any size."
@@ -198,8 +225,13 @@ enum MotionLibrary {
     @discardableResult
     static func install(_ picked: URL, as style: MotionStyle) -> String? {
         let ext = picked.pathExtension.lowercased()
-        guard MotionAssets.extensions.contains(ext) else {
-            return "\(picked.lastPathComponent) is not a .mov, .mp4 or .m4v."
+        let bytes = (try? picked.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
+        // Both refusals happen before anything is copied, and both say why. See
+        // `MotionAssetPolicy` for why a size cap belongs here at all.
+        if let refusal = MotionAssetPolicy.rejection(name: picked.lastPathComponent,
+                                                     extension: ext,
+                                                     bytes: bytes) {
+            return refusal
         }
         let dest = userFolder.appendingPathComponent(style.assetBaseName + "." + ext)
         do {
@@ -208,6 +240,8 @@ enum MotionLibrary {
             // ocean.mov would keep winning over the ocean.mp4 just installed.
             for candidate in MotionAssets.candidates(for: style, in: [userFolder]) {
                 try? FileManager.default.removeItem(at: candidate)
+                MotionThumbnail.forgetPoster(for: candidate)
+                MotionAssetHealth.forget(candidate)
             }
             try FileManager.default.copyItem(at: picked, to: dest)
         } catch {
@@ -221,6 +255,10 @@ enum MotionLibrary {
     static func removeAsset(for style: MotionStyle) {
         for candidate in MotionAssets.candidates(for: style, in: [userFolder]) {
             try? FileManager.default.removeItem(at: candidate)
+            MotionThumbnail.forgetPoster(for: candidate)
+            // A file that failed is being deleted, so the note about it goes too. Keeping
+            // it would mean a replacement at the same path started out condemned.
+            MotionAssetHealth.forget(candidate)
         }
         refresh()
     }
@@ -235,6 +273,62 @@ enum MotionLibrary {
         panel.prompt = "Use as backdrop"
         panel.message = "Pick a video loop — seamless ones look best, and it will be muted"
         return panel.runModal() == .OK ? panel.url : nil
+    }
+}
+
+// MARK: - Loops that turn out not to play
+
+/// Which installed loops failed, so the backdrop can stop trying to play them.
+///
+/// `MotionAssets.source` picks a loop by asking whether the file is *there*, which is the
+/// only question a pure, testable function can answer — and it is the wrong question about
+/// half the ways a video file goes wrong. A truncated download, an audio-only `.mp4`, a
+/// `.mov` wrapping a codec this Mac has no decoder for: all of them exist, all of them
+/// resolve to `.asset`, and all of them then draw nothing. Black, full screen, behind the
+/// conversation, with the Settings pane cheerfully reporting "Playing ocean.mp4".
+///
+/// So playability is discovered where it can be — at the player, and at the poster-frame
+/// generator — and remembered here. Resolution consults it, so the very next redraw takes
+/// the style back down the chain to the shader.
+///
+/// In memory only, deliberately. A file that failed because the machine was under load, or
+/// because it was still being copied in, deserves another try next launch; a file that is
+/// genuinely broken fails again in a fraction of a second and costs nothing to rediscover.
+@MainActor
+enum MotionAssetHealth {
+
+    private static var broken: [String: String] = [:]
+
+    static func isBroken(_ url: URL) -> Bool { broken[url.path] != nil }
+
+    /// Records a failure and republishes, which is what actually gets the black rectangle
+    /// off the screen — clearing the memo alone would leave the window showing the dead
+    /// player until something else happened to invalidate it.
+    ///
+    /// Idempotent: a player can report the same file failing several times in a row, and
+    /// refreshing on each of them would be a redraw storm.
+    static func markBroken(_ url: URL, reason: String) {
+        guard broken[url.path] == nil else { return }
+        broken[url.path] = reason
+        // Logged as well as shown. What the user sees is one line in Settings they have to
+        // be looking at; this is the only trace of it for anyone debugging a backdrop that
+        // is not the backdrop they installed.
+        FileHandle.standardError.write(
+            Data("[motion] \(url.lastPathComponent) unplayable — \(reason); falling back\n".utf8))
+        MotionLibrary.refresh()
+    }
+
+    static func forget(_ url: URL) { broken.removeValue(forKey: url.path) }
+
+    /// One sentence about this style's loop, if it has one and it failed. Nil is the
+    /// ordinary case and means "nothing to report".
+    static func failure(for style: MotionStyle, in directories: [URL]) -> String? {
+        for url in MotionAssets.candidates(for: style, in: directories) {
+            if let reason = broken[url.path] {
+                return "\(url.lastPathComponent) could not be played — \(reason)."
+            }
+        }
+        return nil
     }
 }
 
@@ -278,12 +372,18 @@ final class MotionPower: ObservableObject {
 struct LoopingVideoView: NSViewRepresentable {
     let url: URL
     var paused: Bool
+    /// Called when this file turns out not to be playable, with a reason fit to show a
+    /// user. The view above uses it to take the style back to the shader — see
+    /// `MotionAssetHealth`.
+    var onFailure: ((URL, String) -> Void)?
 
     final class Container: NSView {
         private let queue = AVQueuePlayer()
         private var looper: AVPlayerLooper?
         private let playerLayer = AVPlayerLayer()
+        private var observers: [NSObjectProtocol] = []
         private(set) var url: URL?
+        var onFailure: ((URL, String) -> Void)?
 
         override init(frame: NSRect) {
             super.init(frame: frame)
@@ -294,9 +394,27 @@ struct LoopingVideoView: NSViewRepresentable {
             playerLayer.player = queue
             playerLayer.videoGravity = .resizeAspectFill
             layer?.addSublayer(playerLayer)
+
+            // A file can also fail *during* playback — a decoder that gives up partway
+            // through, or a volume that disappears from under a loop on an external disk.
+            observers.append(NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemFailedToPlayToEndTime,
+                object: nil, queue: .main) { [weak self] note in
+                    MainActor.assumeIsolated {
+                        guard let self, let url = self.url else { return }
+                        let error = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+                        self.report(url, error?.localizedDescription ?? "playback stopped")
+                    }
+                })
         }
 
+        deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+
         required init?(coder: NSCoder) { fatalError("not used") }
+
+        private func report(_ url: URL, _ reason: String) {
+            onFailure?(url, reason)
+        }
 
         override func layout() {
             super.layout()
@@ -311,7 +429,24 @@ struct LoopingVideoView: NSViewRepresentable {
         func load(_ next: URL) {
             guard next != url else { return }
             url = next
-            looper = AVPlayerLooper(player: queue, templateItem: AVPlayerItem(url: next))
+            let asset = AVURLAsset(url: next)
+            looper = AVPlayerLooper(player: queue, templateItem: AVPlayerItem(asset: asset))
+
+            // Ask the file directly rather than waiting for the player to give up.
+            //
+            // `isPlayable` catches the container this Mac has no decoder for; the track
+            // check catches the case `isPlayable` says yes to and a backdrop still cannot
+            // use — an audio-only .mp4, which plays perfectly and draws nothing at all.
+            Task { @MainActor [weak self] in
+                let playable = (try? await asset.load(.isPlayable)) ?? false
+                let hasVideo = ((try? await asset.loadTracks(withMediaType: .video)) ?? []).isEmpty == false
+                guard let self, self.url == next else { return }
+                if !playable {
+                    self.report(next, "this Mac has no decoder for it")
+                } else if !hasVideo {
+                    self.report(next, "it has no video track")
+                }
+            }
         }
 
         func setPaused(_ paused: Bool) {
@@ -321,12 +456,14 @@ struct LoopingVideoView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> Container {
         let v = Container()
+        v.onFailure = onFailure
         v.load(url)
         v.setPaused(paused)
         return v
     }
 
     func updateNSView(_ v: Container, context: Context) {
+        v.onFailure = onFailure
         v.load(url)
         v.setPaused(paused)
     }
@@ -337,10 +474,15 @@ struct LoopingVideoView: NSViewRepresentable {
 /// What a style looks like without Metal.
 ///
 /// Not an approximation of the shader — a simpler picture of the same idea, built out of
-/// a few dozen gradient fills instead of a calculation per pixel. Three forms cover the
-/// six styles, because past a certain distance a wave and a ribbon are the same drawing
-/// with different numbers.
-private enum PaintedForm { case swell, drift, ribbons }
+/// a few dozen gradient fills instead of a calculation per pixel. Six forms cover the nine
+/// styles, because past a certain distance a wave and a ribbon are the same drawing with
+/// different numbers.
+///
+/// The forms are grouped by *movement*, not by palette, which is why the three added with
+/// Rain, Embers and Prism could not reuse the first three: something falling, something
+/// rising and something sliding across are three drawings, and painting them as drifting
+/// blobs in a new colour is exactly how a fallback stops being a picture of the same idea.
+private enum PaintedForm { case swell, drift, ribbons, streaks, motes, bands }
 
 private extension MotionStyle {
     var paintedForm: PaintedForm {
@@ -348,6 +490,9 @@ private extension MotionStyle {
         case .ocean, .silk:            return .swell
         case .clouds, .fluid, .nebula: return .drift
         case .aurora:                  return .ribbons
+        case .rain:                    return .streaks
+        case .embers:                  return .motes
+        case .prism:                   return .bands
         }
     }
 }
@@ -369,6 +514,9 @@ struct PaintedMotion: View {
             case .swell:   swell(&ctx, size, p)
             case .drift:   drift(&ctx, size, p)
             case .ribbons: ribbons(&ctx, size, p)
+            case .streaks: streaks(&ctx, size, p)
+            case .motes:   motes(&ctx, size, p)
+            case .bands:   bands(&ctx, size, p)
             }
         }
         // One offscreen layer for the whole canvas: the blobs overlap heavily, and
@@ -460,12 +608,196 @@ struct PaintedMotion: View {
             }
         }
     }
+
+    /// Rain: a fixed set of streaks, each falling down its own column at its own rate.
+    ///
+    /// The positions come from a hash of the streak's index rather than from a random
+    /// source, so the picture is the same every launch and — more to the point — the same
+    /// every frame of a still. A `Canvas` that reshuffled its contents whenever SwiftUI
+    /// felt like re-evaluating it would strobe.
+    private func streaks(_ ctx: inout GraphicsContext, _ size: CGSize, _ p: [Color]) {
+        // The light behind the glass, so the streaks have something to be lit by.
+        let glowR = max(size.width, size.height) * 0.55
+        ctx.fill(Path(CGRect(origin: .zero, size: size)),
+                 with: .radialGradient(.init(colors: [p[2].opacity(0.30), .clear]),
+                                       center: .init(x: size.width * 0.5, y: size.height * 0.34),
+                                       startRadius: 0, endRadius: glowR))
+
+        let count = 90
+        for i in 0..<count {
+            // Three *independent* hashes, and that is the whole trick. The first version
+            // took the column from `h` and the head start down the column from `h` as
+            // well, which makes x and y the same number — so the ninety streaks landed on
+            // a perfectly straight diagonal instead of scattering across the glass.
+            let h = Self.hash(i)                 // which column
+            let head = Self.hash(i + 4001)       // how far down it already is
+            let h2 = Self.hash(i + 977)          // how near, and so how fast and how long
+            let x = size.width * h
+            let speed = size.height * (0.22 + 0.34 * h2) * (0.6 + amp * 0.5)
+            let length = size.height * (0.05 + 0.13 * h2) * amp
+            // Wraps through a span a little taller than the frame, so a streak enters
+            // from above rather than appearing at the top edge.
+            let span = size.height + length * 2
+            let y = (phase * speed + head * span).truncatingRemainder(dividingBy: span) - length
+
+            var path = Path()
+            path.move(to: .init(x: x, y: y))
+            path.addLine(to: .init(x: x + size.width * 0.006, y: y + length))
+
+            // Near streaks are wider, brighter and faster — the three go together, and
+            // that correlation is the only depth cue a drawing this simple has.
+            let near = h2
+            ctx.stroke(path,
+                       with: .linearGradient(
+                        .init(colors: [p[3].opacity(0), p[3].opacity(0.10 + near * 0.22)]),
+                        startPoint: .init(x: x, y: y),
+                        endPoint: .init(x: x, y: y + length)),
+                       lineWidth: 0.7 + near * 1.6)
+        }
+    }
+
+    /// Embers: sparks rising and going out.
+    ///
+    /// Each one is on a fixed loop of its own length, so they do not all restart together
+    /// — the give-away of a particle field drawn without one.
+    private func motes(_ ctx: inout GraphicsContext, _ size: CGSize, _ p: [Color]) {
+        // The heat they come off, low and off the bottom edge where the buttons are.
+        // Weaker and tighter than it first was: at full strength it swamped the sparks
+        // entirely and the style came out as an orange gradient with nothing in it.
+        ctx.fill(Path(CGRect(origin: .zero, size: size)),
+                 with: .radialGradient(.init(colors: [p[2].opacity(0.22), .clear]),
+                                       center: .init(x: size.width * 0.5, y: size.height * 1.08),
+                                       startRadius: 0, endRadius: max(size.width, size.height) * 0.50))
+
+        let count = 60
+        for i in 0..<count {
+            // Independent again: the column, the point in the spark's life, and its size
+            // all have to come from different hashes or the field is a diagonal line.
+            let h = Self.hash(i)                 // which column it lifted from
+            let head = Self.hash(i + 2003)       // how far through its life it already is
+            let h2 = Self.hash(i + 613)          // how big, how long it lasts, how far it gets
+            let life = 6.0 + h2 * 9.0                       // seconds from lifting to out
+            let u = ((phase * (0.5 + amp * 0.4) + head * life)
+                        .truncatingRemainder(dividingBy: life)) / life   // 0 = just lit
+            let rise = size.height * (0.55 + h2 * 0.4)
+            let y = size.height * 0.98 - u * rise
+            let x = size.width * h + sin(phase * (0.4 + h2 * 0.6) + h * 12) * size.width * 0.035 * amp
+            let r = (1.1 + h2 * 2.2) * (1 - u * 0.45)
+            // Brightest just after lifting, gone before the top — and never at full
+            // strength right at the bottom edge, so the chrome keeps its dark ground.
+            let fade = min(u / 0.14, 1) * (1 - u) * (1 - u)
+            let tint = h2 > 0.72 ? p[3] : p[2]
+            ctx.fill(Path(ellipseIn: CGRect(x: x - r * 3, y: y - r * 3, width: r * 6, height: r * 6)),
+                     with: .radialGradient(
+                        .init(colors: [tint.opacity(0.85 * fade * (1 + energy * 0.4)), .clear]),
+                        center: .init(x: x, y: y), startRadius: 0, endRadius: r * 3))
+        }
+    }
+
+    /// Prism: a broad band of light sliding across on the diagonal.
+    ///
+    /// The dispersion the shader gets for free — sampling the ramp three times and taking
+    /// one channel from each — is approximated here by drawing the band three times,
+    /// slightly offset, in the three colours that are furthest apart in the palette. Same
+    /// idea, a hundredth of the arithmetic.
+    private func bands(_ ctx: inout GraphicsContext, _ size: CGSize, _ p: [Color]) {
+        // Drawn in a rotated space rather than by aiming a gradient diagonally across the
+        // frame. The first version did the latter — two corner points and a `linearGradient`
+        // between them — and the maths quietly worked out to a wash over the whole tile
+        // with no band in it anywhere. Rotating the context and filling upright rectangles
+        // means the beam has a width, in points, that is the width it looks.
+        // The shared ground under every painted style runs p0 → p2 top to bottom, which
+        // for this palette leaves a bright teal strip along the bottom edge — directly
+        // under the buttons. Every other style paints over it; this one is mostly empty
+        // frame by design, so it has to put the dark back deliberately.
+        ctx.fill(Path(CGRect(origin: .zero, size: size)),
+                 with: .linearGradient(
+                    .init(stops: [.init(color: p[0].opacity(0.40), location: 0.0),
+                                  .init(color: p[0].opacity(0.18), location: 0.45),
+                                  .init(color: p[0].opacity(0.94), location: 1.0)]),
+                    startPoint: .zero, endPoint: .init(x: 0, y: size.height)))
+
+        let reach = (size.width + size.height) * 1.3   // long enough to cross any corner
+        let angle = -0.62                              // radians; matches the shader's beam
+        let halfWidth = reach * (0.032 + 0.026 * amp)
+
+        // How far the beam travels, and this is *not* `reach`.
+        //
+        // Sizing the sweep to the length of the rectangles being drawn was the first
+        // version's mistake: `reach` is 1.3×(w+h), so the beam spent most of its cycle
+        // entirely off the side of a frame barely a third that wide and a still taken at
+        // any given moment was usually of an empty tile. What the sweep has to match is
+        // the frame's half-extent *along the beam's own axis* — the projection of the
+        // rectangle onto it, which depends on the angle and not just on the size. Guessing
+        // at a fraction of w + h happens to work at one aspect ratio and fails at the next
+        // one, and this view is drawn at both a 3:2 tile and a very wide banner.
+        let span = (size.width * cos(angle) + size.height * abs(sin(angle))) / 2
+
+        // The offset is what puts the beam in shot at `stillPhase`.
+        //
+        // Every style here is composed to look like something at the moment the app
+        // freezes it — under Reduce Motion, behind another window, in a thumbnail. For the
+        // eight styles that fill the frame that is automatic. This one is a single object
+        // crossing an otherwise empty frame, so where it is at that moment is a
+        // composition decision, and without this it is a picture of the dark just after
+        // the beam has left.
+        let travel = (phase * 0.05 + 0.32).truncatingRemainder(dividingBy: 1.0)
+        let centre = (travel * 2 - 1) * span
+
+        ctx.drawLayer { layer in
+            layer.translateBy(x: size.width / 2, y: size.height / 2)
+            layer.rotate(by: .radians(angle))
+
+            // Three offset copies in three palette colours: the same trick the shader does
+            // by sampling the ramp three times and taking one channel from each, at a
+            // hundredth of the arithmetic. The offsets are what make the edges fringe.
+            for (i, tint) in [p[1], p[2], p[3]].enumerated() {
+                let nudge = (Double(i) - 1) * halfWidth * 0.45
+                let x = centre + nudge
+                let rect = CGRect(x: x - halfWidth, y: -reach / 2,
+                                  width: halfWidth * 2, height: reach)
+                layer.fill(Path(rect),
+                           with: .linearGradient(
+                            .init(stops: [
+                                .init(color: .clear, location: 0),
+                                .init(color: tint.opacity(i == 2 ? 0.32 : 0.21), location: 0.5),
+                                .init(color: .clear, location: 1)
+                            ]),
+                            startPoint: .init(x: x - halfWidth, y: 0),
+                            endPoint: .init(x: x + halfWidth, y: 0)))
+            }
+
+            // The narrow core, which is what stops three soft washes reading as fog.
+            let core = halfWidth * 0.16
+            let rect = CGRect(x: centre - core, y: -reach / 2, width: core * 2, height: reach)
+            layer.fill(Path(rect),
+                       with: .linearGradient(
+                        .init(stops: [
+                            .init(color: .clear, location: 0),
+                            .init(color: p[3].opacity(0.30 + energy * 0.10), location: 0.5),
+                            .init(color: .clear, location: 1)
+                        ]),
+                        startPoint: .init(x: centre - core, y: 0),
+                        endPoint: .init(x: centre + core, y: 0)))
+        }
+    }
+
+    /// A stable pseudo-random number for index `i`.
+    ///
+    /// Deliberately not `Double.random`: everything drawn here is re-evaluated whenever
+    /// SwiftUI decides to, and a field whose members move when nothing has changed is a
+    /// field that strobes. The same index always gives the same number, in this launch and
+    /// the next one.
+    static func hash(_ i: Int) -> Double {
+        let x = sin(Double(i) * 12.9898 + 78.233) * 43758.5453
+        return x - x.rounded(.down)
+    }
 }
 
 // MARK: - Choosing one
 
-/// The moving-backdrop picker: one running at full size, six running as thumbnails, and
-/// the two controls that apply to whichever is chosen.
+/// The moving-backdrop picker: one running at full size, the rest running as thumbnails,
+/// and the two controls that apply to whichever is chosen.
 ///
 /// Its own view rather than a stretch of `SettingsView` for a plain reason — it is the
 /// one part of Settings that cannot be judged from source or from a still, so it has to
@@ -492,7 +824,7 @@ struct MotionStyleGallery: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // The one at full size, above the six at thumbnail size. A 48-point tile
+            // The one at full size, above the rest at thumbnail size. A 48-point tile
             // tells you the palette and nothing about the movement, which is the entire
             // difference between these — so the choice is made in the grid and judged
             // here, without having to close Settings to see it.
@@ -582,12 +914,21 @@ struct MotionStyleGallery: View {
             if let installError {
                 note("Could not use that file — " + installError)
             } else {
-                note(MotionLibrary.describe(source)
+                note(MotionLibrary.describe(source, style: style)
                      + " Loops live in \(MotionLibrary.userFolder.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))"
                      + ", named after the style — ocean.mp4, clouds.mov. The switch on the right "
                      + "goes back to the drawn version without deleting anything.")
             }
+
+            // Said in the app, not only in the README. Which of these pictures the app has
+            // the right to show is a fair question to have about a backdrop feature, and
+            // the answer — all of them, because it draws them itself — is a good one.
+            note(MotionAssets.provenance)
         }
+        // The stills behind the tiles, generated once, the first time this pane is opened.
+        // Not at launch: a user who never opens the Look tab should not pay for nine
+        // offscreen canvases they will not see.
+        .task { MotionThumbnail.prepareAll() }
     }
 
     private func note(_ s: String) -> some View {

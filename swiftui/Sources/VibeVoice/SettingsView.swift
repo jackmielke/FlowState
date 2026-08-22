@@ -312,6 +312,11 @@ struct SettingsView: View {
                             }
                         } label: {
                             VStack(spacing: 5) {
+                                // The swatch is decoration, never a hit target. The Motion
+                                // tile is a live Metal-backed view, and a view like that
+                                // inside a Button label swallows the tap — which is why
+                                // Motion was the one backdrop that could not be selected
+                                // while every inert swatch beside it worked.
                                 SwatchFrame(selected: on, radius: 7) {
                                     ZStack {
                                         if b == .custom {
@@ -333,13 +338,27 @@ struct SettingsView: View {
                                                            endPoint: .bottomTrailing)
                                         }
                                     }
+                                    .frame(maxWidth: .infinity)
                                     .frame(height: 42)
                                 }
+                                .allowsHitTesting(false)
                                 Text(b.label)
                                     .font(.system(size: 10.5, weight: on ? .medium : .regular))
                                     .foregroundStyle(on ? Theme.text : Theme.textDim)
                                     .lineLimit(1)
                             }
+                            // The whole tile is the target, and deliberately not the
+                            // drawn content's shape.
+                            //
+                            // A Button's hit region is whatever its label hit-tests to,
+                            // so `allowsHitTesting(false)` above — which is there so the
+                            // live Motion tile cannot eat the click — also takes the
+                            // swatch out of the button. What was left was the one-line
+                            // caption underneath, which is why Motion could only be
+                            // selected by clicking the word rather than the picture.
+                            // Stating the shape restores the tile without giving the
+                            // content its hit test back.
+                            .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         // The selected backdrop is marked by a ring and a checkmark,
@@ -397,12 +416,33 @@ struct SettingsView: View {
             }
 
             // Its own heading rather than a block nested inside Backdrop: once you have
-            // picked Motion, which of the six and how hard it moves is the whole of what
-            // you are there to do, and it is six live previews and two controls deep.
+            // picked Motion, which of the nine and how hard it moves is the whole of what
+            // you are there to do, and it is nine live previews and two controls deep.
             if state.settings.backdrop == .motion {
                 section("Moving background") { motionControls }
             }
 
+
+            section("Camera bubble") {
+                HStack {
+                    Text("Show my camera, floating")
+                        .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                    Spacer()
+                    NeatToggle(isOn: Binding(
+                        get: { state.settings.cameraBubble },
+                        set: { state.settings.cameraBubble = $0; state.applyCameraBubble() }))
+                }
+                caption("A round preview that floats over everything and drags anywhere, like Loom's. It shows before you record too, so you can frame yourself first — and while a recording is running it shows that same camera rather than opening a second one, which is what causes a device-busy failure mid-take.")
+
+                if state.settings.cameraBubble {
+                    SegmentedPicker(
+                        options: CameraSize.allCases.map { ($0, $0.label) },
+                        selection: Binding(get: { state.settings.cameraSize },
+                                           set: { state.setCameraSize($0) }),
+                        accessibilityPrefix: "Camera size")
+                    caption("The same size the bubble\'s own hover controls set, and the same size the camera is drawn at in the recording — that is the point of it being one setting. Full means the camera fills the frame instead of sitting in a corner. Which corner follows wherever you drag the bubble: it is in the \(state.settings.cameraCorner.blurb) now.")
+                }
+            }
 
             section("Floating widget") {
                 HStack {

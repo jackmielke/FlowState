@@ -152,6 +152,7 @@ final class SessionRecorder: ObservableObject, @unchecked Sendable {
         cursor = 0
         micChunks = 0
         assistantChunks = 0
+        assistantTimeline.reset()
         url = target
         // Held for the whole recording, and only for a video plan — `stop` uses its
         // presence, not the plan's, to decide who writes the file.
@@ -285,16 +286,24 @@ final class SessionRecorder: ObservableObject, @unchecked Sendable {
         micChunks += 1
     }
 
-    /// The model's voice, mixed in at the current point on the timeline.
+    /// The model's voice, laid out on the timeline from where its current turn began.
+    ///
+    /// Not written at `cursor`. See `AssistantTimeline` — the socket delivers a reply
+    /// much faster than it is spoken, so the mic head is the wrong place for every chunk
+    /// after the first.
     func appendAssistant(_ pcm16: Data) {
         let incoming = Self.toSamples(pcm16)
         guard !incoming.isEmpty else { return }
         lock.lock()
         defer { lock.unlock() }
         guard isRecordingLocked else { return }
-        write(incoming, at: cursor)
+        let at = assistantTimeline.reserve(count: incoming.count, micHead: cursor)
+        write(incoming, at: at)
         assistantChunks += 1
     }
+
+    /// The assistant's own write head. See `appendAssistant`.
+    private var assistantTimeline = AssistantTimeline()
 
     /// Saturating mix of `incoming` into the buffer starting at `index`, growing it
     /// first. Caller holds the lock.

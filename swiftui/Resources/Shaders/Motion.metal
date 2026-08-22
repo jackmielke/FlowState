@@ -343,3 +343,186 @@ static float star(float2 pos, float cellSize, float rarity, float time) {
     col += half4(half3(star(pos, 17.0, 0.977, time) * 0.9), 0.0h);
     return col;
 }
+
+// MARK: - Rain
+
+/// One layer of falling streaks.
+///
+/// Columns rather than a grid: a streak has to be able to run past a cell boundary
+/// without vanishing at it, so the vertical coordinate scrolls continuously and only the
+/// *horizontal* division is quantised. Each column gets its own speed and offset from its
+/// hash, which is what stops the whole sheet falling in lockstep.
+static float rainColumns(float2 uv, float cols, float speed, float time, float sharp) {
+    float x = uv.x * cols;
+    float id = floor(x);
+    float h = hash21(float2(id, 17.0));
+    float across = fract(x) - 0.5;
+    // A streak is much taller than it is wide, so the falloff across it is steep.
+    float w = exp(-across * across * sharp);
+
+    // Several drops down each column, scrolling. `fract` of a continuously falling number
+    // wraps, and the shape below is zero at *both* ends of its cell, so the wrap is where
+    // one drop has already gone and the next has not yet arrived — no pop.
+    float y = uv.y + time * speed * (0.55 + 0.9 * h) + h * 13.0;
+    float cell = fract(y * (1.6 + 2.4 * h));
+    float body = smoothstep(0.0, 0.10, cell) * pow(1.0 - cell, 5.0);
+    return w * body * (0.45 + 0.55 * h);
+}
+
+// Rain down a dark window. Three sheets at different depths — the far one fine and slow,
+// the near one sparse and fast — over a dim glow that stands in for whatever is behind
+// the glass. The glow sits in the upper middle for the same reason Ocean's does: the top
+// and bottom of this window are where the header and the buttons are.
+[[ stitchable ]] half4 motion_rain(float2 pos, half4 color, float2 size,
+                                   float time, float intensity, float energy,
+                                   half4 c0, half4 c1, half4 c2, half4 c3) {
+    float2 uv = pos / max(size, float2(1.0));
+    float2 auv = aspectUV(pos, size);
+    float amp = 0.45 + intensity * 0.8;
+
+    // The window: dark almost everywhere, with one soft cool light well inside the
+    // frame. Both falloffs are steep, and the haze is *multiplied* by the glow rather
+    // than added to it — the first pass added it, and a noise floor across the whole
+    // window lifted the corners into the same mid-slate as the middle, which is exactly
+    // the wash the header and the buttons have to be legible against.
+    float glow = exp(-pow((uv.y - 0.38) * 3.0, 2.0)) * exp(-pow((uv.x - 0.5) * 2.0, 2.0));
+    float haze = fbm(auv * 1.7 + float2(time * 0.03, time * 0.018), 4);
+    float t = clamp(0.045 + glow * (0.32 + haze * 0.22) + energy * 0.04, 0.0, 1.0);
+    half4 col = ramp(t, c0, c1, c2, c3);
+
+    // Condensation: big soft blobs on the glass itself, which is what keeps the streaks
+    // from reading as a screensaver of falling lines. Only where there is light behind
+    // them to catch — beading on black glass is invisible, and painting it anyway is
+    // what turned the dark half of the frame grey.
+    float beads = fbm(auv * 9.0 + float2(0.0, time * 0.02), 3);
+    col = mix(col, c2, half(smoothstep(0.58, 0.88, beads) * 0.20 * (0.15 + glow)));
+
+    float far  = rainColumns(auv, 150.0, 0.85, time, 620.0);
+    float mid  = rainColumns(auv * 1.13 + 7.7, 78.0, 1.35, time, 380.0);
+    float near = rainColumns(auv * 0.77 + 3.1, 34.0, 2.10, time, 190.0);
+
+    // The far sheet is texture and the near one is the picture, so they are weighted very
+    // differently — an even mix reads as static.
+    float sheet = far * 0.30 + mid * 0.55 + near * 0.95;
+    sheet *= amp * (0.85 + energy * 0.3);
+
+    // Streaks are *lit* water on dark glass: they take the top of the palette where the
+    // glow is behind them and stay dim where it is not.
+    col += c3 * half(clamp(sheet, 0.0, 1.6) * (0.16 + glow * 0.34));
+    col += c2 * half(clamp(sheet, 0.0, 1.6) * 0.10);
+    return col;
+}
+
+// MARK: - Embers
+
+// Sparks lifting off something warm. The only style here whose motion goes *up*, and the
+// only warm-dark palette — between them that is most of why it does not look like any of
+// the others with the colours changed.
+//
+// The cells scroll rather than the sparks: a spark keeps one cell, and the cell drifts up
+// the frame, so nothing is ever re-hashed mid-flight. Being re-hashed is what makes a
+// naive particle field flicker rather than rise.
+[[ stitchable ]] half4 motion_embers(float2 pos, half4 color, float2 size,
+                                     float time, float intensity, float energy,
+                                     half4 c0, half4 c1, half4 c2, half4 c3) {
+    float2 uv = pos / max(size, float2(1.0));
+    float2 auv = aspectUV(pos, size);
+    float amp = 0.5 + intensity * 0.8;
+
+    // The heat below: a low glow whose centre is off the bottom edge, so what is in the
+    // frame is the *top* of it. Narrow, and dimmer than the first pass — an ember field
+    // is mostly dark with sparks in it, and a broad orange wash across two thirds of the
+    // window is a fire, which is a thing you look at instead of the person you are
+    // talking to.
+    float heat = exp(-pow((uv.y - 1.12) * 2.6, 2.0));
+    float breathe = 0.85 + 0.15 * sin(time * 0.23) + energy * 0.25;
+    float smoke = fbm(auv * 2.1 + float2(time * 0.02, -time * 0.05), 4);
+    float t = clamp(heat * 0.42 * breathe + smoke * 0.09 - dot(auv - 0.5, auv - 0.5) * 0.10,
+                    0.0, 1.0);
+    half4 col = ramp(t, c0, c1, c2, c3);
+
+    // Three sizes of spark, each its own layer so the field has depth rather than one
+    // uniform scatter.
+    for (int i = 0; i < 3; i++) {
+        float fi = float(i);
+        float cols = 26.0 - fi * 7.0;
+        float rows = 15.0 - fi * 4.0;
+        float rise = 0.16 + fi * 0.10;
+
+        float2 g = float2(auv.x * cols + fi * 5.3, uv.y * rows + time * rise + fi * 3.1);
+        float2 id = floor(g);
+        float h = hash21(id + fi * 31.0);
+        if (h < 0.935 - fi * 0.025) continue;        // sparse: a spark is an event
+
+        float2 f = fract(g) - 0.5;
+        // Sparks wander sideways on the way up, each on its own.
+        f.x += sin(time * (0.5 + h * 0.9) + h * 40.0) * 0.30 * amp;
+
+        float d = length(f * float2(1.0, 0.85));
+        float core = smoothstep(0.34, 0.02, d);
+        // Alive low in the frame, out well before the top — the whole idea is that they
+        // burn out, and it doubles as the fade that hides a cell leaving the frame.
+        float life = smoothstep(0.06, 0.42, uv.y) * smoothstep(1.05, 0.62, uv.y);
+        float flick = 0.6 + 0.4 * sin(time * (2.1 + h * 3.0) + h * 60.0);
+
+        half4 tint = (h > 0.985) ? c3 : c2;
+        col += tint * half(core * life * flick * (0.42 + intensity * 0.4) * (1.0 + energy * 0.35));
+    }
+    return col;
+}
+
+// MARK: - Prism
+
+// One slow band of split light. The dispersion is real rather than painted on: the palette
+// is sampled at three slightly different points and the red, green and blue of the result
+// are taken from different ones, which is what a prism does to a beam and what no amount
+// of blending two tints can imitate.
+[[ stitchable ]] half4 motion_prism(float2 pos, half4 color, float2 size,
+                                    float time, float intensity, float energy,
+                                    half4 c0, half4 c1, half4 c2, half4 c3) {
+    float2 uv = aspectUV(pos, size);
+    float2 centred = uv - float2(0.5 * size.x / max(size.y, 1.0), 0.5);
+
+    // The angle drifts, very slightly. A fixed diagonal is the difference between light
+    // through a window and a graphic of light through a window.
+    float a = 0.62 + sin(time * 0.035) * 0.10;
+    float2 dir = float2(cos(a), sin(a));
+
+    // Position along the beam, warped just enough that the edges are not ruled lines.
+    //
+    // The frequency is the number that matters here and it is bounded on both sides.
+    // At 1.15 a 16:9 window holds two full bands and the picture is a striped graphic
+    // rather than a beam; at 0.42 `p` does not complete a single cycle across the frame,
+    // `fract` never wraps, and what is left is one soft blob with no edges at all. Just
+    // under one cycle is the answer: one band crossing the window, the next off the edge.
+    float p = dot(uv, dir) * 0.80
+            - time * 0.055
+            + (fbm(uv * 1.3 + float2(time * 0.02, 0.0), 4) - 0.5) * 0.35 * (0.6 + intensity);
+
+    // The band, plus a much fainter companion — what actually comes through a bevelled
+    // edge. Steep enough to have sides: a beam is defined by where it stops.
+    float band = exp(-pow((fract(p) - 0.52) * 4.6, 2.0)) * 0.9
+               + exp(-pow((fract(p * 0.5 + 0.3) - 0.5) * 7.0, 2.0)) * 0.22;
+    band *= 0.45 + intensity * 0.60;
+
+    // Deliberately dark, and heavily vignetted. This is the one style whose whole subject
+    // is a bright thing, so everything that is not the beam has to be nearly black or the
+    // beam is not bright — it is just the lightest part of a light picture.
+    float base = 0.035 + fbm(uv * 1.8 - float2(0.0, time * 0.015), 3) * 0.09;
+    float t = clamp(base + band * 0.58 + energy * 0.05 - dot(centred, centred) * 0.55, 0.0, 1.0);
+
+    // Dispersion: the same ramp, three places along it, one channel taken from each.
+    // Wide enough to actually see. The three channels come from three points on the
+    // palette, so the split only reads at all if those points are far enough apart to be
+    // different colours — at a fiftieth of the ramp they are the same colour twice.
+    float split = (0.030 + intensity * 0.065) * clamp(band, 0.0, 1.2);
+    half4 lo = ramp(t - split, c0, c1, c2, c3);
+    half4 mid = ramp(t, c0, c1, c2, c3);
+    half4 hi = ramp(t + split, c0, c1, c2, c3);
+    half4 col = half4(lo.r, mid.g, hi.b, 1.0h);
+
+    // The bright core of the beam, kept narrow so the band stays something light falls
+    // through rather than a stripe of paint.
+    col += c3 * half(pow(clamp(band, 0.0, 1.0), 3.0) * (0.22 + energy * 0.10));
+    return col;
+}

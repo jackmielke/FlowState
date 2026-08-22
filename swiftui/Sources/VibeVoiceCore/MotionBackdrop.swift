@@ -12,7 +12,7 @@ import Foundation
 /// how often that renderer is allowed to redraw. `MotionBackdropView` does the drawing
 /// and owns none of those decisions.
 public enum MotionStyle: String, Codable, CaseIterable, Identifiable, Sendable {
-    case ocean, clouds, aurora, fluid, silk, nebula
+    case ocean, clouds, aurora, fluid, silk, nebula, rain, embers, prism
 
     public var id: String { rawValue }
 
@@ -24,6 +24,9 @@ public enum MotionStyle: String, Codable, CaseIterable, Identifiable, Sendable {
         case .fluid:  return "Fluid"
         case .silk:   return "Silk"
         case .nebula: return "Nebula"
+        case .rain:   return "Rain"
+        case .embers: return "Embers"
+        case .prism:  return "Prism"
         }
     }
 
@@ -35,6 +38,9 @@ public enum MotionStyle: String, Codable, CaseIterable, Identifiable, Sendable {
         case .fluid:  return "Warm colour bleeding through colour, like ink in water."
         case .silk:   return "Caustics — light bent through something rippling."
         case .nebula: return "Deep space, very slowly turning over."
+        case .rain:   return "Rain down a dark window, with the light somewhere behind it."
+        case .embers: return "Sparks lifting off something warm, going out as they rise."
+        case .prism:  return "One slow band of split light, sliding across the dark."
         }
     }
 
@@ -49,6 +55,9 @@ public enum MotionStyle: String, Codable, CaseIterable, Identifiable, Sendable {
         case .fluid:  return [0x120A1E, 0x3A1B4E, 0x8C3F7A, 0xE0875A]
         case .silk:   return [0x07070C, 0x1A1430, 0x5B4A8C, 0xD8CBE8]
         case .nebula: return [0x03030A, 0x141033, 0x4B1E6B, 0xC24E7A]
+        case .rain:   return [0x05080E, 0x141C2A, 0x36485E, 0xB6C6D6]
+        case .embers: return [0x0A0503, 0x2A0F06, 0x8C3B12, 0xF2B472]
+        case .prism:  return [0x04050C, 0x1B1A44, 0x2E7C93, 0xE8D6A6]
         }
     }
 
@@ -63,6 +72,9 @@ public enum MotionStyle: String, Codable, CaseIterable, Identifiable, Sendable {
         case .fluid:  return 0.55
         case .silk:   return 0.85
         case .nebula: return 0.35
+        case .rain:   return 0.90
+        case .embers: return 0.50
+        case .prism:  return 0.30
         }
     }
 
@@ -73,6 +85,18 @@ public enum MotionStyle: String, Codable, CaseIterable, Identifiable, Sendable {
 
     /// Base name of a video loop that would stand in for the shader — `ocean.mp4`.
     public var assetBaseName: String { rawValue }
+
+    /// The moment a *still* of this style is taken from.
+    ///
+    /// Every still in the app comes from here: the frozen frame under Reduce Motion, the
+    /// frozen frame behind an occluded window, and the preview thumbnails. It is not zero,
+    /// and that is the whole point — t = 0 is the one moment every one of these looks like
+    /// a flat gradient, so a still taken there says nothing about the style it is meant to
+    /// be advertising. Twelve seconds in, each is mid-flow.
+    ///
+    /// Multiplied by `speed` so the slow styles get the same *amount* of development as
+    /// the fast ones rather than the same number of seconds.
+    public var stillPhase: Double { 12.0 * speed }
 }
 
 /// Where a moving backdrop's pixels come from, in the order they are preferred.
@@ -109,11 +133,30 @@ public enum MotionAssets {
         }
     }
 
-    /// - Parameter exists: asked about each candidate, so this stays decidable in a test.
+    /// Nothing here is licensed, and nothing here is downloaded.
+    ///
+    /// Worth stating in the source rather than only in the README, because it is the
+    /// constraint that decides what a new style is allowed to be: every built-in style is
+    /// a calculation — a shader, or gradients in a `Canvas` — so the app stays about two
+    /// megabytes, ships no third-party media, and carries no attribution obligation to
+    /// anybody. Stock footage would break all three. A user's own loop is the one asset
+    /// that ever reaches the disk, it stays on their machine, and it is theirs.
+    public static let provenance =
+        "Every style here is drawn by the app — a GPU shader, or gradients in a Canvas. "
+        + "No stock footage, no bundled media, nothing with a licence attached. A loop you "
+        + "add yourself stays on this Mac and stays yours."
+
+    /// - Parameters:
+    ///   - exists: asked about each candidate, so this stays decidable in a test.
+    ///   - broken: a candidate that is on disk but could not be played. Skipped rather
+    ///     than returned, so a corrupt `ocean.mov` lets `ocean.mp4` beside it win instead
+    ///     of the backdrop going black. Defaults to "nothing is broken", which is what
+    ///     every caller wants before anything has actually failed.
     public static func asset(for style: MotionStyle,
                              in directories: [URL],
-                             exists: (URL) -> Bool) -> URL? {
-        candidates(for: style, in: directories).first(where: exists)
+                             exists: (URL) -> Bool,
+                             broken: (URL) -> Bool = { _ in false }) -> URL? {
+        candidates(for: style, in: directories).first { exists($0) && !broken($0) }
     }
 
     /// - Parameters:
@@ -122,15 +165,51 @@ public enum MotionAssets {
     ///     turns out to be uglier or heavier than the drawn version.
     ///   - shaderAvailable: whether a Metal library is really in the bundle. Never assume
     ///     this — see the note above.
+    ///   - broken: loops that failed to play. See `asset(for:in:exists:broken:)`. A style
+    ///     whose every candidate is broken falls through to the shader, which is the
+    ///     difference between a bad file costing you one backdrop and costing you the
+    ///     picture entirely.
     public static func source(for style: MotionStyle,
                               directories: [URL],
                               assetsEnabled: Bool,
                               shaderAvailable: Bool,
-                              exists: (URL) -> Bool) -> MotionSource {
-        if assetsEnabled, let url = asset(for: style, in: directories, exists: exists) {
+                              exists: (URL) -> Bool,
+                              broken: (URL) -> Bool = { _ in false }) -> MotionSource {
+        if assetsEnabled,
+           let url = asset(for: style, in: directories, exists: exists, broken: broken) {
             return .asset(url)
         }
         return shaderAvailable ? .shader : .painted
+    }
+}
+
+/// What a video loop has to be before it is copied into the Motion folder.
+///
+/// Two separate jobs, and only the first is obvious. The container check is what keeps
+/// `AVPlayer` from being handed something it will fail on later, in a view with nowhere to
+/// show an error. The size cap is the safe default: this folder lives inside the same
+/// directory as the transcripts, it is written to by a file picker, and a decorative
+/// backdrop has no business quietly putting four gigabytes there because a stock site
+/// offered a 4K master. Both refusals happen before anything is copied, and both say why.
+public enum MotionAssetPolicy {
+
+    /// Generous for a seamless loop — they are seconds long — and far below anything that
+    /// would be a problem to keep.
+    public static let maxBytes = 512 * 1024 * 1024
+
+    /// Why this file cannot be installed, or nil if it can.
+    ///
+    /// - Parameter bytes: nil when the size could not be read, which is not by itself a
+    ///   reason to refuse — an unreadable file fails honestly at the copy instead.
+    public static func rejection(name: String, extension ext: String, bytes: Int?) -> String? {
+        guard MotionAssets.extensions.contains(ext.lowercased()) else {
+            return "\(name) is not a .mov, .mp4 or .m4v."
+        }
+        if let bytes, bytes > maxBytes {
+            return "\(name) is \(bytes / 1_048_576) MB — the limit is \(maxBytes / 1_048_576) MB. "
+                 + "A backdrop loop only needs to be a few seconds long."
+        }
+        return nil
     }
 }
 

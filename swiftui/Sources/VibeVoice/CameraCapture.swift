@@ -126,11 +126,18 @@ enum CameraCapture {
     /// on every single frame is the most expensive way to draw a small picture; asking for
     /// exactly the inset size instead leaves nothing in hand and looks soft the moment the
     /// inset fraction changes.
-    static func outputSize(for plan: CapturePlan, device: AVCaptureDevice) -> (width: Int, height: Int) {
+    ///
+    /// Sized against the *largest* inset rather than the one currently chosen, because
+    /// the size control lives on the floating bubble and can be pressed mid-recording.
+    /// A camera opened at small-inset resolution would go soft the moment somebody made
+    /// their face bigger, and the session cannot be reconfigured without a visible stall.
+    static func outputSize(for plan: CapturePlan, overlay: CameraOverlay, device: AVCaptureDevice)
+        -> (width: Int, height: Int) {
         let native = nativeSize(of: device)
-        let longEdge = plan.mode == .full
+        let headroom = max(CameraSize.large.frameFraction, overlay.size.frameFraction)
+        let longEdge = plan.mode == .full && !overlay.size.isFullFrame
             ? min(plan.profile.cameraLongEdge,
-                  max(320, Int(Double(plan.width) * Double(VideoTrackWriter.insetWidthFraction) * 2)))
+                  max(320, Int(Double(plan.width) * Double(headroom) * 2)))
             : plan.profile.cameraLongEdge
         return CapturePlan.fit(width: native.width, height: native.height, longEdge: longEdge)
     }

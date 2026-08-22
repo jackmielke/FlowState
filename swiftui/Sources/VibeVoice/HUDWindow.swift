@@ -18,6 +18,29 @@ import AppKit
 /// Dragging is `isMovableByWindowBackground`, i.e. AppKit's own. That is the answer to
 /// "the smoother the better": the window server moves the window, so it tracks perfectly
 /// and costs nothing, where a SwiftUI DragGesture re-lays-out on every frame.
+/// Hosts the widget and refuses clicks that miss it.
+///
+/// The panel is deliberately larger than the thing you can see, so the glow has room to
+/// spill instead of being clipped at the edge. That margin is transparent, and a
+/// transparent part of a window still swallows clicks — which would leave an invisible
+/// dead zone around the widget where the desktop stopped responding. So the margin is
+/// made literally click-through: anything outside the drawn surface hit-tests to nil and
+/// the click goes to whatever is behind.
+final class HUDContainerView: NSView {
+    /// The drawn shape, inset from the panel's bounds.
+    var surface: CGSize = .zero
+    var corner: CGFloat = 0
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let r = NSRect(x: (bounds.width  - surface.width)  / 2,
+                       y: (bounds.height - surface.height) / 2,
+                       width: surface.width, height: surface.height)
+        // Rounded, so the corners of the bounding box are click-through too.
+        let path = NSBezierPath(roundedRect: r, xRadius: corner, yRadius: corner)
+        return path.contains(point) ? super.hitTest(point) : nil
+    }
+}
+
 final class HUDPanel: NSPanel {
 
     init(content: NSView, size: CGSize) {
@@ -90,9 +113,16 @@ final class HUDController {
     private func show() {
         guard let state else { return }
         if panel == nil {
+            let style = state.settings.hudStyle
             let host = NSHostingView(rootView: HUDView(state: state))
             host.autoresizingMask = [.width, .height]
-            let p = HUDPanel(content: host, size: state.settings.hudStyle.size)
+            let container = HUDContainerView(frame: NSRect(origin: .zero, size: style.size))
+            container.surface = style.surface
+            container.corner = style.corner
+            container.autoresizesSubviews = true
+            host.frame = container.bounds
+            container.addSubview(host)
+            let p = HUDPanel(content: container, size: style.size)
             p.moveToDefaultCorner()
             panel = p
             // A display change can leave it stranded off-screen.
@@ -103,7 +133,12 @@ final class HUDController {
                 }
         }
         if let p = panel {
-            let want = state.settings.hudStyle.size
+            let style = state.settings.hudStyle
+            if let c = p.contentView as? HUDContainerView {
+                c.surface = style.surface
+                c.corner = style.corner
+            }
+            let want = style.size
             if p.frame.size != want {
                 // Grow from the same corner it is anchored to, so switching style does
                 // not walk the widget across the screen.

@@ -135,6 +135,19 @@ struct AppSettings: Codable, Equatable {
     /// which can see the remote and nothing else.
     var devAutoPush: Bool = true
 
+    /// Show your camera in a floating bubble, the way Loom does. Independent of whether
+    /// a recording is running, so you can frame yourself before you start.
+    var cameraBubble: Bool = false
+
+    /// How big the bubble is, and — through `CameraOverlay` — how big the camera is in
+    /// the recording. One setting for both, so what you frame is what you get.
+    var cameraSize: CameraSize = .medium
+
+    /// Which corner of the recording the camera sits in. Not chosen in Settings: it
+    /// follows wherever the bubble has been dragged, which is the same gesture Loom
+    /// uses and one fewer control to explain.
+    var cameraCorner: CameraCorner = .bottomTrailing
+
     /// The floating widget: a small always-on-top panel that follows you between apps
     /// and Spaces, so FlowState is reachable without its window in front.
     var hudEnabled: Bool = false
@@ -193,7 +206,8 @@ struct AppSettings: Codable, Equatable {
         case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
         case photoRotateSeconds, menuBarEnabled, summonHotkey, devNudgeDismissed
         case motionStyle, motionIntensity, motionAssets
-        case devAutoCommit, devAutoPush, hudEnabled, hudStyle
+        case devAutoCommit, devAutoPush, hudEnabled, hudStyle, cameraBubble
+        case cameraSize, cameraCorner
         case privacy, summaries, resumeLastSession
         case captureMode, capturePerformance, cameraDeviceID
     }
@@ -251,6 +265,9 @@ extension AppSettings {
         devAutoCommit     = v(.devAutoCommit, d.devAutoCommit)
         devAutoPush       = v(.devAutoPush, d.devAutoPush)
         hudEnabled        = v(.hudEnabled, d.hudEnabled)
+        cameraBubble      = v(.cameraBubble, d.cameraBubble)
+        cameraSize        = v(.cameraSize, d.cameraSize)
+        cameraCorner      = v(.cameraCorner, d.cameraCorner)
         hudStyle          = v(.hudStyle, d.hudStyle)
         ambientMode       = v(.ambientMode, d.ambientMode)
         privacy           = v(.privacy, d.privacy)

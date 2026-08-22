@@ -10,7 +10,7 @@ import VibeVoiceCore
 ///
 /// 1. Every tab, at its natural height, so a layout change can be inspected as a picture.
 /// 2. Every moving backdrop as a still, which is the closest thing to a contact sheet for
-///    six animations, and the fastest way to see that one of them has come out as a flat
+///    nine animations, and the fastest way to see that one of them has come out as a flat
 ///    gradient because its shader failed to bind.
 ///
 /// Off unless asked for:
@@ -117,7 +117,7 @@ enum SettingsSnapshot {
             .environment(\.colorScheme, scheme)
     }
 
-    /// All six moving backdrops at once, at a size where the difference between them is
+    /// All nine moving backdrops at once, at a size where the difference between them is
     /// actually visible.
     private static func motionSheet(state: AppState, scheme: ColorScheme) -> some View {
         VStack(alignment: .leading, spacing: 14) {
