@@ -55,7 +55,17 @@ final class CameraBubblePanel: NSPanel {
 
     override func setFrameOrigin(_ point: NSPoint) {
         super.setFrameOrigin(point)
+        guard !isMovingProgrammatically else { return }
         onMoved?(CGPoint(x: frame.midX, y: frame.midY), screen)
+    }
+
+    private var isMovingProgrammatically = false
+
+    /// Moves without reporting it as a drag. See `CameraBubbleController.followDisplay`.
+    func moveWithoutNotifying(to origin: CGPoint) {
+        isMovingProgrammatically = true
+        setFrameOrigin(origin)
+        isMovingProgrammatically = false
     }
 }
 
@@ -66,6 +76,7 @@ final class CameraBubblePanel: NSPanel {
 /// running — which is exactly when a hand-rolled preview would start dropping frames.
 struct CameraPreview: NSViewRepresentable {
     let session: AVCaptureSession?
+    var mirrored: Bool = false
 
     final class View: NSView {
         private var preview: AVCaptureVideoPreviewLayer?
@@ -78,6 +89,14 @@ struct CameraPreview: NSViewRepresentable {
         }
 
         required init?(coder: NSCoder) { fatalError("not used") }
+
+        /// Mirroring is set on the preview connection, not by flipping the layer: a
+        /// scaled layer transform also mirrors the border and the shadow drawn around it.
+        func setMirrored(_ on: Bool) {
+            guard let c = preview?.connection, c.isVideoMirroringSupported else { return }
+            c.automaticallyAdjustsVideoMirroring = false
+            c.isVideoMirrored = on
+        }
 
         func attach(_ session: AVCaptureSession?) {
             guard session !== attached else { return }
@@ -104,69 +123,135 @@ struct CameraPreview: NSViewRepresentable {
     func makeNSView(context: Context) -> View {
         let v = View()
         v.attach(session)
+        v.setMirrored(mirrored)
         return v
     }
 
-    func updateNSView(_ v: View, context: Context) { v.attach(session) }
+    func updateNSView(_ v: View, context: Context) {
+        v.attach(session)
+        v.setMirrored(mirrored)
+    }
 }
 
-/// The bubble itself, with the size controls that appear under the cursor.
+/// The bubble itself, with the controls that appear under the cursor.
+///
+/// Modelled on Loom's, because Loom's are right: the sizes are shown as dots that are
+/// actually the relative sizes rather than as words, the selected one is filled, and the
+/// name appears above the bar only while you are pointing at a button. Nothing is
+/// labelled until you need the label, so the bar stays small enough to sit inside the
+/// circle instead of widening the panel over whatever is being demonstrated.
 struct CameraBubbleView: View {
     @ObservedObject var state: AppState
     var session: AVCaptureSession?
 
     @State private var hovering = false
+    @State private var hoveredControl: String?
 
     private var size: CameraSize { state.settings.cameraSize }
+    private var shape: CameraShape { state.settings.cameraShape }
+
+    private var outline: AnyShape {
+        switch shape {
+        case .circle:  return AnyShape(Circle())
+        case .rounded: return AnyShape(RoundedRectangle(cornerRadius: size.diameter * 0.18, style: .continuous))
+        case .square:  return AnyShape(Rectangle())
+        }
+    }
 
     var body: some View {
         ZStack {
-            CameraPreview(session: session)
-                .clipShape(Circle())
-                .overlay(Circle().strokeBorder(.white.opacity(0.22), lineWidth: 2))
+            CameraPreview(session: session, mirrored: state.settings.cameraMirrored)
+                .clipShape(outline)
+                .overlay(outline.stroke(.white.opacity(0.22), lineWidth: 2))
                 .shadow(color: .black.opacity(0.35), radius: 14, y: 6)
 
             if size.isFullFrame {
-                // A round preview cannot show what a full-frame recording will look
-                // like, so it says so rather than implying the circle is the crop.
-                Text("Full frame")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 8).padding(.vertical, 3)
-                    .background(Capsule().fill(.black.opacity(0.55)))
-                    .offset(y: -geometryOffset)
+                // A small preview cannot show what a full-frame recording will look
+                // like, so it says so rather than implying the crop is the circle.
+                pill("Full frame").offset(y: -size.diameter * 0.28)
             }
 
-            if hovering { controls.transition(.opacity) }
+            if hovering && state.settings.cameraControls {
+                VStack(spacing: 5) {
+                    if let hoveredControl { pill(hoveredControl) }
+                    controls
+                }
+                .offset(y: size.diameter * 0.26)
+                .transition(.opacity)
+            }
         }
         .animation(.easeOut(duration: 0.12), value: hovering)
-        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.10), value: hoveredControl)
+        .onHover { hovering = $0; if !$0 { hoveredControl = nil } }
         .padding(6)   // room for the shadow, which the panel does not draw
     }
 
-    private var geometryOffset: CGFloat { size.diameter * 0.28 }
+    private func pill(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(.white)
+            .fixedSize()
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background(Capsule().fill(.black.opacity(0.7)))
+    }
 
-    /// Loom's control: pick a size, or send the camera full frame. Sits inside the
-    /// circle so it never widens the panel — a wider panel would mean a wider
-    /// click-blocking rectangle over whatever is being demonstrated.
     private var controls: some View {
-        HStack(spacing: 3) {
-            ForEach(CameraSize.allCases) { s in
-                Button { state.setCameraSize(s) } label: {
-                    Text(s == .full ? "⤢" : String(s.label.prefix(1)))
-                        .font(.system(size: 10, weight: .semibold))
-                        .frame(width: 18, height: 18)
-                        .background(Circle().fill(s == size ? Color.accentColor : .white.opacity(0.16)))
-                        .foregroundStyle(.white)
-                        .contentShape(Circle())
+        HStack(spacing: 2) {
+            button("Turn off camera", systemImage: "xmark") {
+                state.settings.cameraBubble = false
+                state.applyCameraBubble()
+            }
+            // Dots sized in proportion to what they select — the size is the icon.
+            ForEach([CameraSize.small, .medium, .large]) { s in
+                button(s.label, selected: s == size) { state.setCameraSize(s) } content: {
+                    Circle()
+                        .fill(.white)
+                        .frame(width: dot(for: s), height: dot(for: s))
                 }
-                .buttonStyle(.plain)
-                .help(s == .full ? "Camera fills the recording" : "\(s.label) camera")
+            }
+            button("Full frame",
+                   systemImage: "arrow.up.left.and.arrow.down.right",
+                   selected: size == .full) { state.setCameraSize(.full) }
+            button(shape == .circle ? "Rounded" : "Circle",
+                   systemImage: shape == .circle ? "square" : "circle") {
+                state.setCameraShape(shape == .circle ? .rounded : .circle)
             }
         }
         .padding(4)
-        .background(Capsule().fill(.black.opacity(0.55)))
-        .offset(y: geometryOffset)
+        .background(Capsule().fill(.black.opacity(0.7)))
+    }
+
+    /// 6 / 9 / 12 points — small enough to read as "the little one" at a glance.
+    private func dot(for s: CameraSize) -> CGFloat {
+        switch s {
+        case .small:  return 6
+        case .medium: return 9
+        default:      return 12
+        }
+    }
+
+    private func button(_ name: String,
+                        systemImage: String? = nil,
+                        selected: Bool = false,
+                        action: @escaping () -> Void,
+                        @ViewBuilder content: () -> some View = { EmptyView() }) -> some View {
+        Button(action: action) {
+            ZStack {
+                Circle().fill(selected ? Color.accentColor : .white.opacity(0.001))
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.white)
+                } else {
+                    content()
+                }
+            }
+            .frame(width: 20, height: 20)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hoveredControl = $0 ? name : (hoveredControl == name ? nil : hoveredControl) }
+        .accessibilityLabel(name)
     }
 }
 
@@ -206,6 +291,35 @@ final class CameraBubbleController {
         p.orderFrontRegardless()
         panel = p
         noteMoved(centre: CGPoint(x: p.frame.midX, y: p.frame.midY), screen: p.screen)
+    }
+
+    /// Moves the bubble to another screen, keeping the corner it was parked in.
+    ///
+    /// The corner is preserved rather than the coordinates: the two displays do not
+    /// share a coordinate space in any useful way, and a bubble that reappears in the
+    /// middle of the new screen — or worse, half off it — is one the user has to go and
+    /// rescue every time they change screens. Which corner it is has already been
+    /// worked out from where they dragged it.
+    func followDisplay(_ id: CGDirectDisplayID) {
+        guard let panel, let state else { return }
+        guard let screen = NSScreen.screens.first(where: {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id
+        }) else { return }
+        guard panel.screen !== screen else { return }
+
+        let v = screen.visibleFrame
+        let d = panel.frame.width
+        let inset: CGFloat = 28
+        let origin: CGPoint
+        switch state.settings.cameraCorner {
+        case .bottomLeading:  origin = CGPoint(x: v.minX + inset,     y: v.minY + inset)
+        case .bottomTrailing: origin = CGPoint(x: v.maxX - d - inset, y: v.minY + inset)
+        case .topLeading:     origin = CGPoint(x: v.minX + inset,     y: v.maxY - d - inset)
+        case .topTrailing:    origin = CGPoint(x: v.maxX - d - inset, y: v.maxY - d - inset)
+        }
+        // Directly, not through `setFrameOrigin`'s hook: this move is a consequence of
+        // the corner, so feeding it back in as a new observation would be circular.
+        panel.moveWithoutNotifying(to: origin)
     }
 
     func hide() {

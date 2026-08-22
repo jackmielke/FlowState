@@ -188,7 +188,7 @@ struct ContentView: View {
         .onContinuousHover { _ in state.noteActivity() }
         .frame(minWidth: 940, minHeight: 620)
         .preferredColorScheme(sceneIsDark ? .dark : state.settings.appearance.colorScheme)
-        .onAppear { state.applyEffectiveAppearance(); state.applyHUD(); state.applyCameraBubble() }
+        .onAppear { state.applyEffectiveAppearance(); state.applyHUD(); state.applyCameraBubble(); state.startFollowingActiveDisplay() }
         .onChange(of: state.settings.backdrop) { _, _ in state.applyEffectiveAppearance() }
         .onChange(of: state.settings.appearance) { _, _ in state.applyEffectiveAppearance() }
         // Settings is its own window rather than a sheet: most of what it changes —

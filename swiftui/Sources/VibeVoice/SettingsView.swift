@@ -455,6 +455,36 @@ struct SettingsView: View {
                         selection: Binding(get: { state.settings.cameraSize },
                                            set: { state.setCameraSize($0) }),
                         accessibilityPrefix: "Camera size")
+                    HStack {
+                        Text("Shape").font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                        Spacer()
+                    }
+                    SegmentedPicker(
+                        options: CameraShape.allCases.map { ($0, $0.label) },
+                        selection: Binding(get: { state.settings.cameraShape },
+                                           set: { state.setCameraShape($0) }),
+                        accessibilityPrefix: "Camera shape")
+
+                    HStack {
+                        Text("Controls on hover")
+                            .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                        Spacer()
+                        NeatToggle(isOn: Binding(
+                            get: { state.settings.cameraControls },
+                            set: { state.settings.cameraControls = $0; state.applyCameraBubble() }))
+                    }
+                    caption("Size and shape buttons under the pointer, like Loom's. Turn them off while recording something where a control bar appearing over the picture would be a distraction.")
+
+                    HStack {
+                        Text("Mirror me")
+                            .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                        Spacer()
+                        NeatToggle(isOn: Binding(
+                            get: { state.settings.cameraMirrored },
+                            set: { state.settings.cameraMirrored = $0; state.applyCameraBubble() }))
+                    }
+                    caption("Off by default, and that is the honest default rather than the flattering one. Loom composites the camera, so it can show you a mirror while recording what everyone else should see. A screen recording captures the bubble as it appears, so mirroring here mirrors the recording too — anything with text in shot comes out backwards.")
+
                     caption("The same size the bubble\'s own hover controls set, and the same size the camera is drawn at in the recording — that is the point of it being one setting. Full means the camera fills the frame instead of sitting in a corner. Which corner follows wherever you drag the bubble: it is in the \(state.settings.cameraCorner.blurb) now.")
                 }
             }

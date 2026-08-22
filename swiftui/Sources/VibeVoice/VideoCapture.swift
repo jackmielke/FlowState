@@ -400,6 +400,48 @@ final class VideoTrackWriter: NSObject, RecordingVideoTrack, @unchecked Sendable
     /// `NSLock.lock()` is unavailable inside an `async` function — it blocks a thread the
     /// concurrency runtime may want back — so the one place that needs it from a Task
     /// hops through here instead.
+    /// Re-points a running capture at another display, without interrupting it.
+    ///
+    /// `updateContentFilter` rather than stopping and starting a new stream: the
+    /// configuration — including the output dimensions the movie's track was created
+    /// with — is untouched, the audio capture on the same stream never stops, and there
+    /// is no gap in the video. Rebuilding the stream would drop frames for as long as
+    /// the handshake takes and restart the audio clock mid-recording.
+    ///
+    /// The frames keep arriving at the original size, so a 16:10 laptop followed to a
+    /// 16:9 monitor is letterboxed into the track rather than changing its shape — a
+    /// track cannot change dimensions once it has been created.
+    func follow(displayID: CGDirectDisplayID) {
+        lock.lock()
+        let live = stream
+        let already = self.displayID == displayID
+        lock.unlock()
+        guard let live, !already else { return }
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                guard let display = content.displays.first(where: { $0.displayID == displayID }) else { return }
+                try await live.updateContentFilter(SCContentFilter(display: display, excludingWindows: []))
+                self.store(displayID: displayID)
+                Self.log.notice("recording followed to display \(displayID, privacy: .public)")
+            } catch {
+                // Not fatal, and deliberately not surfaced: the recording is still
+                // running on the previous display, which is a far better outcome than
+                // ending it because the user looked at another screen.
+                Self.log.error("could not follow to display \(displayID, privacy: .public) — \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    /// See `store(stream:)` for why this hops rather than locking inline.
+    private func store(displayID: CGDirectDisplayID) {
+        lock.lock()
+        self.displayID = displayID
+        lock.unlock()
+    }
+
     private func store(stream: SCStream) {
         lock.lock()
         self.stream = stream
@@ -523,14 +565,14 @@ final class VideoTrackWriter: NSObject, RecordingVideoTrack, @unchecked Sendable
         let frame: CIImage
         if cameraOverlay.size.isFullFrame {
             frame = placed.cropped(to: CGRect(origin: .zero, size: size))
-        } else if cameraOverlay.circular {
+        } else if cameraOverlay.isMasked {
             // The same circle as the floating preview. Masked rather than drawn into a
             // rounded layer because this runs per frame on the GPU, and CIBlendWithMask
             // is one pass.
             frame = placed
                 .applyingFilter("CIBlendWithMask", parameters: [
                     kCIInputBackgroundImageKey: screen,
-                    kCIInputMaskImageKey: Self.circleMask(dst),
+                    kCIInputMaskImageKey: Self.mask(dst, shape: cameraOverlay.shape),
                 ])
                 .applyingFilter("CISourceOverCompositing", parameters: [
                     kCIInputBackgroundImageKey: screen,
@@ -559,21 +601,56 @@ final class VideoTrackWriter: NSObject, RecordingVideoTrack, @unchecked Sendable
             .cropped(to: dst)
     }
 
-    /// A white disc filling `rect`, with one pixel of softness at the edge.
+    /// A white shape filling `rect`, softened by a pixel at the edge.
     ///
-    /// A hard-edged mask aliases into a visibly stepped circle at the sizes this is used
-    /// at, and the step crawls from frame to frame because the camera behind it moves.
-    private static func circleMask(_ rect: CGRect) -> CIImage {
-        let r = rect.width / 2
-        let f = CIFilter(name: "CIRadialGradient", parameters: [
-            "inputCenter": CIVector(x: rect.midX, y: rect.midY),
-            "inputRadius0": r - 1,
-            "inputRadius1": r,
-            "inputColor0": CIColor(red: 1, green: 1, blue: 1, alpha: 1),
-            "inputColor1": CIColor(red: 0, green: 0, blue: 0, alpha: 0),
-        ])
-        // The gradient is infinite; cropping it is what keeps the blend cheap.
-        return f?.outputImage?.cropped(to: rect) ?? CIImage(color: .white).cropped(to: rect)
+    /// A hard-edged mask aliases into a visibly stepped outline at the sizes this is
+    /// used at, and the step crawls from frame to frame because the camera behind it
+    /// moves. The circle gets a radial gradient — one filter, no allocation — and the
+    /// rounded rectangle is drawn once by CoreGraphics, which antialiases its own
+    /// corners.
+    private static func mask(_ rect: CGRect, shape: CameraShape) -> CIImage {
+        guard shape != .circle else {
+            let r = rect.width / 2
+            let f = CIFilter(name: "CIRadialGradient", parameters: [
+                "inputCenter": CIVector(x: rect.midX, y: rect.midY),
+                "inputRadius0": r - 1,
+                "inputRadius1": r,
+                "inputColor0": CIColor(red: 1, green: 1, blue: 1, alpha: 1),
+                "inputColor1": CIColor(red: 0, green: 0, blue: 0, alpha: 0),
+            ])
+            // The gradient is infinite; cropping it is what keeps the blend cheap.
+            return f?.outputImage?.cropped(to: rect) ?? CIImage(color: .white).cropped(to: rect)
+        }
+        return roundedMask(rect, radius: min(rect.width, rect.height) * shape.cornerFraction)
+    }
+
+    /// Cached: this is redrawn for every frame otherwise, and it only changes when the
+    /// inset changes size — which is at most a few times in a recording.
+    private static var roundedMaskCache: (key: String, image: CIImage)?
+
+    private static func roundedMask(_ rect: CGRect, radius: CGFloat) -> CIImage {
+        let key = "\(Int(rect.width))x\(Int(rect.height))@\(Int(radius))"
+        if let hit = roundedMaskCache, hit.key == key {
+            // Drawn at the origin and moved into place, so a drag to another corner
+            // does not throw the cache away.
+            return hit.image.transformed(by: CGAffineTransform(translationX: rect.minX, y: rect.minY))
+        }
+        let w = Int(rect.width.rounded()), h = Int(rect.height.rounded())
+        guard w > 0, h > 0,
+              let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceGray(),
+                                  bitmapInfo: CGImageAlphaInfo.none.rawValue)
+        else { return CIImage(color: .white).cropped(to: rect) }
+        ctx.setFillColor(gray: 0, alpha: 1)
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.setFillColor(gray: 1, alpha: 1)
+        ctx.addPath(CGPath(roundedRect: CGRect(x: 0, y: 0, width: w, height: h),
+                           cornerWidth: radius, cornerHeight: radius, transform: nil))
+        ctx.fillPath()
+        guard let cg = ctx.makeImage() else { return CIImage(color: .white).cropped(to: rect) }
+        let image = CIImage(cgImage: cg)
+        roundedMaskCache = (key, image)
+        return image.transformed(by: CGAffineTransform(translationX: rect.minX, y: rect.minY))
     }
 
     /// Size, corner and shape of the camera inset. Set by `AppState` from the same

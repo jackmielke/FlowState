@@ -160,6 +160,23 @@ struct AppSettings: Codable, Equatable {
     /// uses and one fewer control to explain.
     var cameraCorner: CameraCorner = .bottomTrailing
 
+    /// Circle, rounded rectangle or square — the same outline on screen and in the file.
+    var cameraShape: CameraShape = .circle
+
+    /// Show the size controls when the pointer is over the bubble, the way Loom does.
+    /// Off leaves a bubble with nothing on it, which is what you want while recording
+    /// something where a control bar appearing would be a distraction.
+    var cameraControls: Bool = true
+
+    /// Flip the preview horizontally.
+    ///
+    /// Off by default, and that is the honest default rather than the flattering one:
+    /// a screen recording captures the bubble as it appears, so unlike Loom — which
+    /// composites, and can mirror what you see while recording what others should see —
+    /// mirroring here mirrors the recording too. Anything with text in shot comes out
+    /// backwards.
+    var cameraMirrored: Bool = false
+
     /// The floating widget: a small always-on-top panel that follows you between apps
     /// and Spaces, so FlowState is reachable without its window in front.
     var hudEnabled: Bool = false
@@ -219,7 +236,7 @@ struct AppSettings: Codable, Equatable {
         case photoRotateSeconds, menuBarEnabled, summonHotkey, devNudgeDismissed
         case motionStyle, motionIntensity, motionAssets
         case devAutoCommit, devAutoPush, hudEnabled, hudStyle, cameraBubble
-        case cameraSize, cameraCorner
+        case cameraSize, cameraCorner, cameraShape, cameraControls, cameraMirrored
         case privacy, summaries, resumeLastSession
         case captureMode, capturePerformance, cameraDeviceID
     }
@@ -280,6 +297,9 @@ extension AppSettings {
         cameraBubble      = v(.cameraBubble, d.cameraBubble)
         cameraSize        = v(.cameraSize, d.cameraSize)
         cameraCorner      = v(.cameraCorner, d.cameraCorner)
+        cameraShape       = v(.cameraShape, d.cameraShape)
+        cameraControls    = v(.cameraControls, d.cameraControls)
+        cameraMirrored    = v(.cameraMirrored, d.cameraMirrored)
         hudStyle          = v(.hudStyle, d.hudStyle)
         ambientMode       = v(.ambientMode, d.ambientMode)
         privacy           = v(.privacy, d.privacy)

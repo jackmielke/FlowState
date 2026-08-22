@@ -106,6 +106,42 @@ final class AppState: ObservableObject {
     /// The floating camera preview. See `CameraBubbleController`.
     private lazy var cameraBubble = CameraBubbleController()
 
+    /// Which screen is being worked on. Drives the camera bubble and, while one is
+    /// running, the recording — see `ActiveDisplayGate` for what counts as a change.
+    private let displayWatcher = ActiveDisplayWatcher()
+
+    func startFollowingActiveDisplay() {
+        displayWatcher.onChange = { [weak self] id in self?.activeDisplayChanged(to: id) }
+        displayWatcher.start()
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    // A display was plugged in or taken away, so the remembered one may
+                    // not refer to anything any more. Re-read rather than debounce:
+                    // there is nothing to debounce against.
+                    self?.displayWatcher.resync()
+                    guard let self else { return }
+                    Task { await self.refreshDisplays() }
+                }
+            }
+    }
+
+    private static let displayLog = Logger(subsystem: "com.jackmielke.vibevoice", category: "display")
+
+    private func activeDisplayChanged(to id: CGDirectDisplayID) {
+        Self.displayLog.notice("active display -> \(id, privacy: .public)")
+        // The bubble goes wherever the work is, always — it is a thing on screen, and a
+        // camera preview on a screen you are not looking at is not a preview.
+        cameraBubble.followDisplay(id)
+
+        // The recording follows only if the user asked for "the active display" rather
+        // than pinning one. Pinning a display and having it wander would be worse than
+        // not following at all.
+        guard isFollowingActiveDisplay, recorder.isRecording else { return }
+        activeVideo?.follow(displayID: id)
+    }
+
     func applyCameraBubble() {
         settings.cameraBubble ? cameraBubble.show(state: self) : cameraBubble.hide()
         objectWillChange.send()
@@ -119,10 +155,16 @@ final class AppState: ObservableObject {
         applyCameraBubble()
     }
 
+    func setCameraShape(_ shape: CameraShape) {
+        guard settings.cameraShape != shape else { return }
+        settings.cameraShape = shape
+        applyCameraBubble()
+    }
+
     /// The overlay both halves read. Assembled here because the corner comes from where
     /// the bubble was dragged and the size from its controls.
     var cameraOverlay: CameraOverlay {
-        CameraOverlay(size: settings.cameraSize, corner: settings.cameraCorner)
+        CameraOverlay(size: settings.cameraSize, corner: settings.cameraCorner, shape: settings.cameraShape)
     }
 
     /// Points the bubble at the recording's own camera session while a take is running,

@@ -52,6 +52,32 @@ public enum CameraSize: String, Codable, CaseIterable, Sendable, Identifiable {
     public var isFullFrame: Bool { self == .full }
 }
 
+/// The camera's outline. Loom offers a circle and a rounded rectangle; the difference
+/// is not decoration — a circle crops hard to the centre of the frame, which flatters a
+/// face and throws away the room, and a rectangle keeps what you are gesturing at.
+public enum CameraShape: String, Codable, CaseIterable, Sendable, Identifiable {
+    case circle, rounded, square
+
+    public var id: String { rawValue }
+
+    public var label: String {
+        switch self {
+        case .circle:  return "Circle"
+        case .rounded: return "Rounded"
+        case .square:  return "Square"
+        }
+    }
+
+    /// Corner radius as a fraction of the shorter side.
+    public var cornerFraction: CGFloat {
+        switch self {
+        case .circle:  return 0.5
+        case .rounded: return 0.18
+        case .square:  return 0
+        }
+    }
+}
+
 /// Which corner of the recording the camera sits in.
 public enum CameraCorner: String, Codable, CaseIterable, Sendable {
     case bottomLeading, bottomTrailing, topLeading, topTrailing
@@ -67,16 +93,18 @@ public enum CameraCorner: String, Codable, CaseIterable, Sendable {
 public struct CameraOverlay: Equatable, Sendable {
     public var size: CameraSize
     public var corner: CameraCorner
-    /// Circular, like the preview. False gives the old square inset.
-    public var circular: Bool
+    public var shape: CameraShape
 
     public init(size: CameraSize = .medium,
                 corner: CameraCorner = .bottomTrailing,
-                circular: Bool = true) {
+                shape: CameraShape = .circle) {
         self.size = size
         self.corner = corner
-        self.circular = circular
+        self.shape = shape
     }
+
+    /// Whether the inset needs masking at all. A square one does not.
+    public var isMasked: Bool { shape != .square }
 
     /// Margin from the frame edge, as a fraction of frame width.
     public static let marginFraction: CGFloat = 0.02
