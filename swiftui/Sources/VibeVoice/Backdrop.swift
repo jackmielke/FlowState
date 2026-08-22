@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import VibeVoiceCore
 
 /// The scene behind the orb.
 ///
@@ -8,7 +9,7 @@ import AppKit
 /// ships nothing with a licence attached, and scales to any window size without going
 /// soft. If you want the real thing, `custom` takes your own photo.
 enum Backdrop: String, Codable, CaseIterable, Identifiable {
-    case midnight, paper, bali, capeTown, sanFrancisco, alps, tokyo, sahara, custom
+    case midnight, paper, bali, capeTown, sanFrancisco, alps, tokyo, sahara, motion, custom
 
     var id: String { rawValue }
 
@@ -22,6 +23,7 @@ enum Backdrop: String, Codable, CaseIterable, Identifiable {
         case .alps:          return "Alps"
         case .tokyo:         return "Tokyo"
         case .sahara:        return "Sahara"
+        case .motion:        return "Motion"
         case .custom:        return "Your photo"
         }
     }
@@ -36,6 +38,7 @@ enum Backdrop: String, Codable, CaseIterable, Identifiable {
         case .alps:         return Place.alps.blurb
         case .tokyo:        return Place.tokyo.blurb
         case .sahara:       return Place.sahara.blurb
+        case .motion:       return "Something flowing, rather than somewhere. Pick a style below."
         case .custom:       return "Any image on this Mac."
         }
     }
@@ -60,6 +63,7 @@ enum Backdrop: String, Codable, CaseIterable, Identifiable {
         case .paper:        return [hex(0xFBF7F0), hex(0xF3ECE1), hex(0xEDE4D6)]
         case .bali, .capeTown, .sanFrancisco, .alps, .tokyo, .sahara:
             return place?.spec(Daylight.now()).sky ?? [hex(0x0B0B0F)]
+        case .motion:       return [hex(0x0A1420), hex(0x1E3A4E), hex(0x2E6E7E)]
         case .custom:       return [hex(0x0B0B0F), hex(0x131722)]
         }
     }
@@ -67,6 +71,14 @@ enum Backdrop: String, Codable, CaseIterable, Identifiable {
     /// Whether UI text should sit on a dark or light ground. Scenic presets are dark
     /// enough at the top that the existing light-on-dark type keeps working.
     var prefersDarkText: Bool { self == .paper }
+
+    /// Whether this backdrop is a picture rather than a flat theme colour.
+    ///
+    /// Three separate behaviours hang off this — the chrome is pinned dark, ambient mode
+    /// is offered, and `BackdropView` is used instead of the plain gradient — and all
+    /// three used to test `place != nil`, which was the same question right up until a
+    /// backdrop existed that is a scene without being a place.
+    var isScene: Bool { place != nil || self == .motion }
 
     /// How strongly to veil the scene behind the reading area.
     ///
@@ -78,6 +90,9 @@ enum Backdrop: String, Codable, CaseIterable, Identifiable {
     func scrim(_ t: Daylight) -> Double {
         switch self {
         case .midnight, .paper: return 0.0
+        // The moving styles are all built dark, and unlike a sky they do not brighten at
+        // noon — so their veil is a constant, and a light one.
+        case .motion: return 0.30
         case .custom:
             switch t {
             case .day:   return 0.68
@@ -116,6 +131,10 @@ struct BackdropView: View {
     var energy: Double = 0
     /// Which photo to show when `imagePath` points at a folder.
     var rotationIndex: Int = 0
+    /// Which moving style to draw when the backdrop is `.motion`.
+    var motionStyle: MotionStyle = .fluid
+    var motionIntensity: Double = 0.6
+    var motionAssets: Bool = true
 
     var body: some View {
         ZStack {
@@ -127,6 +146,13 @@ struct BackdropView: View {
                               energy: energy,
                               phase: tl.date.timeIntervalSinceReferenceDate)
                 }
+            } else if backdrop == .motion {
+                // No TimelineView here: this one runs its own clock, because how often it
+                // is allowed to redraw depends on which of three renderers it landed on.
+                MotionBackdropView(style: motionStyle,
+                                   intensity: motionIntensity,
+                                   energy: energy,
+                                   assetsEnabled: motionAssets)
             } else if backdrop == .custom {
                 // Ticks once a second so a rotating folder actually advances; the decoded
                 // image is cached, so a tick that changes nothing costs nothing.

@@ -233,6 +233,19 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
         sendRaw(#"{"type":"input_audio_buffer.append","audio":""# + pcm16.base64EncodedString() + #""}"#)
     }
 
+    /// Throws away whatever audio the server has buffered but not yet turned into a turn.
+    ///
+    /// Needed by mute, and only by mute. Server VAD closes a turn when it hears the
+    /// trailing silence, so a microphone that simply stops mid-sentence leaves half an
+    /// utterance sitting in the server's buffer with nothing coming to finish it: the
+    /// turn never commits, and the fragment is prepended to whatever is said after the
+    /// unmute. Clearing is the honest end to a sentence the model was never meant to
+    /// hear the rest of.
+    func clearInputAudio() {
+        FileHandle.standardError.write(Data("[realtime] -> input_audio_buffer.clear\n".utf8))
+        send(json: ["type": "input_audio_buffer.clear"])
+    }
+
     /// API-CONTRACT §3 — files an image as a conversation item.
     ///
     /// The frame is context only. Whether the model should then speak is the caller's

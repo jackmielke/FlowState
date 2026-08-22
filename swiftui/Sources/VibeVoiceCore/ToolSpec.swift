@@ -15,7 +15,7 @@ public struct ToolParameter: Equatable {
     }
 }
 
-/// A tool Vibe Voice answers itself, without going near Claude Code.
+/// A tool FlowState answers itself, without going near Claude Code.
 ///
 /// The distinction that matters is latency, and it changes the architecture rather than
 /// just the speed. Claude Code takes minutes, so a dispatch has to return immediately

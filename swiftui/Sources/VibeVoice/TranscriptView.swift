@@ -68,7 +68,7 @@ struct TranscriptView: View {
                     Circle()
                         .fill(isUser ? Theme.accentInk : Theme.voiceInk)
                         .frame(width: 5, height: 5)
-                    Text(isUser ? "YOU" : "VIBE")
+                    Text(isUser ? "YOU" : "FLOW")
                         .font(.system(size: 9.5, weight: .bold, design: .rounded))
                         .tracking(1.1)
                         .foregroundStyle(isUser ? Theme.accentInk : Theme.voiceInk)
@@ -89,14 +89,7 @@ struct TranscriptView: View {
                         .foregroundStyle(Theme.textFaint.opacity(0.7))
                 }
                 if let img = item.image {
-                    Image(nsImage: img)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(height: 92)
-                        .frame(maxWidth: .infinity)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(Theme.hairlineHi, lineWidth: 1))
+                    Thumbnail(image: img, title: item.text, captured: item.at)
                 }
                 if item.pending && item.text.isEmpty {
                     // Not a spinner and not a guess at what they said — just the shape of
@@ -125,6 +118,64 @@ struct TranscriptView: View {
             }
             .padding(.leading, 2)
         }
+    }
+}
+
+/// A frame in the transcript, and the way into the full-size one.
+///
+/// The tile is cropped to fill at 92 points, which is a deliberate choice for the column
+/// — every frame is the same height, so the conversation does not lurch around a
+/// screenshot — but it means the thumbnail is genuinely not readable. Clicking it opens
+/// the whole capture over the screen. The affordance is spelled out on hover rather than
+/// left to be discovered: nothing else in this column is clickable, so there is no reason
+/// to assume this is.
+private struct Thumbnail: View {
+    var image: NSImage
+    var title: String
+    var captured: Date
+
+    @State private var hovering = false
+
+    var body: some View {
+        Image(nsImage: image)
+            .resizable()
+            .aspectRatio(contentMode: .fill)
+            .frame(height: 92)
+            .frame(maxWidth: .infinity)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(alignment: .bottomTrailing) {
+                if hovering {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 8.5, weight: .semibold))
+                        Text("View")
+                            .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 7).padding(.vertical, 3.5)
+                    .background(Capsule().fill(.black.opacity(0.62)))
+                    .padding(6)
+                    .transition(.opacity)
+                }
+            }
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(hovering ? Theme.accent.opacity(0.75) : Theme.hairlineHi, lineWidth: 1))
+            // The clipped rectangle, not the uncropped image: without this the hit area
+            // is the frame's full aspect ratio and clicks land on rows above and below.
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .onTapGesture { open() }
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.14), value: hovering)
+            .help("Click to see this frame full size")
+            .accessibilityElement()
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel(title.isEmpty ? "Screen frame" : title)
+            .accessibilityHint("Opens the frame full size")
+            .accessibilityAction { open() }
+    }
+
+    private func open() {
+        ScreenshotPreview.show(image, title: title, captured: captured)
     }
 }
 

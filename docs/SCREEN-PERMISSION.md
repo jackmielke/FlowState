@@ -4,9 +4,9 @@
 
 1. Open **System Settings → Privacy & Security → Screen & System Audio Recording**
 2. Click the **`+`** button under the list
-3. Choose **`/Applications/Vibe Voice.app`**
+3. Choose **`/Applications/FlowState.app`**
 4. Make sure its toggle is **on**
-5. **Quit and reopen Vibe Voice** — macOS only reads this grant at launch
+5. **Quit and reopen FlowState** — macOS only reads this grant at launch
 
 The `+` button is the reliable path. Waiting for a prompt is not.
 

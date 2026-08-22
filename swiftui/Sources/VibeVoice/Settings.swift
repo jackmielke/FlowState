@@ -7,7 +7,7 @@ let kVoices = ["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "ve
 let kModels = ["gpt-realtime-2.1", "gpt-realtime-2.1-mini", "gpt-realtime-2", "gpt-realtime-1.5", "gpt-realtime", "gpt-realtime-mini"]
 
 let kDefaultPrompt = """
-You are FlowState, a warm and quick voice companion living on this Mac. \
+You are Flow, a warm and quick voice companion living on this Mac. \
 Keep replies short and conversational — a sentence or two unless asked for more. \
 When you are shown a screenshot, describe what actually matters on it, concretely, \
 and never pretend to see something you cannot.
@@ -16,16 +16,16 @@ and never pretend to see something you cannot.
 /// Prompts shipped by earlier builds, under earlier names.
 ///
 /// The personality prompt is stored in the user's settings, so renaming the app cannot
-/// reach a prompt already on disk — it would keep introducing itself as Vibe or Flow
+/// reach a prompt already on disk — it would keep introducing itself as Vibe or Vantage
 /// forever. Any of these, untouched, is silently upgraded to the current default; a
 /// prompt the user has actually edited is left completely alone.
 let kSupersededPrompts: [String] = [
     kDefaultPrompt
-        .replacingOccurrences(of: "You are FlowState,", with: "You are Vibe,"),
+        .replacingOccurrences(of: "You are Flow,", with: "You are Vibe,"),
     kDefaultPrompt
-        .replacingOccurrences(of: "You are FlowState,", with: "You are Flow,"),
+        .replacingOccurrences(of: "You are Flow,", with: "You are FlowState,"),
     kDefaultPrompt
-        .replacingOccurrences(of: "You are FlowState,", with: "You are Vantage,"),
+        .replacingOccurrences(of: "You are Flow,", with: "You are Vantage,"),
 ]
 
 struct AppSettings: Codable, Equatable {
@@ -38,6 +38,16 @@ struct AppSettings: Codable, Equatable {
     var vadThreshold: Double = 0.5        // 0...1
     var silenceDurationMs: Double = 500   // 200...1500
     var transcribeUser: Bool = true
+
+    /// The microphone gate, remembered between launches.
+    ///
+    /// Persisted because a mute you have to re-apply every launch is not a mute — the
+    /// case for it is "this Mac is in a room where I do not want an open microphone",
+    /// and that is a fact about the room, not about this session. The cost of persisting
+    /// it is a launch where the app hears nothing and the user has forgotten why, which
+    /// is why muted state is carried loudly rather than quietly: the orb changes, the
+    /// widget shows a slashed mic, and the status line says Muted rather than Live.
+    var micMuted: Bool = false
 
     /// Dev Mode — lets the model dispatch coding tasks to headless Claude Code.
     /// Off by default: it edits files with `--permission-mode acceptEdits`, so a
@@ -97,6 +107,17 @@ struct AppSettings: Codable, Equatable {
     var daylightMode: String = "auto"
     /// Seconds between photos when the backdrop points at a folder. 0 = never rotate.
     var photoRotateSeconds: Double = 120
+
+    /// Which moving backdrop `Backdrop.motion` shows.
+    var motionStyle: MotionStyle = .fluid
+    /// 0…1 — how much the motion moves. Amplitude and contrast only: nothing here
+    /// changes the speed, because a backdrop you notice speeding up is a backdrop you
+    /// start watching instead of the person you are talking to.
+    var motionIntensity: Double = 0.6
+    /// Prefer a video loop from the Motion folder over the shader, when one is there.
+    /// On by default — someone who went to the trouble of installing a loop meant it —
+    /// and the switch is how you get back to the drawn version without deleting the file.
+    var motionAssets: Bool = true
     /// Fade the chrome away when nothing has happened for a while, leaving the scene.
     var ambientMode: Bool = true
 
@@ -129,6 +150,29 @@ struct AppSettings: Codable, Equatable {
     /// When a running conversation gets summarised, and where the summary goes.
     var summaries: SummaryPolicy = SummaryPolicy()
 
+    // MARK: - Capture
+
+    /// What the record button captures: audio, audio + screen, audio + camera, or both.
+    ///
+    /// Audio-only by default, and that is not merely a conservative default — it is the
+    /// behaviour of every build before video existed, written to the same folder with the
+    /// same name and the same extension. Someone who never opens this setting cannot tell
+    /// that video was added.
+    var captureMode: CaptureMode = .audioOnly
+
+    /// How hard the encoder is allowed to work and how much disk it may spend. Ignored
+    /// entirely when `captureMode` is `.audioOnly` — a WAV has no profile.
+    var capturePerformance: PerformanceProfile = .balanced
+
+    /// `AVCaptureDevice.uniqueID` of the camera to record. Empty means "whichever one
+    /// macOS would pick", which is what a laptop with one built-in camera wants and what
+    /// a Mac whose external camera is currently unplugged has to fall back to anyway.
+    ///
+    /// Unlike a display id, a camera's unique id survives unplugging and rebooting, so
+    /// this one is safe to persist — it is still re-resolved against the live list before
+    /// every recording, because "safe to persist" is not "guaranteed to be attached".
+    var cameraDeviceID: String = ""
+
     /// What to open on launch.
     ///
     /// OFF — the default — means every launch starts a new conversation, and the last
@@ -143,13 +187,15 @@ struct AppSettings: Codable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case voice, model, systemPrompt, speed, continuousScreen, screenInterval
-        case vadThreshold, silenceDurationMs, transcribeUser, devMode, devRepo
+        case vadThreshold, silenceDurationMs, transcribeUser, micMuted, devMode, devRepo
         case maxScreenFrames, screenshotSize, qualityMode, appearance, screenDisplayID
         case devNarrate, devNarrateInterval, devNarrateMax, devPermissionMode
         case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
         case photoRotateSeconds, menuBarEnabled, summonHotkey, devNudgeDismissed
+        case motionStyle, motionIntensity, motionAssets
         case devAutoCommit, devAutoPush, hudEnabled, hudStyle
         case privacy, summaries, resumeLastSession
+        case captureMode, capturePerformance, cameraDeviceID
     }
 }
 
@@ -180,6 +226,7 @@ extension AppSettings {
         vadThreshold      = v(.vadThreshold, d.vadThreshold)
         silenceDurationMs = v(.silenceDurationMs, d.silenceDurationMs)
         transcribeUser    = v(.transcribeUser, d.transcribeUser)
+        micMuted          = v(.micMuted, d.micMuted)
         devMode           = v(.devMode, d.devMode)
         devRepo           = v(.devRepo, d.devRepo)
         devNarrate        = v(.devNarrate, d.devNarrate)
@@ -195,6 +242,9 @@ extension AppSettings {
         backdropImagePath = v(.backdropImagePath, d.backdropImagePath)
         daylightMode      = v(.daylightMode, d.daylightMode)
         photoRotateSeconds = v(.photoRotateSeconds, d.photoRotateSeconds)
+        motionStyle       = v(.motionStyle, d.motionStyle)
+        motionIntensity   = v(.motionIntensity, d.motionIntensity)
+        motionAssets      = v(.motionAssets, d.motionAssets)
         menuBarEnabled    = v(.menuBarEnabled, d.menuBarEnabled)
         summonHotkey      = v(.summonHotkey, d.summonHotkey)
         devNudgeDismissed = v(.devNudgeDismissed, d.devNudgeDismissed)
@@ -206,6 +256,9 @@ extension AppSettings {
         privacy           = v(.privacy, d.privacy)
         summaries         = v(.summaries, d.summaries)
         resumeLastSession = v(.resumeLastSession, d.resumeLastSession)
+        captureMode       = v(.captureMode, d.captureMode)
+        capturePerformance = v(.capturePerformance, d.capturePerformance)
+        cameraDeviceID    = v(.cameraDeviceID, d.cameraDeviceID)
     }
 }
 

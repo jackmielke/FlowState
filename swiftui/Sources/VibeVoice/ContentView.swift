@@ -11,7 +11,11 @@ struct ContentView: View {
         case .connecting: return .connecting
         case .idle: return .idle
         case .live:
+            // The model talking outranks the gate — muting stops it hearing you, not
+            // you hearing it, and an orb that ignored a reply in progress would be
+            // reporting the wrong half of the conversation.
             if state.audio.outLevel > 0.004 { return .speaking }
+            if state.isMicMuted { return .muted }
             if state.userSpeaking || state.audio.micLevel > 0.012 { return .listening }
             return .idle
         }
@@ -19,16 +23,86 @@ struct ContentView: View {
 
     private var orbLevel: Float { max(state.audio.micLevel, state.audio.outLevel * 1.15) }
 
-    /// The painted scenes are all dusk-to-night rooms. Light chrome on top of one is not
-    /// a style choice, it is unreadable — so a scene pins the UI dark regardless of the
-    /// light/dark setting, which goes back to governing Midnight and Paper.
-    private var sceneIsDark: Bool { state.settings.backdrop.place != nil }
+    /// The painted scenes are all dusk-to-night rooms, and the moving ones are darker
+    /// still. Light chrome on top of one is not a style choice, it is unreadable — so a
+    /// scene pins the UI dark regardless of the light/dark setting, which goes back to
+    /// governing Midnight and Paper.
+    private var sceneIsDark: Bool { state.settings.backdrop.isScene }
 
     /// Elapsed recording time, taken from the samples actually captured rather than the
     /// wall clock, so it reports the length of the file being written.
     private var recordingClock: String {
         let s = Int(state.recorder.duration)
         return String(format: "%d:%02d", s / 60, s % 60)
+    }
+
+    private var recordHelp: String {
+        if state.isRecording { return "Stop recording and save it" }
+        if !state.audio.running { return "Connect first — there is no microphone running to record from" }
+        if let problem = state.recordingError { return problem }
+        let mode = state.settings.captureMode
+        let size = CaptureStorage.rateLabel(for: state.capturePlan(for: mode))
+        return mode == .audioOnly
+            ? "Record this conversation (\(size))"
+            : "Record this conversation — \(mode.menuLabel.lowercased()), \(size)"
+    }
+
+    /// The record glyph, which says what would be captured. `record.circle` for audio is
+    /// the one every previous build had, so audio-only looks exactly as it always did.
+    private var recordSymbol: String {
+        state.settings.captureMode == .audioOnly ? "record.circle" : "video.circle"
+    }
+
+    /// Picks what the next recording captures.
+    ///
+    /// Choosing a mode asks macOS for whatever it needs *now*, rather than at the moment
+    /// the button is pressed — a camera prompt that appears three seconds into a
+    /// recording is a prompt you dismiss, and then the recording has no camera in it.
+    private var captureModeMenu: some View {
+        Menu {
+            ForEach(CaptureMode.allCases) { mode in
+                Button {
+                    state.settings.captureMode = mode
+                    Task { await state.prepareCapture(for: mode) }
+                } label: {
+                    Label(mode.menuLabel + (mode == state.settings.captureMode ? "  ✓" : ""),
+                          systemImage: mode.symbol)
+                }
+            }
+            Divider()
+            // The estimate, in the menu that decides it. Not a warning — just the number,
+            // which is the thing anyone choosing between these four actually wants.
+            Text(CaptureStorage.rateLabel(for: state.capturePlan(for: state.settings.captureMode)))
+            if state.storageAdvice.isWarning { Text(state.storageAdvice.headline) }
+            Divider()
+            Button("Capture settings…") { state.showSettings = true }
+        } label: {
+            Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundStyle(Theme.textFaint)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .frame(width: 14)
+        .help("What to capture — currently \(state.settings.captureMode.menuLabel.lowercased())")
+        .accessibilityLabel("Capture mode")
+        .accessibilityValue(state.settings.captureMode.menuLabel)
+    }
+
+    /// How much disk the recording in progress has used, and how alarmed to be about it.
+    private var storageChip: some View {
+        let advice = state.liveStorageAdvice
+        return HStack(spacing: 3) {
+            Image(systemName: advice.symbol).font(.system(size: 8.5))
+            Text(advice.headline)
+                .font(.system(size: 10, design: .monospaced))
+                .lineLimit(1)
+        }
+        .foregroundStyle(advice.level == .critical ? Theme.badInk
+                         : advice.level == .caution ? Theme.accentInk : Theme.textFaint)
+        .help(advice.detail)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Storage. " + advice.detail)
     }
 
     /// Which photo a rotating folder is on. Derived from the clock rather than a timer,
@@ -43,7 +117,7 @@ struct ContentView: View {
     private var ambientHidden: Bool {
         state.settings.ambientMode
             && state.isAmbient
-            && state.settings.backdrop.place != nil
+            && state.settings.backdrop.isScene
     }
 
     private var accentForMode: Color {
@@ -76,7 +150,10 @@ struct ContentView: View {
                              imagePath: state.settings.backdropImagePath,
                              daylight: state.currentDaylight,
                              energy: Double(orbLevel),
-                             rotationIndex: photoIndex)
+                             rotationIndex: photoIndex,
+                             motionStyle: state.settings.motionStyle,
+                             motionIntensity: state.settings.motionIntensity,
+                             motionAssets: state.settings.motionAssets)
                 // Keep the mode tint, so the room still shifts colour when FlowState speaks.
                 RadialGradient(colors: [accentForMode.opacity(0.14), .clear],
                                center: .init(x: 0.28, y: 0.18), startRadius: 0, endRadius: 620)
@@ -143,7 +220,7 @@ struct ContentView: View {
                                              startPoint: .top, endPoint: .bottom))
                         .frame(width: 9, height: 9)
                         .shadow(color: Theme.accent.opacity(0.7), radius: 6)
-                    Text("VANTAGE")
+                    Text("FLOW")
                         .font(.system(size: 11.5, weight: .bold, design: .rounded))
                         .tracking(2.0)
                         .foregroundStyle(Theme.text.opacity(0.92))
@@ -179,19 +256,57 @@ struct ContentView: View {
                           : "Stop this reply")
                 }
 
+                // Mute, in the header rather than in the button row below, because it is
+                // the one control that is worth reaching for while the app is in the
+                // background of your attention — and the header is the row that stays
+                // put while the panel underneath it changes.
+                Button { state.toggleMicMute() } label: {
+                    Image(systemName: MicMute.symbol(muted: state.isMicMuted))
+                        .foregroundStyle(state.isMicMuted ? Theme.bad : Theme.textDim)
+                }
+                .buttonStyle(IconButtonStyle())
+                .keyboardShortcut("m", modifiers: [.command, .shift])
+                .help(MicMute.help(muted: state.isMicMuted, live: state.connection == .live)
+                      + " (⌘⇧M)")
+                .accessibilityLabel(MicMute.label(muted: state.isMicMuted))
+
                 Button {
                     state.isRecording ? { _ = state.stopRecording() }() : { _ = state.startRecording() }()
                 } label: {
-                    Image(systemName: state.isRecording ? "stop.circle.fill" : "record.circle")
+                    // The glyph names what would be captured, so the mode is visible
+                    // without opening the menu next to it — the difference between an
+                    // audio note and a screen recording is not something to discover
+                    // afterwards, from the file size.
+                    Image(systemName: state.isRecording ? "stop.circle.fill" : recordSymbol)
                         .foregroundStyle(state.isRecording ? Theme.bad : Theme.textDim)
                 }
                 .buttonStyle(IconButtonStyle())
-                .help(state.isRecording ? "Stop recording and save it" : "Record this conversation")
+                // Nothing to tee off until the capture tap is running, so the button is
+                // out rather than going red over a session that cannot be recorded.
+                .disabled(!state.isRecording && !state.audio.running)
+                .opacity(state.isRecording || state.audio.running ? 1 : 0.45)
+                .help(recordHelp)
+                .accessibilityLabel(state.isRecording ? "Stop recording" : "Record")
+                .accessibilityValue(state.settings.captureMode.menuLabel)
+
+                // What to capture. A menu rather than four buttons: this is one choice
+                // out of four, made rarely, and the header has no room for a segmented
+                // control next to everything else in it.
+                if !state.isRecording { captureModeMenu }
 
                 if state.isRecording {
                     Text(recordingClock)
                         .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(Theme.bad)
+                        // Amber while the clock has not moved: red-and-0:00 is the exact
+                        // pair that used to mean "this is silently capturing nothing".
+                        .foregroundStyle(state.recorder.duration > 0 ? Theme.bad : Theme.accentInk)
+                        .help(state.recorder.duration > 0
+                              ? "Seconds captured so far"
+                              : "No audio has reached the recorder yet")
+
+                    // How big it has got. Only while a video recording is running: a WAV
+                    // is 48 kB a second and nobody has ever needed to watch one.
+                    if state.recorder.capturePlan.mode.isVideo { storageChip }
                 }
 
                 Button { Task { await state.captureAndSend(auto: false) } } label: {
@@ -388,6 +503,7 @@ struct ContentView: View {
     private var stage: some View {
         VStack(spacing: 0) {
             if let b = state.banner { banner(b) }
+            if let r = state.lastRecording { savedRecordingCard(r) }
             if state.screenPermission.blocksCapture { screenPermissionCard }
             if case .error(let msg) = state.connection { banner(msg) }
 
@@ -423,9 +539,27 @@ struct ContentView: View {
             }
             .padding(.top, 6)
 
-            LevelMeter(history: state.audio.micHistory, tint: mode == .speaking ? Theme.voice : Theme.accent)
+            LevelMeter(history: state.audio.micHistory,
+                       tint: state.isMicMuted ? Theme.bad
+                                              : (mode == .speaking ? Theme.voice : Theme.accent))
                 .padding(.top, 20)
                 .opacity(state.audio.running ? 1 : 0.32)
+                // A flat meter is ambiguous — it is what a working microphone in a quiet
+                // room looks like too. This is the label that tells the two apart, and it
+                // is why the meter is not simply hidden while muted: an empty space where
+                // the meter was says nothing at all.
+                .overlay {
+                    if state.isMicMuted {
+                        HStack(spacing: 5) {
+                            Image(systemName: "mic.slash.fill").font(.system(size: 10))
+                            Text("Muted").font(.system(size: 10.5, weight: .semibold))
+                        }
+                        .foregroundStyle(Theme.bad)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Capsule().fill(Theme.panel.opacity(0.92)))
+                    }
+                }
+                .animation(.easeOut(duration: 0.16), value: state.isMicMuted)
 
             Spacer(minLength: 20)
 
@@ -588,6 +722,17 @@ struct ContentView: View {
         .padding(.top, 14)
     }
 
+    /// The panel a finished recording leaves behind — see `RecordingResultCard`, which
+    /// is the same card Settings shows, so the two cannot drift apart.
+    private func savedRecordingCard(_ r: SessionRecorder.Recording) -> some View {
+        RecordingResultCard(file: r.described,
+                            problem: state.recordingProblem(for: r.url),
+                            onPlay: { state.play(r.url) },
+                            onReveal: { state.reveal(r.url) },
+                            onDismiss: { state.dismissLastRecording() })
+            .padding(.top, 14)
+    }
+
     /// Two genuinely different problems, so two genuinely different cards.
     /// Telling a user who has already granted the permission that it is "off" is
     /// the bug this exists to avoid.
@@ -610,7 +755,7 @@ struct ContentView: View {
                 Text("Allow FlowState under Privacy & Security › Screen & System Audio Recording, then come back — the app re-checks every time you switch to it, and will tell you if a relaunch is needed.")
                     .font(.system(size: 11.5)).foregroundStyle(Theme.textDim)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("Already checked in that list? This build was re-signed since you granted it, so macOS sees a different app. Toggle Vibe Voice off and back on, or run:  tccutil reset ScreenCapture com.jackmielke.vibevoice")
+                Text("Already checked in that list? This build was re-signed since you granted it, so macOS sees a different app. Toggle FlowState off and back on, or run:  tccutil reset ScreenCapture com.jackmielke.vibevoice")
                     .font(.system(size: 10.5)).foregroundStyle(Theme.textFaint)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)

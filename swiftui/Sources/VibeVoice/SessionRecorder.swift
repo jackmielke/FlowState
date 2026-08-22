@@ -1,5 +1,8 @@
 import Foundation
 import AVFoundation
+import Combine
+import os
+import VibeVoiceCore
 
 /// Records a conversation — both halves — to a single playable file.
 ///
@@ -15,97 +18,330 @@ import AVFoundation
 ///
 /// The output is a plain 16-bit PCM WAV. It is bigger than an m4a and it plays absolutely
 /// everywhere, with no encoder to go wrong halfway through a demo.
-@MainActor
-final class SessionRecorder: ObservableObject {
+///
+/// VIDEO
+/// When the capture mode asks for pictures too, none of the above changes. The mic is
+/// still the clock, the mixdown is still the mixdown, and the samples still end up in one
+/// file — that file is a QuickTime movie rather than a WAV, and the writing of it is
+/// handed to a `RecordingVideoTrack` (see `VideoTrackWriter`) so that ScreenCaptureKit and
+/// AVAssetWriter stay on the other side of the wall. That wall is load-bearing: this file
+/// imports nothing but Foundation, AVFoundation, Combine, os and VibeVoiceCore, which is
+/// what lets `Scripts/verify-recorder.sh` compile it on its own and prove it still records.
+///
+/// THREADING
+/// `appendMic` is called from the real-time audio thread — `AudioEngine.onMicPCM` fires
+/// inside the capture tap — while `appendAssistant`, `start` and `stop` are called from
+/// the main actor. So the sample buffer lives under a lock and the `@Published` mirrors
+/// are refreshed from a main-thread timer rather than written wherever a buffer happens
+/// to land. Marking this `@MainActor` instead would mean either hopping the actor forty
+/// times a second from a real-time thread, or (as it did) never feeding it the mic at all.
+final class SessionRecorder: ObservableObject, @unchecked Sendable {
+
+    /// Everything a caller needs to say what happened, instead of guessing from a nil.
+    enum StopOutcome: Equatable {
+        case saved(url: URL, seconds: TimeInterval)
+        /// Captured something, but less than `minimumSeconds` of it.
+        case tooShort(seconds: TimeInterval)
+        /// The clock ran but no samples ever arrived — the symptom of an unwired tap.
+        case captureNeverStarted(elapsed: TimeInterval)
+        case writeFailed(reason: String)
+        case notRecording
+    }
 
     @Published private(set) var isRecording = false
     @Published private(set) var startedAt: Date?
     /// Seconds captured so far, derived from samples rather than the wall clock, so it
     /// reports what is actually in the file.
     @Published private(set) var duration: TimeInterval = 0
+    /// Set when a start or a stop did not do what the button implied. Cleared on the
+    /// next successful start, so it never outlives the problem it describes.
+    @Published private(set) var lastError: String?
 
+    private let lock = NSLock()
     private var samples: [Int16] = []
     private var cursor = 0          // where the mic has written up to
     private var url: URL?
+    /// Counted separately from `samples.count` so "the tap is silent" and "the tap is
+    /// unwired" are distinguishable — silence still arrives as buffers of zeroes.
+    private var micChunks = 0
+    private var assistantChunks = 0
+
+    /// Refreshes the published mirrors. Four times a second is enough for a mm:ss clock
+    /// and cheap enough to leave running for an hour.
+    private var uiTimer: Timer?
+
+    /// Who writes the pictures, for as long as there are pictures to write. Nil for an
+    /// audio-only recording, which is the default and every recording made before this
+    /// existed. Guarded by `lock` like everything else the audio thread can race.
+    private var videoTrack: RecordingVideoTrack?
+
+    /// What this take is capturing. Read by the UI for the live storage estimate, so it
+    /// outlives `stop` rather than being cleared with the rest of the state — the panel
+    /// that appears after a recording still has to describe what was captured.
+    private(set) var capturePlan: CapturePlan = CapturePlan.make(mode: .audioOnly, profile: .balanced)
 
     static let sampleRate = 24_000
+    /// Below this a file is a click, not a recording.
+    static let minimumSeconds: TimeInterval = 0.25
 
-    static var directory: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    private static let log = Logger(subsystem: "com.jackmielke.vibevoice", category: "recorder")
+
+    /// Where recordings are kept. Pure — it creates nothing, so a caller is allowed to
+    /// ask whether the folder is actually there. `directory` used to be the only way to
+    /// name it and made the folder as a side effect, which meant "does it exist?" was a
+    /// question that answered itself yes.
+    static var directoryURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("VibeVoice/Recordings", isDirectory: true)
+    }
+
+    /// The same folder, brought into existence. For the write path only.
+    static var directory: URL {
+        let base = directoryURL
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base
     }
 
     // MARK: - Lifecycle
 
-    func start(title: String) -> URL? {
-        guard !isRecording else { return url }
-        let stamp = DateFormatter()
-        stamp.dateFormat = "yyyy-MM-dd HH.mm"
-        let safe = title
-            .replacingOccurrences(of: "/", with: "-")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let name = safe.isEmpty ? stamp.string(from: Date())
-                                : "\(stamp.string(from: Date())) — \(safe.prefix(40))"
-        url = Self.directory.appendingPathComponent(name + ".wav")
+    /// - Parameters:
+    ///   - title: what the conversation is about. Becomes part of the file name; see
+    ///     `RecordingName` for what happens to a title with a slash or a newline in it.
+    ///   - plan: what is being captured and how. The default is the original behaviour —
+    ///     audio only, written as a WAV — so every existing caller is unchanged.
+    ///   - video: the thing that writes the pictures, when there are pictures. Required
+    ///     for a video plan and ignored for an audio one, rather than optional for both:
+    ///     starting a screen recording with nothing to write it to would go red, run, and
+    ///     produce a silent nothing, which is the exact failure the outcome enum exists
+    ///     to make impossible.
+    @discardableResult
+    func start(title: String,
+               plan: CapturePlan = CapturePlan.make(mode: .audioOnly, profile: .balanced),
+               video: RecordingVideoTrack? = nil) -> URL? {
+        lock.lock()
+        if isRecordingLocked {
+            let existing = url
+            lock.unlock()
+            Self.log.notice("start ignored — already recording")
+            return existing
+        }
+
+        let name = RecordingName.fileName(title: title, date: Date(), mode: plan.mode)
+        let target = Self.directory.appendingPathComponent(name)
+
+        if plan.mode.isVideo {
+            guard let video else {
+                lock.unlock()
+                let why = "\(plan.mode.menuLabel) needs a video writer, and none was supplied."
+                Self.log.error("\(why, privacy: .public)")
+                publish(isRecording: false, startedAt: nil, duration: 0, error: why)
+                return nil
+            }
+            do {
+                try video.begin(destination: target, plan: plan)
+            } catch {
+                lock.unlock()
+                let why = "Could not start the video recording: \(error.localizedDescription)"
+                Self.log.error("\(why, privacy: .public)")
+                publish(isRecording: false, startedAt: nil, duration: 0, error: why)
+                return nil
+            }
+        }
 
         samples.removeAll(keepingCapacity: true)
         cursor = 0
-        duration = 0
-        startedAt = Date()
-        isRecording = true
-        return url
+        micChunks = 0
+        assistantChunks = 0
+        url = target
+        // Held for the whole recording, and only for a video plan — `stop` uses its
+        // presence, not the plan's, to decide who writes the file.
+        videoTrack = plan.mode.isVideo ? video : nil
+        capturePlan = plan
+        isRecordingLocked = true
+        lock.unlock()
+
+        Self.log.notice("start → \(target.lastPathComponent, privacy: .public) [\(plan.mode.rawValue, privacy: .public)]")
+        publish(isRecording: true, startedAt: Date(), duration: 0, error: nil)
+        startClock()
+        return target
     }
 
-    /// Finishes and writes the file. Returns nil when nothing was captured — an empty
-    /// recording is a file that only disappoints later.
+    /// Finishes and writes the file.
+    ///
+    /// Every failure is named. "Returns nil" was the old contract and it collapsed four
+    /// different problems — never started, never fed, too short, disk error — into one
+    /// silent nothing, which is exactly how a recorder can show red, capture zero
+    /// seconds and leave the user with no idea which part broke.
     @discardableResult
-    func stop() -> URL? {
-        guard isRecording else { return nil }
-        isRecording = false
-        startedAt = nil
-        defer { samples.removeAll(keepingCapacity: false) }
+    func stop() -> StopOutcome {
+        lock.lock()
+        guard isRecordingLocked else {
+            lock.unlock()
+            Self.log.notice("stop ignored — not recording")
+            return .notRecording
+        }
+        isRecordingLocked = false
+        let captured = samples
+        let target = url
+        let mic = micChunks
+        let assistant = assistantChunks
+        let video = videoTrack
+        samples.removeAll(keepingCapacity: false)
+        cursor = 0
+        url = nil
+        videoTrack = nil
+        lock.unlock()
 
-        guard let url, samples.count > Self.sampleRate / 4 else { return nil }   // < 0.25s
+        let began = startedAt
+        let seconds = Double(captured.count) / Double(Self.sampleRate)
+        let elapsed = began.map { Date().timeIntervalSince($0) } ?? 0
+        stopClock()
+
+        Self.log.notice("""
+            stop — \(captured.count) samples (\(seconds, format: .fixed(precision: 2))s) \
+            from \(mic) mic + \(assistant) assistant chunks over \
+            \(elapsed, format: .fixed(precision: 1))s wall clock
+            """)
+
+        func finish(_ outcome: StopOutcome, error: String?) -> StopOutcome {
+            publish(isRecording: false, startedAt: nil, duration: seconds, error: error)
+            return outcome
+        }
+
+        /// Every path out of here that is not a saved file has to tear the video down.
+        /// A stream left running is a camera light that stays on and a display that keeps
+        /// being sampled after the user pressed stop — the most alarming possible way to
+        /// report "that was too short to keep".
+        func abandonVideo() {
+            guard let video else { return }
+            video.cancel()
+            if let target { try? FileManager.default.removeItem(at: target) }
+        }
+
+        // No samples at all after a real stretch of wall clock means nothing was ever
+        // teed into the recorder — a wiring fault, not a short recording, and worth
+        // saying out loud because the two look identical from the button.
+        if mic == 0 && assistant == 0 {
+            // Under a second is someone double-clicking the button, and flagging that as
+            // a fault would cry wolf. A second or more with nothing at all in it is the
+            // wiring fault, and that one is worth shouting about.
+            let fault = elapsed >= 1
+            let why = fault
+                ? "No audio ever reached the recorder — the microphone tap is not feeding it."
+                : "Stopped before any audio arrived."
+            if fault { Self.log.error("\(why, privacy: .public)") }
+            else { Self.log.notice("\(why, privacy: .public)") }
+            abandonVideo()
+            return finish(.captureNeverStarted(elapsed: elapsed), error: fault ? why : nil)
+        }
+
+        guard let target else {
+            abandonVideo()
+            let why = "Recording had nowhere to be written."
+            Self.log.error("\(why, privacy: .public)")
+            return finish(.writeFailed(reason: why), error: why)
+        }
+
+        guard seconds >= Self.minimumSeconds else {
+            abandonVideo()
+            return finish(.tooShort(seconds: seconds), error: nil)
+        }
+
         do {
-            try Self.writeWAV(samples: samples, to: url)
-            return url
+            // One file either way. The movie writer is handed the same mixdown the WAV
+            // would have contained — it is not fed a second, separately captured stream —
+            // so the audio in a screen recording is bit-for-bit the audio you would have
+            // got from the same conversation recorded audio-only.
+            if let video {
+                try video.finish(samples: captured, sampleRate: Self.sampleRate)
+            } else {
+                try Self.writeWAV(samples: captured, to: target)
+            }
+            Self.log.notice("saved \(target.lastPathComponent, privacy: .public)")
+            return finish(.saved(url: target, seconds: seconds), error: nil)
         } catch {
-            FileHandle.standardError.write(Data(
-                "[recorder] could not write \(url.lastPathComponent): \(error.localizedDescription)\n".utf8))
-            return nil
+            abandonVideo()
+            let why = "Could not write \(target.lastPathComponent): \(error.localizedDescription)"
+            Self.log.error("\(why, privacy: .public)")
+            FileHandle.standardError.write(Data("[recorder] \(why)\n".utf8))
+            return finish(.writeFailed(reason: why), error: why)
         }
     }
 
     // MARK: - Feeding
 
     /// The microphone, which also advances the timeline.
+    ///
+    /// Called on the audio thread. Everything it touches is under the lock, and nothing
+    /// it touches is `@Published`.
     func appendMic(_ pcm16: Data) {
-        guard isRecording else { return }
         let incoming = Self.toSamples(pcm16)
-        if samples.count < cursor + incoming.count {
-            samples.append(contentsOf: repeatElement(0, count: cursor + incoming.count - samples.count))
-        }
-        for (i, s) in incoming.enumerated() {
-            samples[cursor + i] = Self.mix(samples[cursor + i], s)
-        }
+        guard !incoming.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard isRecordingLocked else { return }
+        write(incoming, at: cursor)
         cursor += incoming.count
-        duration = Double(samples.count) / Double(Self.sampleRate)
+        micChunks += 1
     }
 
     /// The model's voice, mixed in at the current point on the timeline.
     func appendAssistant(_ pcm16: Data) {
-        guard isRecording else { return }
         let incoming = Self.toSamples(pcm16)
-        let at = cursor
-        if samples.count < at + incoming.count {
-            samples.append(contentsOf: repeatElement(0, count: at + incoming.count - samples.count))
+        guard !incoming.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard isRecordingLocked else { return }
+        write(incoming, at: cursor)
+        assistantChunks += 1
+    }
+
+    /// Saturating mix of `incoming` into the buffer starting at `index`, growing it
+    /// first. Caller holds the lock.
+    private func write(_ incoming: [Int16], at index: Int) {
+        if samples.count < index + incoming.count {
+            samples.append(contentsOf: repeatElement(0, count: index + incoming.count - samples.count))
         }
         for (i, s) in incoming.enumerated() {
-            samples[at + i] = Self.mix(samples[at + i], s)
+            samples[index + i] = Self.mix(samples[index + i], s)
         }
-        duration = Double(samples.count) / Double(Self.sampleRate)
+    }
+
+    // MARK: - Published mirrors
+
+    /// The authoritative flag, read and written under the lock. `isRecording` is its
+    /// main-thread mirror and is what the views bind to.
+    private var isRecordingLocked = false
+
+    private func startClock() {
+        stopClock()
+        let t = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.lock.lock()
+            let seconds = Double(self.samples.count) / Double(Self.sampleRate)
+            let live = self.isRecordingLocked
+            self.lock.unlock()
+            guard live else { return }
+            if abs(seconds - self.duration) > 0.001 { self.duration = seconds }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        uiTimer = t
+    }
+
+    private func stopClock() {
+        uiTimer?.invalidate()
+        uiTimer = nil
+    }
+
+    private func publish(isRecording: Bool, startedAt: Date?, duration: TimeInterval, error: String?) {
+        let apply = { [weak self] in
+            guard let self else { return }
+            self.isRecording = isRecording
+            self.startedAt = startedAt
+            self.duration = duration
+            self.lastError = error
+        }
+        if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
     }
 
     // MARK: -
@@ -117,9 +353,12 @@ final class SessionRecorder: ObservableObject {
     }
 
     private static func toSamples(_ d: Data) -> [Int16] {
-        guard !d.isEmpty else { return [] }
+        guard d.count >= 2 else { return [] }
         return d.withUnsafeBytes { raw in
-            Array(raw.bindMemory(to: Int16.self))
+            // `bindMemory` requires the count to divide evenly; a half sample at the end
+            // of a chunk would trap rather than be dropped.
+            let usable = raw.count - (raw.count % MemoryLayout<Int16>.size)
+            return Array(UnsafeRawBufferPointer(rebasing: raw[0..<usable]).bindMemory(to: Int16.self))
         }
     }
 
@@ -143,6 +382,8 @@ final class SessionRecorder: ObservableObject {
         str("data"); u32(dataBytes)
         samples.withUnsafeBufferPointer { out.append(UnsafeRawBufferPointer($0).bindMemory(to: UInt8.self)) }
 
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
         try out.write(to: url, options: .atomic)
     }
 
@@ -163,20 +404,89 @@ final class SessionRecorder: ObservableObject {
     }
 
     /// What is on disk, newest first.
-    static func library() -> [Recording] {
+    ///
+    /// Filters on `RecordingName.knownExtensions` rather than on `wav`, which is what it
+    /// used to do and which would have made every video recording invisible in Settings
+    /// the day one was first written — correctly saved, correctly named, and absent from
+    /// the only list in the app that shows recordings.
+    static func library() async -> [Recording] {
         let keys: [URLResourceKey] = [.creationDateKey, .fileSizeKey]
         let urls = (try? FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: keys)) ?? []
-        return urls
-            .filter { $0.pathExtension.lowercased() == "wav" }
-            .compactMap { u in
-                let v = try? u.resourceValues(forKeys: Set(keys))
-                let bytes = v?.fileSize ?? 0
-                // Header is 44 bytes; everything after it is 2 bytes per sample.
-                let seconds = Double(max(0, bytes - 44)) / 2.0 / Double(sampleRate)
-                return Recording(url: u, createdAt: v?.creationDate ?? .distantPast,
-                                 bytes: bytes, seconds: seconds)
-            }
-            .sorted { $0.createdAt > $1.createdAt }
+        var out: [Recording] = []
+        for u in urls where RecordingName.isRecording(u) {
+            let v = try? u.resourceValues(forKeys: Set(keys))
+            let bytes = v?.fileSize ?? 0
+            out.append(Recording(url: u,
+                                 createdAt: v?.creationDate ?? .distantPast,
+                                 bytes: bytes,
+                                 seconds: await length(of: u, bytes: bytes)))
+        }
+        return out.sorted { $0.createdAt > $1.createdAt }
     }
+
+    /// How long a file on disk runs.
+    ///
+    /// A WAV is arithmetic — the header is 44 bytes and everything after it is 2 bytes a
+    /// sample — and doing it that way costs one `stat` for the whole folder. A movie is
+    /// not: its length lives in a `moov` atom that has to be parsed, so it is asked of
+    /// AVFoundation — asynchronously, which is the only non-deprecated way to ask, and
+    /// which is why the whole scan is async. That is a real file read per movie, so it is
+    /// only done for the files that need it rather than for the whole list.
+    private static func length(of url: URL, bytes: Int) async -> TimeInterval {
+        guard url.pathExtension.lowercased() != "wav" else {
+            return Double(max(0, bytes - 44)) / 2.0 / Double(sampleRate)
+        }
+        guard let duration = try? await AVURLAsset(url: url).load(.duration) else { return 0 }
+        let seconds = CMTimeGetSeconds(duration)
+        // A movie still being written, or a truncated one, reports NaN rather than
+        // failing. Zero is the honest answer there: `RecordingFile.lengthLabel` shows
+        // "0s", which is at least not a number someone can act on and be wrong.
+        return seconds.isFinite && seconds > 0 ? seconds : 0
+    }
+}
+
+
+/// The other half of a video recording: whatever is writing the pictures.
+///
+/// `SessionRecorder` owns the timeline, the mixdown and every outcome the user is told
+/// about. It deliberately knows nothing about ScreenCaptureKit, AVAssetWriter or the
+/// camera — all of that lives behind this protocol, in `VideoTrackWriter`, on the other
+/// side of a wall that exists so this file keeps compiling on its own under
+/// `Scripts/verify-recorder.sh`.
+///
+/// The contract is small and strictly ordered:
+///
+///  1. `begin` once, before any audio is fed. It throws rather than failing quietly, so a
+///     screen recording that cannot start never shows a red button.
+///  2. Frames arrive on the implementation's own queues in the meantime. The recorder
+///     neither sees them nor waits for them — a stalled capture must not stall the audio.
+///  3. Exactly one of `finish` or `cancel`. `finish` is handed the completed mixdown and
+///     is responsible for the audio track and for closing the file; `cancel` tears
+///     everything down and leaves nothing behind.
+///
+/// `@unchecked Sendable` conformance is the implementation's problem, not this file's:
+/// the recorder only ever touches it from the main actor, under the lock.
+protocol RecordingVideoTrack: AnyObject {
+
+    /// Open the file and start the capture. Throws if either cannot be done.
+    func begin(destination: URL, plan: CapturePlan) throws
+
+    /// Stop capturing, write `samples` as the audio track, and close the file.
+    ///
+    /// The audio is handed over whole, at the end, rather than streamed in as it arrives.
+    /// That is deliberate: the model's voice is mixed into the timeline *retroactively* —
+    /// see `write(_:at:)` — so a sample that has already been "written" can still change
+    /// until the recording stops. Streaming it would put the earlier, unmixed version in
+    /// the file.
+    func finish(samples: [Int16], sampleRate: Int) throws
+
+    /// Tear down without producing a file. Must be safe to call after a failed `begin`,
+    /// and must leave no capture running — a camera light that stays on after stop is the
+    /// most alarming possible bug in this feature.
+    func cancel()
+
+    /// Bytes on disk so far, or 0 when that is not knowable yet. Drives the live storage
+    /// meter, so it is asked for roughly once a second and must be cheap.
+    var bytesWritten: Int { get }
 }

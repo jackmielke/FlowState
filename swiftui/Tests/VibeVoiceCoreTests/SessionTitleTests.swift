@@ -35,6 +35,33 @@ final class SessionTitleTests: XCTestCase {
         XCTAssertEqual(title, "Tighten up the spacing on that button")
     }
 
+    /// The app has shipped under three names. A transcript recorded under any of them
+    /// still has that name on the front of the first sentence, so all three are stripped
+    /// — otherwise renaming the app would start naming conversations after it.
+    func test_everyNameTheAppHasShippedUnderIsStrippedFromTheTitle() {
+        for greeting in ["hey flowstate", "hey flow state", "hey flow",
+                         "hey vantage", "hey vibe", "flowstate", "vantage"] {
+            let title = SessionTitle.make(
+                entries: [entry("\(greeting), could you tighten up the spacing on that button", at: 100)],
+                startedAt: Date(timeIntervalSince1970: 100),
+                now: Date(timeIntervalSince1970: 200),
+                calendar: calendar, locale: locale)
+            XCTAssertEqual(title, "Tighten up the spacing on that button",
+                           "\(greeting) was not stripped")
+        }
+    }
+
+    /// "flow" on its own is an ordinary English word, and stripping it would turn a real
+    /// topic into a fragment. The bare name is only in the list as "flowstate".
+    func test_theWordFlowOnItsOwnIsNotTreatedAsTheAppsName() {
+        let title = SessionTitle.make(
+            entries: [entry("flow charts render upside down", at: 100)],
+            startedAt: Date(timeIntervalSince1970: 100),
+            now: Date(timeIntervalSince1970: 200),
+            calendar: calendar, locale: locale)
+        XCTAssertEqual(title, "Flow charts render upside down")
+    }
+
     /// The single most common opening in a voice app is a greeting, and naming every
     /// other conversation "Hey" is the failure mode this whole file exists to prevent.
     func test_greetingsAreSkippedForTheFirstRealRequest() {

@@ -1,16 +1,24 @@
 import Foundation
 import AVFoundation
 import Combine
+import VibeVoiceCore
 
 /// Thread-safe scratch shared between the realtime audio threads and the UI.
+///
+/// `muted` lives here rather than beside the `@Published` mirror because the capture tap
+/// has to read it on every buffer, forty times a second, on a real-time thread. Reading
+/// a main-actor property from there is exactly the hazard this box exists to avoid.
 final class LevelBox: @unchecked Sendable {
     private let lock = NSLock()
     private var _mic: Float = 0
     private var _out: Float = 0
+    private var _muted = false
     var mic: Float { get { lock.lock(); defer { lock.unlock() }; return _mic }
                     set { lock.lock(); _mic = newValue; lock.unlock() } }
     var out: Float { get { lock.lock(); defer { lock.unlock() }; return _out }
                      set { lock.lock(); _out = newValue; lock.unlock() } }
+    var muted: Bool { get { lock.lock(); defer { lock.unlock() }; return _muted }
+                      set { lock.lock(); _muted = newValue; lock.unlock() } }
 }
 
 /// Mic capture -> mono PCM16 @ 24 kHz, and PCM16 @ 24 kHz -> speakers.
@@ -31,8 +39,23 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
     /// When false the model hears itself through the speakers — use headphones.
     @Published private(set) var echoCancellation = false
 
-    /// Called on the audio thread with a chunk of mono PCM16 @ 24 kHz.
-    var onMicPCM: ((Data) -> Void)?
+    /// The microphone gate. Main-thread mirror of `levels.muted`, which is the copy the
+    /// capture thread actually reads — see `setMuted`.
+    ///
+    /// Deliberately survives `stop()`: mute is the user's standing instruction about
+    /// their microphone, not a property of the current session, so ending a session and
+    /// starting another one must not quietly reopen it.
+    @Published private(set) var isMuted = false
+
+    /// Called on the audio thread with a chunk of mono PCM16 @ 24 kHz, and whether the
+    /// microphone was muted when it was captured.
+    ///
+    /// While muted the chunk is digital silence of exactly the length the real audio
+    /// would have been, so a consumer using it as a clock keeps a true timeline. The flag
+    /// is passed rather than looked up because `isMuted` is main-actor state and this
+    /// fires on the capture thread; see `MicMute.route` for what each consumer does
+    /// with it.
+    var onMicPCM: ((Data, Bool) -> Void)?
 
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
@@ -64,6 +87,32 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
         case .notDetermined: return await AVCaptureDevice.requestAccess(for: .audio)
         default: return false
         }
+    }
+
+    // MARK: - Mute
+
+    /// Opens or closes the microphone gate.
+    ///
+    /// Safe at any time, running or not — the flag is read per buffer, so a mute taken
+    /// mid-sentence takes effect on the next one (about 20 ms) rather than at the next
+    /// engine restart. Nothing here touches the engine graph: tearing the tap down and
+    /// building it back up on every mute would drop the recorder's clock and re-trigger
+    /// the voice-processing unit's format negotiation, which is the expensive part of
+    /// `start()`.
+    func setMuted(_ on: Bool) {
+        levels.muted = on
+        // Otherwise the last level captured before the gate closed stays on the meter,
+        // and a muted orb sits there frozen mid-glow.
+        if on { levels.mic = 0 }
+        let publish = { [weak self] in
+            guard let self else { return }
+            self.isMuted = on
+            if on {
+                self.micLevel = 0
+                self.micHistory = Array(repeating: 0, count: 48)
+            }
+        }
+        if Thread.isMainThread { publish() } else { DispatchQueue.main.async(execute: publish) }
     }
 
     // MARK: - Lifecycle
@@ -188,7 +237,9 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
     // MARK: - Capture path
 
     private func handleMic(_ buffer: AVAudioPCMBuffer) {
-        levels.mic = Self.rms(buffer)
+        let muted = levels.muted
+        // Dead, not quiet. See `MicMute`.
+        levels.mic = muted ? 0 : Self.rms(buffer)
         guard let conv = converter else { return }
 
         let ratio = Self.targetRate / buffer.format.sampleRate
@@ -208,7 +259,13 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
             return
         }
         let bytes = Int(out.frameLength) * MemoryLayout<Int16>.size
-        onMicPCM?(Data(bytes: ch[0], count: bytes))
+        let chunk = Data(bytes: ch[0], count: bytes)
+        // The conversion above runs even while muted, on purpose. It is the resampler
+        // that decides how many 24 kHz frames a hardware buffer becomes, so running it
+        // either way is what makes a muted second and an unmuted second the same length
+        // on the recorder's timeline. Reconstructing that length by arithmetic instead
+        // rounds every buffer and drifts the file by seconds over a long mute.
+        onMicPCM?(muted ? MicMute.silence(like: chunk) : chunk, muted)
     }
 
     // MARK: - Playback path

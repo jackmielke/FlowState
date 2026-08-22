@@ -473,30 +473,45 @@ private struct SwitchPill: View {
 struct AppearancePicker: View {
     @Binding var mode: AppearanceMode
 
+    @Namespace private var slider
+
     var body: some View {
-        HStack(spacing: 8) {
+        // Same treatment as `SegmentedPicker`, with room kept for the icons: light and
+        // dark are easier to recognise by their sun and moon than by their words. It used
+        // to fill the chosen third with solid amber, which made "what theme is this app
+        // in" the loudest question on the pane instead of one of six on the tab.
+        HStack(spacing: 2) {
             ForEach(AppearanceMode.allCases, id: \.self) { m in
                 let on = m == mode
-                Button {
-                    withAnimation(Theme.ease) { mode = m }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: m.symbol).font(.system(size: 11))
-                        Text(m.label).font(.system(size: 12, weight: .semibold))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 7)
-                    .background(
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .fill(on ? Theme.accent.opacity(0.9) : Theme.fill)
-                            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                .stroke(Theme.hairline, lineWidth: on ? 0 : 1)))
-                    .foregroundStyle(on ? Theme.onAccent : Theme.text)
+                HStack(spacing: 6) {
+                    Image(systemName: m.symbol).font(.system(size: 11))
+                    Text(m.label).font(.system(size: 12, weight: on ? .semibold : .medium))
                 }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(on ? [.isSelected] : [])
+                .foregroundStyle(on ? Theme.text : Theme.textDim)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+                .background {
+                    if on {
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(Theme.panelHi)
+                            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .strokeBorder(Theme.hairline, lineWidth: 1))
+                            .shadow(color: Theme.shadow.opacity(0.5), radius: 1.5, y: 0.5)
+                            .matchedGeometryEffect(id: "appearance", in: slider)
+                    }
+                }
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    guard !on else { return }
+                    withAnimation(.spring(response: 0.26, dampingFraction: 0.9)) { mode = m }
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(m.label)
+                .accessibilityAddTraits(on ? [.isButton, .isSelected] : .isButton)
             }
         }
+        .padding(2)
+        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Theme.track))
     }
 }
 
@@ -527,12 +542,12 @@ struct SecureTokenField: View {
                 }
             }
             HStack(spacing: 8) {
-                SecureField(placeholder, text: $entry)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(Theme.text)
-                    .padding(9)
-                    .surface(10)
+                QuietField {
+                    SecureField(placeholder, text: $entry)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(Theme.text)
+                }
                 Button("Save") {
                     onSave(entry)
                     entry = ""
@@ -587,5 +602,135 @@ struct DevOfferCard: View {
         .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
             .stroke(Theme.accent.opacity(0.35), lineWidth: 1))
         .transition(.opacity.combined(with: .move(edge: .bottom)))
+    }
+}
+
+// MARK: - Segmented control
+
+/// A macOS segmented control, drawn by hand like everything else here.
+///
+/// This replaces four near-identical rows of accent-filled buttons — daylight, widget
+/// style, summon shortcut, cost mode — that each announced their selection with a block
+/// of saturated colour. Four of those in one pane is four things shouting, and none of
+/// them is the thing you came to change. A real segmented control says the same thing
+/// with a raised tile in a recessed track, which is what macOS has used for this exact
+/// job for twenty years.
+///
+/// The selected tile slides between segments rather than cross-fading, which is the
+/// difference between "one control with a position" and "several buttons taking turns".
+struct SegmentedPicker<Value: Hashable>: View {
+    let options: [(value: Value, label: String)]
+    @Binding var selection: Value
+    /// Prefixes the VoiceOver label of each segment — "Daylight: Dusk".
+    var accessibilityPrefix: String = ""
+    var font: Font = .system(size: 11.5, weight: .medium)
+
+    @Namespace private var slider
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(options.indices, id: \.self) { i in
+                let opt = options[i]
+                let on = opt.value == selection
+                Text(opt.label)
+                    .font(font)
+                    .fontWeight(on ? .semibold : .medium)
+                    .foregroundStyle(on ? Theme.text : Theme.textDim)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 5)
+                    .background {
+                        if on {
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Theme.panelHi)
+                                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .strokeBorder(Theme.hairline, lineWidth: 1))
+                                .shadow(color: Theme.shadow.opacity(0.5), radius: 1.5, y: 0.5)
+                                .matchedGeometryEffect(id: "segment", in: slider)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        guard !on else { return }
+                        withAnimation(.spring(response: 0.26, dampingFraction: 0.9)) {
+                            selection = opt.value
+                        }
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(accessibilityPrefix.isEmpty
+                                        ? opt.label : "\(accessibilityPrefix): \(opt.label)")
+                    .accessibilityAddTraits(on ? [.isButton, .isSelected] : .isButton)
+            }
+        }
+        .padding(2)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.track))
+        .accessibilityElement(children: .contain)
+    }
+}
+
+// MARK: - Picture swatches
+
+/// The frame around a backdrop or motion swatch, and the only thing that says which one
+/// is chosen.
+///
+/// Selection used to be a two-point accent stroke, which at swatch size is a coloured
+/// perimeter around every tile you have ever picked and the loudest thing in the pane.
+/// This is the System Settings treatment instead: the tile keeps its hairline, and the
+/// chosen one gets a ring set *outside* the artwork plus a filled checkmark. The ring
+/// never crops the picture, and the checkmark survives being looked at in greyscale —
+/// which a colour-only cue does not.
+struct SwatchFrame<Content: View>: View {
+    var selected: Bool
+    var radius: CGFloat = 8
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        content()
+            .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .strokeBorder(Theme.hairline, lineWidth: 1))
+            .padding(2.5)
+            .overlay {
+                RoundedRectangle(cornerRadius: radius + 2.5, style: .continuous)
+                    .strokeBorder(Theme.accent, lineWidth: 2)
+                    .opacity(selected ? 1 : 0)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 13))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(Theme.onAccent, Theme.accent)
+                    .padding(4)
+                    .opacity(selected ? 1 : 0)
+                    .scaleEffect(selected ? 1 : 0.6)
+            }
+            .animation(.spring(response: 0.24, dampingFraction: 0.8), value: selected)
+    }
+}
+
+// MARK: - Text input
+
+/// A text field or editor in the app's own chrome, with the system focus ring off.
+///
+/// AppKit's focus ring is a saturated blue rectangle drawn *outside* the control, and in
+/// a pane this size it is the loudest thing on screen the moment you click into the
+/// personality prompt — a blue perimeter around a warm amber app. Focus still has to be
+/// visible, though, so the field's own hairline warms to the accent instead: same
+/// information, inside the shape it belongs to, in the app's colour.
+struct QuietField<Content: View>: View {
+    var radius: CGFloat = 10
+    @ViewBuilder var content: () -> Content
+
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        content()
+            .focused($focused)
+            .focusEffectDisabled()
+            .padding(9)
+            .background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(Theme.panel))
+            .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .strokeBorder(focused ? Theme.accent.opacity(0.55) : Theme.hairline, lineWidth: 1))
+            .animation(.easeOut(duration: 0.14), value: focused)
     }
 }

@@ -20,6 +20,34 @@ cp Resources/Info.plist "$APP/Contents/Info.plist"
 [ -f Resources/AppIcon.icns ] && cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
+# Compile the moving backdrops into Contents/Resources/default.metallib.
+#
+# SwiftPM does not build .metal files for an executable target, and SwiftUI's
+# `ShaderLibrary.default` looks for exactly one path — a `default.metallib` in the main
+# bundle — so it is compiled here by hand. The Metal compiler ships with Xcode's Metal
+# Toolchain component, not with the Command Line Tools, so a Mac without it must still
+# produce a working app: the step is skipped with a warning and MotionLibrary falls back
+# to the drawn Canvas version at runtime. Do not make this fatal.
+if xcrun -sdk macosx metal -v >/dev/null 2>&1; then
+  echo "==> compiling shaders -> default.metallib"
+  AIR="$(mktemp -d)/Motion.air"
+  xcrun -sdk macosx metal -O -c Resources/Shaders/Motion.metal -o "$AIR"
+  xcrun -sdk macosx metallib "$AIR" -o "$APP/Contents/Resources/default.metallib"
+  rm -rf "$(dirname "$AIR")"
+else
+  echo "==> NO Metal compiler — moving backdrops will use the drawn fallback"
+  echo "    install it with: xcodebuild -downloadComponent MetalToolchain"
+fi
+
+# Video loops for the moving backdrops, if this build ships any. None do today — the
+# bundle is two megabytes and video is not — but a build that drops files in here gets
+# them found without a code change. User-installed loops live outside the bundle, under
+# Application Support, and are preferred over these.
+if [ -d Resources/Motion ]; then
+  echo "==> bundling motion loops"
+  cp -R Resources/Motion "$APP/Contents/Resources/Motion"
+fi
+
 # Sign with a STABLE identity so macOS privacy permissions survive a rebuild.
 #
 # Ad-hoc signing (`--sign -`) makes the designated requirement a raw cdhash — the hash

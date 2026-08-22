@@ -85,6 +85,171 @@ PASS  session.updated (session config accepted)
 RESULT: transport OK — no audio devices were opened.
 ```
 
+## Recording a conversation
+
+```bash
+./Scripts/verify-recorder.sh
+```
+
+`SessionRecorder` tees the two PCM streams the app already carries — your microphone on
+its way out, the model's voice on its way in — and mixes them into one 16-bit WAV under
+`~/Library/Application Support/VibeVoice/Recordings`. No extra permission, no second
+capture, no re-encoding. The mic is the clock: its sample count is the timeline, and the
+model's voice is mixed in wherever that timeline stands when it lands.
+
+The recorder lives in the app target, which cannot be unit-tested — it is compiled beside
+AppKit and AVAudioEngine. So the script above compiles `SessionRecorder.swift` on its own
+(it imports nothing but Foundation, AVFoundation, Combine, os and the pure-Foundation
+`VibeVoiceCore`, deliberately) and drives it directly, including from background threads,
+which is where the audio tap runs. Last run:
+
+```
+1. a second of microphone audio comes back as a second of WAV     ok
+1b. the model's voice lands on the mic's timeline                 ok
+1c. a reply still running at the end is not truncated             ok
+2. a recording nothing was ever fed into is reported              ok
+3. a real but tiny recording is 'too short'                       ok
+4. the audio thread can feed it while the main thread stops it    ok
+5. two loud voices at once clip instead of wrapping               ok
+6. a video recording hands the finished mixdown to the writer     ok
+6d. every ending that is not a saved file tears the capture down  ok
+PASS
+```
+
+When one finishes, the app keeps the final output path and shows a result panel rather
+than a line of transcript that names a file and then scrolls away. The card carries a
+QuickLook preview of the file — a placeholder tile with the file named beside it when the
+system cannot make one — its length, size and format, the folder it landed in, and two
+buttons: **Play** and **Open in Finder**. The same card is in Settings › Recordings, where
+it falls back to the newest file on disk so it survives a relaunch.
+
+Every route into Finder goes through `AppState.reveal`, which asks `RecordingLocation`
+(in `VibeVoiceCore`, so it is tested) what to open. This matters because
+`activateFileViewerSelecting` accepts a path to a file that is not there and then does
+nothing at all — a recording moved or thrown away since the panel was drawn used to make
+the button look dead. It now opens the folder instead and says why, on the row or card
+that was actually clicked.
+
+Every way it can fail is a named case rather than a nil — `tooShort`,
+`captureNeverStarted`, `writeFailed` — and each one is reported in the transcript, in
+Settings, and to `os_log` under subsystem `com.jackmielke.vibevoice`, category
+`recorder`:
+
+```bash
+log stream --predicate 'subsystem == "com.jackmielke.vibevoice" AND category == "recorder"'
+```
+
+## Recording the screen and the camera
+
+```bash
+./Scripts/verify-video.sh
+```
+
+The record button captures one of four things, chosen from the menu beside it or in
+**Settings › Data › What to capture**:
+
+| Mode | What lands on disk | Needs |
+|---|---|---|
+| **Audio** | One 24 kHz WAV, both halves of the conversation | Microphone |
+| **Screen** | A QuickTime movie of the chosen display, with that same audio on it | + Screen Recording |
+| **Camera** | The same, from the face camera | + Camera |
+| **Both** | The screen with the camera composited into the bottom-right corner | + both |
+
+**Audio-only is unchanged and is still the default.** Same folder, same `.wav`, same
+name, same mixdown, same code path — the video writer is not in it. That is the point of
+`RecordingVideoTrack`: `SessionRecorder` owns the timeline, the mixdown and every outcome
+the user is told about, and knows nothing about ScreenCaptureKit or AVAssetWriter, which
+live behind that protocol in `VideoCapture.swift`.
+
+### One file, one mixdown
+
+The movie's audio track is the *same* mixdown the WAV would have held — the mic and the
+model's voice, teed from the streams the app already carries. Nothing is captured twice
+and no second microphone is opened.
+
+It is handed over whole, at the end, rather than streamed in as it arrives. That is not
+laziness: the model's voice is mixed into the timeline retroactively, so a sample that has
+already been written can still change until the recording stops. Streaming it would put
+the earlier, unmixed version in the file. `verify-recorder.sh` §6 pins this down.
+
+### Size, and being told about it
+
+Video is between four and thirty times the size of audio, and the failure mode of a screen
+recorder is not a bad file — it is a full startup disk two hours into a session. So the
+rate is stated before the button is pressed, in the units Finder uses, and again while
+recording once it stops being trivial.
+
+| Profile | Screen | Rate | An hour |
+|---|---|---|---|
+| **Small** | 1280 px @ 10 fps, HEVC | ≈5 MB/min | ≈0.3 GB |
+| **Balanced** *(default)* | 1920 px @ 24 fps, HEVC | ≈27 MB/min | ≈1.6 GB |
+| **Light** | 1600 px @ 24 fps, H.264 | ≈29 MB/min | ≈1.7 GB |
+
+Light is the *biggest* of the three on purpose: H.264 costs the encoder the least and
+plays everywhere, and it pays for that in bytes. Small is the one to reach for on a laptop
+that is nearly full — a fifth of the size, and perfectly legible for anything that is
+mostly text.
+
+Warnings, all in `CaptureStorage` and all unit-tested:
+
+- **Under 2 GB free** — critical, whatever the mode. macOS itself starts failing there.
+- **Room for under 15 minutes** — critical before starting; **under 4 hours** — caution.
+- **An hour over 1.7 GB** — caution even on a terabyte, because "you will not run out of
+  space" and "this file will be enormous" are different facts. The default deliberately
+  does not trip it: a warning the default trips is a warning people scroll past.
+- **Under 5 minutes of headroom mid-recording** — critical; **under 2 hours** — caution.
+  While a movie is being written the meter reads the real file size off disk, not the
+  estimate, and re-checks free space every ten seconds.
+
+Estimates are always marked as estimates (`≈`). The encoders are variable-bitrate, and
+idle frames — ones where nothing on screen changed — are never encoded at all, so a
+recording of someone reading a document comes in far under the number.
+
+### Constraints worth knowing
+
+- **File naming** is one rule, in `VibeVoiceCore/RecordingName.swift`, tested in
+  `RecordingNameTests`: `2026-02-02 02.40 — standup.wav`. Stamp first so the folder sorts
+  chronologically; `/` and `:` become `-`; newlines and control characters become spaces;
+  a leading `.` is dropped so the file is not invisible; 40 characters *and* 180 bytes of
+  title, because APFS counts bytes and emoji are seven of them each.
+- **Codec** follows the profile: HEVC except on Light. Both are hardware-encoded on Apple
+  Silicon.
+- **Dimensions are always even.** H.264 and HEVC encode chroma at half resolution per
+  axis, so an odd width is rejected or silently padded — and the padding is a green stripe
+  down one side of every frame.
+- **Sources are never upscaled.** A 720p camera blown up to 1920 is the same picture at
+  four times the bit rate.
+- **`.full` composites** with Core Image into the writer's own pixel buffer pool; the
+  other two modes never touch Core Image at all — ScreenCaptureKit and AVFoundation are
+  asked for frames at exactly the size the plan wants.
+- **Permissions are asked for when the mode is picked**, not when record is pressed. A
+  camera prompt that appears three seconds into a recording is a prompt you dismiss, and
+  then the recording has no camera in it.
+- **A capture that dies mid-recording** — display unplugged, permission pulled — stops the
+  recording and says why, keeping what was captured. Every ending that is not a saved file
+  tears the capture down and deletes the partial movie: a camera light left on after stop
+  is the worst possible bug in this feature.
+
+### What the script proves, and what it cannot
+
+A bare binary gets no Screen Recording grant from TCC, so the *capture* half cannot be
+tested outside a real session. Everything between a frame arriving and the file being
+playable can be, and is: `verify-video.sh` pushes synthetic frames through
+`VideoTrackWriter`, then reads the result back with AVFoundation.
+
+```
+1. 1280 × 720 · 24 fps · HEVC at 1548 kbps                        ok
+2. one video track, one audio track, right size, even dimensions  ok
+3. the size estimate is in the right neighbourhood                ok
+3b. a composited frame goes through Core Image and into the file  ok
+4. a cancelled recording leaves no file behind                    ok
+PASS
+```
+
+Not covered by it: that ScreenCaptureKit hands over frames, that the camera opens, and
+what a long recording does to a warm laptop. Those need a real Mac, real permissions and a
+real session.
+
 ## Architecture
 
 | Concern | Implementation |
@@ -98,6 +263,7 @@ RESULT: transport OK — no audio devices were opened.
 | Screen | ScreenCaptureKit — `SCShareableContent` + `SCContentFilter` + `SCScreenshotManager.captureImage`, downscaled to 1280px wide, JPEG q0.7, sent as a `data:` URI per contract §3. One display at a time — see below |
 | Hotkey | Carbon `RegisterEventHotKey` for ⌘⇧2 (no Accessibility permission needed) |
 | Settings | JSON at `~/Library/Application Support/VibeVoice/settings.json` |
+| Settings pane | A floating, draggable pane with six tabs that sizes itself to whichever is open (`FloatingPanel.swift`; geometry in `PanelLayout`, `VibeVoiceCore`) |
 | Theme | One `Theme` token = one dynamic `NSColor`, resolved per effective appearance (`Theme.swift`) |
 | Window | `.titled` + `fullSizeContentView` + transparent titlebar + `NSVisualEffectView`. `.titled` is kept deliberately — dropping it is what loses the system corner rounding. |
 
@@ -171,6 +337,13 @@ cases are deterministic. `swift test`.
 - ScreenCaptureKit capture: 1280×831 JPEG, ~126 KB, accepted by the model as an
   `input_image` conversation item.
 - Window corners: verified rounded on all four via the captured alpha channel.
+- Conversation recording: both halves mixed to one WAV, on the mic's timeline, from the
+  real-time audio thread without a data race (`Scripts/verify-recorder.sh`).
+- Video recording, up to the point where a real capture starts: a playable `.mov` with a
+  video track at the planned size and the whole mixdown as its audio track, plus the
+  composited picture-in-picture path (`Scripts/verify-video.sh`).
+- The recording result panel: metadata, spoken labels and where "Open in Finder" lands
+  when the file has been moved or deleted (`RecordingFileTests`, 17 cases).
 
 ## Which screen it sees
 
@@ -213,7 +386,7 @@ Three choices: **System** (the default), **Light**, **Dark**. Pick one from any 
 
 - the sun/moon button in the header — one click steps System → Light → Dark, and the
   icon is always the mode you are currently in;
-- **Settings → Appearance**, which shows all three at once;
+- **Settings → Look → Appearance**, which shows all three at once;
 - the **View** menu — ⌥⌘1 System, ⌥⌘2 Light, ⌥⌘3 Dark.
 
 All three write the same field, so they stay in sync. The choice is saved to
@@ -238,9 +411,170 @@ consequences worth knowing:
   so light mode draws the same shapes subtractively (`.multiply`) with a normal-blended
   white core as the highlight. Compare `VoiceOrb.draw(…, light:)`.
 
+## The Settings pane
+
+Settings is a **floating pane inside the window**, not a sheet. Half of what it changes —
+backdrop, appearance, the orb, the transcript — can only be judged while you can still see
+it, so the app stays visible and live underneath, and the pane can be dragged out of the
+way of whatever you are looking at. Drag it by the title bar, double-click that bar to put
+it back, or focus it and use the arrow keys.
+
+Six tabs, in the order the questions arrive:
+
+| Tab | What is in it |
+|---|---|
+| **General** | Personality prompt, voice, model, speaking speed, turn detection, cost mode |
+| **Look** | Appearance, backdrops, moving backgrounds, the floating widget |
+| **Screen** | Continuous screen mode, permission, which display |
+| **Access** | Menu bar, summon shortcut, native tools, Notion |
+| **Dev** | Dev Mode — the one tab where a switch can change files on this Mac |
+| **Data** | Recordings, conversations, retention, summaries |
+
+**The pane resizes to the tab.** Each tab measures itself and reports its height up
+(`PanelContentHeight`), and the pane springs to it, capped at 620 points and at whatever
+the window can spare. Screen is a short pane; Data is a tall one with a scroll. Nothing in
+that path is a constant: the title bar, the tab strip and the page each measure themselves
+and the heights are summed, because a constant standing in for one of them is wrong the
+first time a font or a padding changes.
+
+Three things that were specifically wrong before, and what they were:
+
+- **Dragging ran at half speed and jittered.** The drag gesture was measured in the pane's
+  *own* coordinate space, which travels with the pane — so every point it moved cancelled a
+  point of translation. It is measured in global space now, which does not move.
+- **Every pixel of a drag re-ran the whole settings body** and wrote the new position to
+  `UserDefaults`. The live drag is a local offset on the view; the controller and the disk
+  hear about it once, on release.
+- **A blue perimeter.** AppKit's focus ring is drawn outside the control and is the
+  loudest thing in the pane the moment you click into a text field. Focus is shown in the
+  app's own colour instead — a warmed hairline on fields, a two-point bar under the title —
+  and selection in the swatch grids is a ring plus a checkmark rather than a heavy stroke.
+
+The geometry — sizing, clamping, dragging, and deciding whether a new measurement is worth
+animating to — is `PanelLayout` in `VibeVoiceCore`, with tests. The view layer owns none of
+those decisions.
+
+### Looking at it without a screenshot
+
+`Scripts/snapshot-ui.sh [outdir]` renders every tab in both appearances, the moving-backdrop
+picker for each of the six styles, and a contact sheet of all six, straight to PNG:
+
+```
+swiftui/Scripts/snapshot-ui.sh /tmp/flowstate-ui
+```
+
+No window has to be visible, the display can be asleep, and nothing needs a Screen
+Recording grant — the app renders the views with `ImageRenderer`, writes the files and
+quits. It is the only way to check this pane's layout on a machine you are not sitting at,
+and the fastest way to see that a shader has come out as a flat gradient.
+
+Two known blanks: `TextEditor` and `SecureField` are AppKit-backed and render as a yellow
+placeholder rather than as themselves. Everything around them is real.
+
+## Moving backdrops
+
+**Settings → Look → Backdrop → Motion**, then pick one of six: **Ocean**, **Clouds**, **Aurora**,
+**Fluid**, **Silk**, **Nebula**. Every tile in the picker is the real thing running at
+preview size, because these six differ almost entirely in *how they move* — a still grid
+of them would be six coloured rectangles and a guess.
+
+Picking Motion opens a **Moving background** section under the backdrop grid: the chosen
+style running at full width above the six thumbnails, so it can be judged at something
+like the size it will actually be seen at without closing Settings.
+
+The **Motion** slider under the grid is amplitude and contrast. It deliberately does not
+touch speed: a backdrop that speeds up is a backdrop you start watching instead of the
+person you are talking to.
+
+These are darker and flatter than they could be, on purpose. A transcript in 11-point grey
+has to stay readable on top of whatever this draws, so each style keeps its bright end
+away from the top and bottom of the window where the header, the buttons and the sidebar
+live. Ambient mode (fade the chrome after 45 seconds of quiet) works with these as well as
+with the painted places, and is the best thing to pair them with.
+
+### Three renderers, in this order
+
+| | When | Cost |
+|---|---|---|
+| **A video loop** | `Motion/<style>.mp4` exists and the switch is on | Cheapest — the media engine decodes it |
+| **A Metal shader** | Normal case. `Contents/Resources/default.metallib` is in the bundle | ~1% CPU over an idle window |
+| **Drawn in `Canvas`** | No metallib — a bare SPM binary, or a build made without the Metal toolchain | A little less than the painted places |
+
+The third one exists because `ShaderLibrary.default` does not fail politely: it resolves
+lazily and dies at draw time if the library or the function is not there, and there are
+two ordinary ways to be in that position. So the app checks for the metallib rather than
+assuming it, and falls back to a simpler drawing of the same idea — not a degraded shader.
+`swift run` gets you this path; `./build.sh` gets you the shader.
+
+Which one you are on is stated in Settings, under the buttons.
+
+### Using your own video loop
+
+**Settings → Look → Moving background → Use a video loop…** takes a `.mov`, `.mp4` or `.m4v` and
+copies it in as the chosen style's backdrop. Copied, not referenced — a backdrop that
+points into `~/Downloads` is a backdrop that disappears the week you tidy up.
+
+They live in `~/Library/Application Support/VibeVoice/Motion/`, named after the style, so
+you can also just drop files there:
+
+```
+Motion/ocean.mp4      Motion/aurora.mov     Motion/nebula.m4v
+```
+
+Seamless loops look best; the file is played muted and on repeat, and it is explicitly
+stopped from keeping your display awake. The toggle beside the button goes back to the
+shader without deleting anything.
+
+Nothing ships with the app — the bundle is about two megabytes and video is not. Free,
+properly licensed loops are easy to find: [Pexels](https://www.pexels.com/videos/),
+[Coverr](https://coverr.co) and [Mixkit](https://mixkit.co/free-stock-video/) all publish
+under licences that allow this use. Check the licence on the individual clip.
+
+### Performance
+
+Measured on this Mac, average CPU over 8 seconds with the window frontmost and idle:
+
+| Backdrop | CPU |
+|---|---|
+| Midnight (flat) | 13.3% |
+| Motion — video loop | 9.4% |
+| Motion — shader | 14.2% |
+| Bali (painted place) | 16.4% |
+
+Most of that is the orb, which redraws at 60fps regardless. The shader costs about a
+point over a flat background and less than the existing painted scenes.
+
+Three things keep it that way, all in `MotionBudget`:
+
+- **Nothing animates behind another window.** `NSApplication.didChangeOcclusionStateNotification`
+  says when the app is covered, minimised or on another Space, and the frame budget goes
+  to zero — the single most important number here, and the one nobody would ever see
+  going wrong.
+- **The budget is per renderer**: 30fps for a shader, 20 for the drawn fallback, half of
+  each for the preview tiles, and none at all for a video loop, which has its own clock.
+- **Reduce Motion means a still picture**, not a slower one. Every style is composed to
+  look like something mid-flow, so the frozen frame is a real frame.
+
+### Adding a style
+
+1. A case in `MotionStyle` (`Sources/VibeVoiceCore/MotionBackdrop.swift`) with a label,
+   a blurb, four palette stops and a speed.
+2. A `[[stitchable]]` function in `Resources/Shaders/Motion.metal` named `motion_<case>`.
+   That name is the entire contract between the two files and nothing checks it at compile
+   time, in either language — `MotionBackdropTests` at least checks it is unique and
+   prefixed.
+3. A `PaintedForm` for it, if none of `swell` / `drift` / `ribbons` fits.
+
+`build.sh` compiles the shaders. If your Mac says `missing Metal Toolchain`, that is a
+separate Xcode component and the build says so rather than failing:
+
+```
+xcodebuild -downloadComponent MetalToolchain
+```
+
 ## Dev Mode — talk to your code
 
-Settings → **Dev Mode**, plus a repo path. When on, the model gets one tool,
+Settings → **Dev**, plus a repo path. When on, the model gets one tool,
 `dispatch_to_claude_code`, and can change code while you talk to it.
 
 How a turn actually runs:
@@ -284,6 +618,16 @@ resuming the same session id would race.
 - Voice, system prompt, speed, VAD threshold and silence duration are sent in
   `session.update` and the server accepts the payload; individual parameters were not
   A/B'd for audible effect.
+- **The video capture path has not been exercised against a live session.** The muxer,
+  the encoder settings, the audio track and the composite are verified by
+  `Scripts/verify-video.sh` with synthetic frames — but ScreenCaptureKit actually
+  delivering frames, the camera actually opening, and what an hour of HEVC does to a warm
+  laptop all need a real Mac with real permissions and a real conversation. In particular:
+  Continuity Camera warm-up, a display unplugged mid-recording, and the composited mode's
+  CPU cost on Intel are coded and logged but unobserved.
+- The camera permission prompt has not been seen first-hand. `.denied` and `.restricted`
+  render their own lines in Settings but were not reproduced against a real refusal
+  (`tccutil reset Camera com.jackmielke.vibevoice`).
 - No unit tests.
 - `swiftLanguageMode(.v5)` in `Package.swift` — Swift 6 strict-concurrency was not fought
   through for the audio callback paths, which use explicit `NSLock` instead.

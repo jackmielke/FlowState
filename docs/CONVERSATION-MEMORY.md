@@ -139,7 +139,7 @@ conversation also carries a title. `SessionTitle` generates one from three sourc
 descending order of how much they actually say:
 
 1. **What the user asked for.** The first substantive user line, with the throat-clearing
-   taken off the front — "hey vantage, could you tighten up the spacing on that button"
+   taken off the front — "hey FlowState, could you tighten up the spacing on that button"
    becomes *Tighten up the spacing on that button*. Not simply the first line: openings
    are "hey" and "you there?" far more often than they are the question, and a sidebar
    full of conversations called "Hey" is a sidebar nobody reads twice.

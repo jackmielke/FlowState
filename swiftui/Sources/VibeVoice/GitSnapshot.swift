@@ -6,7 +6,7 @@ import Foundation
 /// only acceptable if backing out is one sentence rather than git archaeology.
 ///
 /// The snapshot is a real commit object, but it is NOT on any branch: it is written with
-/// `commit-tree` and parked under `refs/vibevoice/<task>`. So history stays clean, no
+/// `commit-tree` and parked under `refs/flowstate/<task>`. So history stays clean, no
 /// branch is created, nothing is checked out, and the working tree is untouched at the
 /// moment it is taken — while the full contents of every tracked file are recoverable.
 enum GitSnapshot {
@@ -15,6 +15,18 @@ enum GitSnapshot {
         var ref: String
         var sha: String
     }
+
+    /// Where a task's restore point lives. One function rather than a string repeated at
+    /// five call sites: the app has been renamed twice, and the last rename reached
+    /// `take`/`restore` but not `GitCommitter`, which then looked for the snapshot under
+    /// the old `refs/vantage/…` namespace and reported "no restore point to diff
+    /// against" for every single auto-commit. A ref name is an interface between two
+    /// files, so it gets defined in exactly one of them.
+    static func snapshotRef(_ taskID: String) -> String { "refs/flowstate/\(taskID)" }
+
+    /// Namespaces used by earlier builds, cleaned up alongside the current one so an
+    /// upgrade does not leave dangling refs in the user's repo forever.
+    static let legacyNamespaces = ["refs/vibevoice", "refs/vantage"]
 
     static func isRepo(_ repo: String) -> Bool {
         !run(repo, ["rev-parse", "--is-inside-work-tree"]).out.isEmpty
@@ -32,13 +44,13 @@ enum GitSnapshot {
         guard !tree.isEmpty else { _ = run(repo, ["reset"]); return nil }
 
         let head = run(repo, ["rev-parse", "HEAD"]).out
-        var args = ["commit-tree", tree, "-m", "vibe-voice snapshot before \(taskID)"]
+        var args = ["commit-tree", tree, "-m", "FlowState snapshot before \(taskID)"]
         if !head.isEmpty { args += ["-p", head] }
         let snap = run(repo, args).out
         _ = run(repo, ["reset"])          // leave the index as we found it
 
         guard !snap.isEmpty else { return nil }
-        let ref = "refs/vibevoice/\(taskID)"
+        let ref = snapshotRef(taskID)
         _ = run(repo, ["update-ref", ref, snap])
         return Info(ref: ref, sha: String(snap.prefix(8)))
     }
@@ -47,7 +59,7 @@ enum GitSnapshot {
     /// removed — deleting files that were never there before is a bigger promise than
     /// this should make silently, and the report says so.
     static func restore(repo: String, taskID: String) -> String {
-        let ref = "refs/vibevoice/\(taskID)"
+        let ref = snapshotRef(taskID)
         guard isRepo(repo) else { return "\(repo) isn't a git repo, so there's nothing to undo." }
         guard !run(repo, ["rev-parse", "--verify", ref]).out.isEmpty else {
             return "No restore point for \(taskID)."
@@ -70,7 +82,12 @@ enum GitSnapshot {
     }
 
     static func discard(repo: String, taskID: String) {
-        _ = run(repo, ["update-ref", "-d", "refs/vibevoice/\(taskID)"])
+        _ = run(repo, ["update-ref", "-d", snapshotRef(taskID)])
+        // A repo used by an older build still has the task's snapshot filed under the
+        // old name. Deleting a ref that was never created is a no-op, so this is free.
+        for ns in legacyNamespaces {
+            _ = run(repo, ["update-ref", "-d", "\(ns)/\(taskID)"])
+        }
     }
 
     // MARK: -
@@ -119,8 +136,8 @@ enum GitCommitter {
     ///
     /// It commits on the CURRENT branch rather than checking out a new one, because the
     /// point is that the work is immediately visible and buildable by whoever is in the
-    /// repo. A named `refs/vantage/<task>` is written at the same commit, so each task
-    /// still has its own handle to review or revert.
+    /// repo. A named `flowstate/<task>-<label>` branch is written at the same commit, so
+    /// each task still has its own handle to review or revert.
     static func commitTaskChanges(repo: String,
                                   taskID: String,
                                   label: String,
@@ -130,7 +147,7 @@ enum GitCommitter {
             return Outcome(committed: false, sha: nil, files: 0, branchRef: nil,
                            pushed: false, note: "not a git repo")
         }
-        let snapRef = "refs/vantage/\(taskID)"
+        let snapRef = GitSnapshot.snapshotRef(taskID)
         guard !run(repo, ["rev-parse", "--verify", snapRef]).out.isEmpty else {
             return Outcome(committed: false, sha: nil, files: 0, branchRef: nil,
                            pushed: false, note: "no restore point to diff against")
@@ -162,7 +179,7 @@ enum GitCommitter {
 
         let sha = run(repo, ["rev-parse", "--short", "HEAD"]).out
         // A handle per task, without moving anyone's working tree.
-        let named = "vantage/\(taskID)-\(slug(label))"
+        let named = "flowstate/\(taskID)-\(slug(label))"
         _ = run(repo, ["update-ref", "refs/heads/\(named)", "HEAD"])
 
         var pushed = false

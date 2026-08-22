@@ -1,18 +1,19 @@
 import SwiftUI
 import AppKit
+import VibeVoiceCore
 
 // MARK: - Position
 
-/// Position and size for a pane that floats *over* the app instead of covering it.
+/// Position for a pane that floats *over* the app instead of covering it.
 ///
 /// A sheet is the wrong shape for Settings here: half of what the settings change —
 /// backdrop, appearance, the orb, the transcript — is only judgeable while you can still
 /// see it. So the pane stays inside the window, the app stays visible and live behind it,
 /// and the user can shove the pane out of the way of whatever they are looking at.
 ///
-/// The rules below are what keeps that from becoming a mess: never bigger than the window
-/// it floats in, never draggable off the edge, and lined up with an edge or the centre
-/// line when it is dropped near one.
+/// The geometry itself lives in `PanelLayout`, where it is tested. What is left here is
+/// the part that is genuinely stateful: where the user put it, and remembering that
+/// between launches.
 @MainActor
 final class FloatingPanelController: ObservableObject {
 
@@ -20,19 +21,11 @@ final class FloatingPanelController: ObservableObject {
     /// `nil` means "never moved" — the default spot is used and keeps being recomputed
     /// as the window resizes, which is what you want until someone expresses an opinion.
     @Published private var custom: CGPoint?
-    @Published private(set) var isDragging = false
 
-    /// The size the pane would like, before the window gets a say.
+    /// The size the pane would like, before the window and the content get a say.
     let ideal: CGSize
 
     private let key: String
-    /// Breathing room kept between the pane and the window edge.
-    private let margin: CGFloat = 14
-    /// How near an edge — or the centre line — counts as meaning to line up with it.
-    /// Top-left the drag started from. A drag has to be measured from where the pane
-    /// *was*, not from wherever the pointer happens to be, or clamping at one edge
-    /// would make the pane jump when the pointer comes back.
-    private var dragAnchor: CGPoint?
 
     init(ideal: CGSize, key: String) {
         self.ideal = ideal
@@ -42,61 +35,49 @@ final class FloatingPanelController: ObservableObject {
 
     // MARK: Geometry
     //
-    // Pure functions of the container size on purpose: `body` needs the frame on every
-    // layout pass, and computing it from published state there would mean mutating state
-    // during a view update.
+    // Pure functions of the container size and the measured content on purpose: `body`
+    // needs the frame on every layout pass, and computing it from published state there
+    // would mean mutating state during a view update.
 
-    func size(in container: CGSize) -> CGSize {
-        CGSize(width:  min(ideal.width,  max(260, container.width  - margin * 2)),
-               height: min(ideal.height, max(220, container.height - margin * 2)))
+    func size(in container: CGSize, contentHeight: CGFloat? = nil) -> CGSize {
+        PanelLayout.size(ideal: ideal, contentHeight: contentHeight, in: container)
     }
 
-    func frame(in container: CGSize) -> CGRect {
-        let s = size(in: container)
-        return CGRect(origin: clamp(custom ?? defaultOrigin(s, in: container), s, in: container),
-                      size: s)
+    func origin(in container: CGSize, contentHeight: CGFloat? = nil) -> CGPoint {
+        let s = size(in: container, contentHeight: contentHeight)
+        return PanelLayout.clamp(custom ?? PanelLayout.defaultOrigin(s, in: container),
+                                 size: s, in: container)
     }
 
-    /// Where an unmoved pane sits: centred across, tucked just under the app's own
-    /// header, which is roughly where a sheet used to drop from.
-    private func defaultOrigin(_ s: CGSize, in container: CGSize) -> CGPoint {
-        CGPoint(x: (container.width - s.width) / 2, y: 64)
+    func frame(in container: CGSize, contentHeight: CGFloat? = nil) -> CGRect {
+        CGRect(origin: origin(in: container, contentHeight: contentHeight),
+               size: size(in: container, contentHeight: contentHeight))
     }
 
-    /// The whole "not off-screen" guarantee, in one place.
-    private func clamp(_ p: CGPoint, _ s: CGSize, in container: CGSize) -> CGPoint {
-        CGPoint(x: min(max(p.x, margin), max(margin, container.width  - s.width  - margin)),
-                y: min(max(p.y, margin), max(margin, container.height - s.height - margin)))
-    }
+    // MARK: Moving
 
-    // MARK: Dragging
-
-    func dragChanged(_ translation: CGSize, in container: CGSize) {
-        let anchor = dragAnchor ?? frame(in: container).origin
-        dragAnchor = anchor
-        isDragging = true
-        custom = clamp(CGPoint(x: anchor.x + translation.width,
-                               y: anchor.y + translation.height),
-                       size(in: container), in: container)
-    }
-
-    func dragEnded(_ translation: CGSize, in container: CGSize) {
-        dragChanged(translation, in: container)
-        dragAnchor = nil
-        isDragging = false
-        // Deliberately no snapping. Edge-and-centre snapping on release is what made
-        // this feel glitchy: you let go and the pane jumps somewhere you did not put it.
-        // A macOS window stays exactly where it is dropped, and that is the whole
-        // expectation being matched here. Clamping still applies, so it cannot be lost
-        // off-screen — that is a safety net, not a magnet.
+    /// Commits a finished drag. The live translation is the view's business — see the
+    /// note on `dragOffset` below — so this is called once, on release, and is the only
+    /// thing that touches `@Published` state or the disk.
+    func commitDrag(from anchor: CGPoint, translation: CGSize,
+                    in container: CGSize, contentHeight: CGFloat? = nil) {
+        custom = PanelLayout.dragged(from: anchor, by: translation,
+                                     size: size(in: container, contentHeight: contentHeight),
+                                     in: container)
+        // Deliberately no snapping. Edge-and-centre snapping on release is what made this
+        // feel glitchy: you let go and the pane jumps somewhere you did not put it. A
+        // macOS window stays exactly where it is dropped. Clamping still applies, so it
+        // cannot be lost off-screen — that is a safety net, not a magnet.
         save()
     }
 
     /// Nudge from the keyboard — the drag handle is focusable, so the pane can be moved
     /// without a mouse at all.
-    func nudge(dx: CGFloat, dy: CGFloat, in container: CGSize) {
-        let o = frame(in: container).origin
-        custom = clamp(CGPoint(x: o.x + dx, y: o.y + dy), size(in: container), in: container)
+    func nudge(dx: CGFloat, dy: CGFloat, in container: CGSize, contentHeight: CGFloat? = nil) {
+        let s = size(in: container, contentHeight: contentHeight)
+        custom = PanelLayout.clamp(CGPoint(x: origin(in: container, contentHeight: contentHeight).x + dx,
+                                           y: origin(in: container, contentHeight: contentHeight).y + dy),
+                                   size: s, in: container)
         save()
     }
 
@@ -105,10 +86,6 @@ final class FloatingPanelController: ObservableObject {
         custom = nil
         UserDefaults.standard.removeObject(forKey: key)
     }
-
-    /// Dropped near an edge or the centre line, the pane lines up with it. Only the axis
-    /// that is actually close is affected, so a pane dropped against the left edge keeps
-    /// whatever height the user chose.
 
     // MARK: Persistence
     //
@@ -128,19 +105,64 @@ final class FloatingPanelController: ObservableObject {
     }
 }
 
+// MARK: - Content height
+
+/// How tall the pane's contents would like it to be.
+///
+/// Reported up rather than asked for down, because the content is inside a scroll view:
+/// the scroll view will accept any height offered, so the only honest source of "what
+/// does this actually need" is the content measuring itself. That measurement does not
+/// depend on the pane's height, which is what keeps this from becoming a feedback loop.
+///
+/// Summed, not maxed, so a pane assembled from stacked pieces — a title bar, a tab strip,
+/// a page — is measured by having each piece report itself. Every constant that used to
+/// stand in for one of those was a guess that went stale the first time a font or a
+/// padding changed, and a stale one leaves the pane a few points short with a scroll bar
+/// it does not need.
+struct PanelContentHeight: PreferenceKey {
+    static let defaultValue: CGFloat? = nil
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
+        guard let next = nextValue() else { return }
+        value = (value ?? 0) + next
+    }
+}
+
+extension View {
+    /// Measures this view and adds its natural height to what the surrounding
+    /// `FloatingPanel` sizes itself to.
+    func measuresPanelContent() -> some View {
+        background(GeometryReader { g in
+            Color.clear.preference(key: PanelContentHeight.self, value: g.size.height)
+        })
+    }
+}
+
 // MARK: - The panel
 
 /// A floating, draggable pane pinned inside the app window.
 ///
 /// Deliberately *not* a `.sheet`: no dimming layer, no blocked window. The app behind
 /// stays visible and stays live. What says "this is the thing you are using right now"
-/// is the pane itself — an accent ring, a real shadow lifting it off the app, and a
-/// title bar you can grab.
+/// is the pane itself — a real shadow lifting it off the app, and a title bar you can
+/// grab.
 struct FloatingPanel<Content: View>: View {
     let title: String
     @Binding var isPresented: Bool
     @StateObject private var panel: FloatingPanelController
     private let content: () -> Content
+
+    /// The last height the content asked for. Nil until it has been measured once, which
+    /// is the one frame the pane stands at its full ideal height.
+    @State private var contentHeight: CGFloat?
+
+    /// Live drag, in points, relative to where the pane was when the drag began.
+    ///
+    /// Local to the view and applied as an offset rather than pushed into the controller
+    /// on every pointer move. Two reasons, both of which were visible before: publishing
+    /// at pointer rate re-ran the whole settings body for every pixel of movement, and
+    /// writing the position to `UserDefaults` mid-drag did disk I/O in the same breath.
+    @State private var dragOffset: CGSize = .zero
+    @State private var dragAnchor: CGPoint?
 
     init(title: String,
          isPresented: Binding<Bool>,
@@ -153,18 +175,34 @@ struct FloatingPanel<Content: View>: View {
         self.content = content
     }
 
-    private static var settle: Animation { .spring(response: 0.30, dampingFraction: 0.82) }
+    private static var settle: Animation { .spring(response: 0.30, dampingFraction: 0.86) }
+    /// Resizing between tabs. Slightly slower and completely un-bouncy: a pane that
+    /// overshoots its new height reads as a wobble, not as polish.
+    private static var resize: Animation { .spring(response: 0.34, dampingFraction: 1.0) }
 
     var body: some View {
         // A GeometryReader with nothing but the pane in it hit-tests only where the pane
         // is, which is what leaves the app behind it clickable.
         GeometryReader { geo in
             if isPresented {
-                let f = panel.frame(in: geo.size)
+                let f = panel.frame(in: geo.size, contentHeight: contentHeight)
                 pane(in: geo.size)
                     .frame(width: f.width, height: f.height)
                     .position(x: f.midX, y: f.midY)
+                    // The drag rides on top of the settled position. Nothing else in the
+                    // layout moves while it changes, so a drag costs one transform.
+                    .offset(dragOffset)
                     .transition(.scale(scale: 0.97, anchor: .top).combined(with: .opacity))
+                    // Height changes are animated; the position changes that follow from
+                    // them (a taller pane pushed up off the bottom edge) come along with
+                    // it, because both are read from the same frame.
+                    .animation(Self.resize, value: contentHeight)
+                    .onPreferenceChange(PanelContentHeight.self) { h in
+                        guard let h,
+                              let settled = PanelLayout.settledHeight(h, current: contentHeight)
+                        else { return }
+                        contentHeight = settled
+                    }
             }
         }
         .animation(.spring(response: 0.34, dampingFraction: 0.86), value: isPresented)
@@ -172,41 +210,45 @@ struct FloatingPanel<Content: View>: View {
 
     private func pane(in container: CGSize) -> some View {
         VStack(spacing: 0) {
-            PanelGrabBar(
-                title: title,
-                isDragging: panel.isDragging,
-                onClose: { close() },
-                onReset: { withAnimation(Self.settle) { panel.resetPosition() } },
-                onNudge: { dx, dy in
-                    withAnimation(.easeOut(duration: 0.12)) {
-                        panel.nudge(dx: dx, dy: dy, in: container)
-                    }
-                })
-                // High priority so the grab bar wins over anything the content puts
-                // under it, but scoped to the bar — the settings body itself is not
-                // draggable, or every slider would move the window instead.
-                .highPriorityGesture(
-                    DragGesture(minimumDistance: 0, coordinateSpace: .local)
-                        .onChanged { panel.dragChanged($0.translation, in: container) }
-                        .onEnded { v in
-                            // Not animated: the pane is already under the cursor, so
-                            // animating "to" that spot only adds visible lag.
-                            panel.dragEnded(v.translation, in: container)
-                        })
+            VStack(spacing: 0) {
+                PanelGrabBar(
+                    title: title,
+                    onClose: { close() },
+                    onReset: { withAnimation(Self.settle) { panel.resetPosition() } },
+                    onNudge: { dx, dy in
+                        withAnimation(.easeOut(duration: 0.12)) {
+                            panel.nudge(dx: dx, dy: dy, in: container, contentHeight: contentHeight)
+                        }
+                    })
+                    // High priority so the grab bar wins over anything the content puts
+                    // under it, but scoped to the bar — the settings body itself is not
+                    // draggable, or every slider would move the window instead.
+                    //
+                    // `.global` is load-bearing. In `.local` the coordinate space travels
+                    // with the pane, so each point of movement cancelled a point of
+                    // translation: the pane crawled at half the pointer's speed and
+                    // jittered whenever the two disagreed. Global space does not move.
+                    .highPriorityGesture(
+                        DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                            .onChanged { v in drag(v.translation, in: container) }
+                            .onEnded { v in endDrag(v.translation, in: container) })
 
-            Divider().overlay(Theme.hairline)
+                Divider().overlay(Theme.hairline)
+            }
+            // The title bar is part of what the pane has to be tall enough for.
+            .measuresPanelContent()
 
             content()
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Theme.panel))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        // A single hairline, the same one used everywhere else in the app. It used to be
+        // an accent ring, which is the "blue perimeter" problem in a warmer colour: a
+        // border that shouts is a border you notice instead of the content.
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Theme.hairline, lineWidth: 1))
-        // Two shadows: one that lifts the pane off the app, one accent-tinted glow that
-        // does the job the dimming layer used to do — it marks the pane as the active
-        // thing without taking the app behind it away.
+                .strokeBorder(Theme.hairline, lineWidth: 1))
         // One steady shadow. It used to grow and gain an accent glow mid-drag, which is
         // motion nobody asked for on top of the motion they did.
         .shadow(color: Theme.shadow, radius: 26, y: 12)
@@ -217,6 +259,35 @@ struct FloatingPanel<Content: View>: View {
         .accessibilityLabel("\(title) panel")
         .accessibilityAddTraits(.isModal)
         .onExitCommand { close() }
+    }
+
+    // MARK: Dragging
+
+    private func drag(_ translation: CGSize, in container: CGSize) {
+        let anchor = dragAnchor ?? panel.origin(in: container, contentHeight: contentHeight)
+        dragAnchor = anchor
+        // Clamped live, so the pane stops dead at the window edge instead of following
+        // the pointer out and snapping back on release.
+        let landed = PanelLayout.dragged(from: anchor, by: translation,
+                                         size: panel.size(in: container, contentHeight: contentHeight),
+                                         in: container)
+        dragOffset = CGSize(width: landed.x - anchor.x, height: landed.y - anchor.y)
+    }
+
+    private func endDrag(_ translation: CGSize, in container: CGSize) {
+        guard let anchor = dragAnchor else { return }
+        // Committed and zeroed in the same update: the settled frame and the offset it
+        // replaces have to change together, or the pane flickers back to where it started
+        // for one frame. No animation — the pane is already under the cursor, and
+        // animating "to" where it already is only adds visible lag.
+        var tx = Transaction()
+        tx.disablesAnimations = true
+        withTransaction(tx) {
+            panel.commitDrag(from: anchor, translation: translation,
+                             in: container, contentHeight: contentHeight)
+            dragOffset = .zero
+            dragAnchor = nil
+        }
     }
 
     private func close() {
@@ -235,7 +306,6 @@ struct FloatingPanel<Content: View>: View {
 /// hover says the same thing without adding furniture.
 private struct PanelGrabBar: View {
     let title: String
-    let isDragging: Bool
     var onClose: () -> Void
     var onReset: () -> Void
     var onNudge: (CGFloat, CGFloat) -> Void
@@ -258,10 +328,17 @@ private struct PanelGrabBar: View {
         .padding(.vertical, 11)
         // The whole bar drags, including the gaps between things.
         .contentShape(Rectangle())
-        .overlay(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .stroke(Theme.accent, lineWidth: focused ? 2 : 0)
-                .padding(1))
+        // Keyboard focus, said quietly: a two-point bar under the title rather than the
+        // system's blue rectangle around it. Still unmistakable when you tab to it, and
+        // it does not put a coloured perimeter on the pane the rest of the time.
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Theme.accent)
+                .frame(height: 2)
+                .opacity(focused ? 0.9 : 0)
+                .padding(.horizontal, 12)
+                .animation(.easeOut(duration: 0.14), value: focused)
+        }
         .onTapGesture(count: 2) { onReset() }
         .onHover { inside in
             guard inside != hovering else { return }
@@ -272,6 +349,7 @@ private struct PanelGrabBar: View {
             if hovering { NSCursor.pop(); hovering = false }
         }
         .focusable()
+        .focusEffectDisabled()
         .focused($focused)
         .onKeyPress(keys: [.leftArrow, .rightArrow, .upArrow, .downArrow]) { press in
             let step: CGFloat = press.modifiers.contains(.shift) ? 40 : 8
@@ -290,7 +368,6 @@ private struct PanelGrabBar: View {
         .accessibilityAddTraits(.isHeader)
         .accessibilityAction(named: "Reset position") { onReset() }
     }
-
 }
 
 // MARK: - AppKit glue

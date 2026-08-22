@@ -31,7 +31,7 @@
 	<key>NSCalendarsUsageDescription</key>
 	<string>FlowState reads your calendar so you can ask what is coming up.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Not used.</string>
+	<string>FlowState can record your face camera alongside a conversation, when you choose a capture mode that includes it. Nothing is captured until you press record.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>

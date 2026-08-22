@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import AppKit
 import Combine
+import os
 import VibeVoiceCore
 
 enum Speaker { case user, assistant, system }
@@ -81,6 +82,13 @@ final class AppState: ObservableObject {
     /// Live macOS Screen Recording state. Refreshed on launch, on app activation,
     /// before every capture, and on demand — never assumed from a past failure.
     @Published var screenPermission: ScreenPermission = .unknown
+    /// The same, for the camera. Separate because the two fail differently: a screen
+    /// grant can be on and still unusable until the app is relaunched, and a camera
+    /// grant cannot.
+    @Published var cameraPermission: CameraPermission = .notAsked
+    /// Every camera that could be recorded. Empty on a Mac with none attached, which is
+    /// an ordinary state for a desktop rather than an error.
+    @Published var cameras: [CameraCapture.Option] = []
     @Published var showSettings = false
     /// First run, or any launch with no usable key — there is nothing to do without one.
     @Published var showWelcome = KeyStore.secret(forKey: "OPENAI_API_KEY") == nil
@@ -156,6 +164,40 @@ final class AppState: ObservableObject {
     /// Records both halves of the conversation. Fed from the same PCM the socket sees.
     let recorder = SessionRecorder()
     @Published var recordings: [SessionRecorder.Recording] = []
+    /// The recording that just finished, until it is dismissed.
+    ///
+    /// A line in the transcript saying "Saved 2026-08-21 22.40 — …wav" was technically a
+    /// full answer and practically useless: it scrolls away, it is not clickable, and it
+    /// names a file in a folder nobody has open. What someone wants the moment a
+    /// recording stops is to hear it or to see it in Finder, so that is what this puts
+    /// on screen.
+    @Published var lastRecording: SessionRecorder.Recording?
+    /// What the last attempt to open or play a recording could not do — almost always a
+    /// file that has been moved or thrown away since the panel naming it was drawn.
+    /// Cleared the moment something works, so it never outlives the problem it describes.
+    @Published private(set) var recordingIssue: RecordingIssue?
+
+    /// A failure, and which file it is about.
+    ///
+    /// The file matters: a card describing this session's recording must not sprout a
+    /// warning because a row three sections down failed to play something recorded last
+    /// week. `path` is nil when the complaint is about the recordings folder as a whole
+    /// and belongs anywhere.
+    struct RecordingIssue: Equatable {
+        let path: String?
+        let message: String
+    }
+
+    /// The warning this particular file should carry, if any.
+    func recordingProblem(for url: URL?) -> String? {
+        guard let issue = recordingIssue else { return nil }
+        guard let path = issue.path else { return issue.message }
+        return path == url?.path ? issue.message : nil
+    }
+
+    private func noteRecordingIssue(_ message: String?, about url: URL?) {
+        recordingIssue = message.map { RecordingIssue(path: url?.path, message: $0) }
+    }
     let settingsStore = SettingsStore()
     /// The durable transcript: what was said, when, in which session, and what the
     /// microphone looked like while it was said. Privacy is applied on the way in.
@@ -220,7 +262,7 @@ final class AppState: ObservableObject {
     }
 
     func applyEffectiveAppearance() {
-        if settings.backdrop.place != nil {
+        if settings.backdrop.isScene {
             AppearanceMode.dark.applyToApp()
         } else {
             settings.appearance.applyToApp()
@@ -281,39 +323,326 @@ final class AppState: ObservableObject {
 
     var isRecording: Bool { recorder.isRecording }
 
+    /// What the recorder last refused or failed to do, for the UI to show next to the
+    /// button. Nil whenever the last transition did what it looked like it did.
+    var recordingError: String? { recorder.lastError }
+
+    private static let recordingLog = Logger(subsystem: "com.jackmielke.vibevoice",
+                                             category: "recording")
+
     /// Start capturing. The mic has to be running for there to be anything to capture,
     /// so this says so rather than producing a file of silence.
+    ///
+    /// - Parameter mode: what to capture, defaulting to whatever Settings says. Passed
+    ///   explicitly by the header menu, which offers all four in one click without
+    ///   changing the stored preference for the next time.
     @discardableResult
-    func startRecording() -> String {
+    func startRecording(mode: CaptureMode? = nil) -> String {
         guard !recorder.isRecording else { return "Already recording." }
+        // The recorder is fed from the capture tap, and the tap only exists while the
+        // engine is running. Turning the button red here would be a lie that only comes
+        // out at stop time, as an empty file.
         guard audio.running else {
-            return "Nothing to record yet — hit Connect first, then record."
+            let why = "Nothing to record yet — hit Connect first, then record."
+            Self.recordingLog.notice("start refused — audio engine not running")
+            note(why)
+            objectWillChange.send()
+            return why
         }
-        _ = recorder.start(title: currentSessionTitle)
-        note("Recording this conversation.")
+
+        let wanted = mode ?? settings.captureMode
+
+        // Permission first, and named. A video recording that starts, runs and produces a
+        // black movie because Screen Recording was off is the worst of both worlds: the
+        // user gets the disk cost of a recording and none of the recording.
+        if let refusal = permissionRefusal(for: wanted) {
+            Self.recordingLog.notice("start refused — \(refusal, privacy: .public)")
+            note(refusal)
+            banner = refusal
+            objectWillChange.send()
+            return refusal
+        }
+
+        let plan = capturePlan(for: wanted)
+        var video: VideoTrackWriter?
+        if wanted.isVideo {
+            let writer = VideoTrackWriter()
+            writer.displayID = resolvedCaptureDisplayID()
+            writer.cameraID = settings.cameraDeviceID
+            // A capture that dies on its own — display unplugged, permission pulled
+            // mid-session — would otherwise be discovered only when the movie turns out
+            // to end early. Stopping here keeps what was captured and says why.
+            writer.onFailure = { [weak self] why in
+                guard let self, self.recorder.isRecording else { return }
+                self.banner = why
+                _ = self.finishRecording(reason: "the capture stopped")
+            }
+            video = writer
+        }
+
+        guard recorder.start(title: currentSessionTitle, plan: plan, video: video) != nil else {
+            let why = recorder.lastError ?? "Couldn't start recording — see Console for the reason."
+            Self.recordingLog.error("start failed — \(why, privacy: .public)")
+            note(why)
+            banner = why
+            objectWillChange.send()
+            return why
+        }
+        // The card is about to be replaced by this take's, so nothing it complained
+        // about is still on screen to be true or false.
+        recordingIssue = nil
+        activePlan = plan
+        activeVideo = video
+        note(wanted == .audioOnly
+             ? "Recording this conversation."
+             : "Recording this conversation — \(wanted.menuLabel.lowercased()), \(plan.summary).")
         objectWillChange.send()
-        return "Recording."
+        return wanted == .audioOnly ? "Recording." : "Recording \(wanted.menuLabel.lowercased())."
     }
+
+    // MARK: - What is being captured
+
+    /// The plan the recording in progress is running under, or the one the next
+    /// recording would use. Read by the header and by Settings for the size estimate.
+    @Published private(set) var activePlan: CapturePlan = CapturePlan.make(mode: .audioOnly, profile: .balanced)
+
+    /// Held only so the live storage meter can ask the file how big it has become.
+    /// Cleared on stop — see `finishRecording`.
+    private var activeVideo: VideoTrackWriter?
+
+    /// Sizes up a mode against the display and camera it would actually use.
+    ///
+    /// Not cached: a laptop that has just been plugged into a 5K monitor has a different
+    /// answer than it did a second ago, and an estimate quoted from a stale display is
+    /// worse than no estimate at all.
+    func capturePlan(for mode: CaptureMode) -> CapturePlan {
+        var screen: (width: Int, height: Int)?
+        if mode.capturesScreen {
+            let id = resolvedCaptureDisplayID()
+            if let match = displays.first(where: { $0.displayID == id }) ?? displays.first {
+                screen = (match.width, match.height)
+            }
+        }
+        var camera: (width: Int, height: Int)?
+        if mode.capturesCamera, let device = CameraCapture.device(id: settings.cameraDeviceID) {
+            camera = CameraCapture.nativeSize(of: device)
+        }
+        return CapturePlan.make(mode: mode, profile: settings.capturePerformance,
+                                screen: screen, camera: camera)
+    }
+
+    /// Which display a recording would capture. The same rule the still-frame path uses:
+    /// the saved one if it is still attached, otherwise whichever display is active.
+    private func resolvedCaptureDisplayID() -> CGDirectDisplayID? {
+        let saved = CGDirectDisplayID(settings.screenDisplayID)
+        if saved != DisplayOption.followsActiveID,
+           displays.contains(where: { $0.displayID == saved }) { return saved }
+        return ScreenCapture.activeDisplayID()
+    }
+
+    /// Why this mode cannot start, or nil when it can.
+    ///
+    /// Only ever *reports*; it never prompts. The prompting happens in `prepareCapture`,
+    /// which the picker calls when the mode is chosen, so the system dialog appears while
+    /// the user is thinking about cameras rather than three seconds into a recording.
+    func permissionRefusal(for mode: CaptureMode) -> String? {
+        if mode.capturesScreen, screenPermission.blocksCapture {
+            return screenPermission.bannerText
+        }
+        if mode.capturesCamera {
+            let camera = CameraCapture.permission()
+            guard camera.canCapture else { return camera.bannerText }
+            guard CameraCapture.device(id: settings.cameraDeviceID) != nil else {
+                return "No camera is connected, so there is nothing to record."
+            }
+        }
+        return nil
+    }
+
+    /// Asks macOS for whatever this mode needs, once, up front.
+    ///
+    /// Called when a mode is picked rather than when recording starts. The difference
+    /// matters: a permission dialog that appears the instant you hit record is a dialog
+    /// you dismiss to get back to recording, and then the recording has no camera in it.
+    func prepareCapture(for mode: CaptureMode) async {
+        if mode.capturesScreen { screenPermission = await ScreenCapture.ensureAccess(reason: "record \(mode.rawValue)") }
+        if mode.capturesCamera { cameraPermission = await CameraCapture.ensureAccess() }
+        cameras = CameraCapture.options()
+        activePlan = capturePlan(for: mode)
+    }
+
+    /// What the disk has to say about the mode that is selected. `.ok` is still shown —
+    /// it is the "≈27 MB a minute" line — it just does not get a warning triangle.
+    var storageAdvice: StorageAdvice {
+        CaptureStorage.advice(for: activePlan, freeBytes: recordingsFreeBytes)
+    }
+
+    /// The same question, mid-recording: how much has been written and how much room is
+    /// left. Falls back to the estimate when the writer cannot say — an audio recording
+    /// has no file on disk until it stops.
+    var liveStorageAdvice: StorageAdvice {
+        let written = activeVideo?.bytesWritten
+            ?? CaptureStorage.bytes(for: activePlan, seconds: recorder.duration)
+        return CaptureStorage.liveAdvice(for: activePlan,
+                                         bytesWritten: written,
+                                         freeBytes: recordingsFreeBytes)
+    }
+
+    /// Free space where recordings land. Read once a refresh rather than per redraw:
+    /// `resourceValues` hits the volume, and SwiftUI evaluates a body far more often than
+    /// a disk fills up.
+    @Published private(set) var recordingsFreeBytes: Int = 0
+
+    func refreshFreeSpace() {
+        lastFreeSpaceCheck = Date()
+        recordingsFreeBytes = CaptureStorage.freeBytes(at: SessionRecorder.directory)
+    }
+
+    private var lastFreeSpaceCheck = Date.distantPast
 
     @discardableResult
     func stopRecording() -> String {
-        guard recorder.isRecording else { return "Not recording." }
-        let seconds = Int(recorder.duration)
-        guard let url = recorder.stop() else {
-            note("Recording stopped — too short to keep.")
-            objectWillChange.send()
-            return "That was too short to save."
-        }
-        refreshRecordings()
-        note("Saved \(url.lastPathComponent) · \(seconds)s")
-        objectWillChange.send()
-        return "Saved \(seconds) seconds as \(url.lastPathComponent)."
+        finishRecording()
     }
 
-    func refreshRecordings() { recordings = SessionRecorder.library() }
+    /// The one place a recording ends, whoever ends it — the button, the voice tool, or
+    /// the session closing underneath it. Every outcome is named in the transcript,
+    /// because "nothing happened" was indistinguishable from "it worked" before.
+    @discardableResult
+    func finishRecording(reason: String? = nil) -> String {
+        let outcome = recorder.stop()
+        // The writer has closed its file by now, so nothing else should be holding it —
+        // and a stale one would keep the storage meter reading a file that is finished.
+        activeVideo = nil
+        refreshFreeSpace()
+        objectWillChange.send()
 
+        let suffix = reason.map { " (\($0))" } ?? ""
+        switch outcome {
+        case .notRecording:
+            return "Not recording."
+
+        case .saved(let url, let seconds):
+            refreshRecordings()
+            // One `stat` rather than waiting for the rescan: the folder scan is async now
+            // (a movie's length has to be read out of the file), and a card that appears
+            // with no size on it and grows one a moment later reads as a glitch.
+            let bytes = (try? FileManager.default.attributesOfItem(atPath: url.path))
+                .flatMap { $0[.size] as? Int } ?? 0
+            lastRecording = SessionRecorder.Recording(url: url, createdAt: Date(),
+                                                      bytes: bytes, seconds: seconds)
+            let label = Self.clock(seconds)
+            note("Saved \(url.lastPathComponent) · \(label)\(suffix)")
+            Self.recordingLog.notice("saved \(url.lastPathComponent, privacy: .public) (\(label, privacy: .public))")
+            return "Saved \(label) as \(url.lastPathComponent)."
+
+        case .tooShort(let seconds):
+            note("Recording stopped after \(Self.clock(seconds)) — too short to keep.\(suffix)")
+            Self.recordingLog.notice("discarded — \(seconds, format: .fixed(precision: 2))s is under the minimum")
+            return "That was too short to save."
+
+        case .captureNeverStarted(let elapsed):
+            // The failure this whole path exists to make visible. Red for 40 seconds and
+            // a zero-length file is a bug report, not a user error, so it says so —
+            // but only once it has actually been red long enough to mean something.
+            guard elapsed >= 1 else {
+                note("Recording stopped before it captured anything.\(suffix)")
+                return "That stopped before it captured anything."
+            }
+            let msg = "Recording captured nothing in \(Self.clock(elapsed)) — no audio reached the recorder."
+            note(msg + suffix)
+            banner = msg + " The microphone tap may not be running; reconnect and try again."
+            Self.recordingLog.error("captured nothing over \(elapsed, format: .fixed(precision: 1))s")
+            return msg
+
+        case .writeFailed(let why):
+            note("Recording failed — \(why)\(suffix)")
+            banner = "Recording failed — \(why)"
+            Self.recordingLog.error("write failed: \(why, privacy: .public)")
+            return "Couldn't save that recording: \(why)"
+        }
+    }
+
+    private static func clock(_ seconds: TimeInterval) -> String {
+        let s = Int(seconds.rounded())
+        return s < 60 ? "\(s)s" : String(format: "%d:%02d", s / 60, s % 60)
+    }
+
+    /// Rescans the folder. Asynchronous because a movie's length has to be read out of
+    /// the file rather than computed from its size — see `SessionRecorder.library` — but
+    /// the callers are all "something changed, go and look again", so none of them wait.
+    func refreshRecordings() {
+        Task { [weak self] in
+            let found = await SessionRecorder.library()
+            self?.recordings = found
+        }
+    }
+
+    /// The button under the list: the recording you most likely mean, which is the one
+    /// that just finished, or failing that the newest on disk. With neither, it still
+    /// opens the folder rather than doing nothing.
     func revealRecordings() {
-        NSWorkspace.shared.activateFileViewerSelecting(recordings.prefix(1).map(\.url))
+        reveal(lastRecording?.url ?? recordings.first?.url)
+    }
+
+    /// Selects one specific file in Finder.
+    ///
+    /// Every route into Finder goes through here — the result panel, a row in the
+    /// Settings list, the button under that list — so all of them behave the same way
+    /// when the file has been moved out from under them. That case is ordinary, not
+    /// exotic: `activateFileViewerSelecting` accepts a path to a file that is not there
+    /// and then does nothing at all, silently, which from the user's side is a dead
+    /// button. `RecordingLocation` decides what to open instead; this only does it.
+    @discardableResult
+    func reveal(_ url: URL?) -> Bool {
+        let fm = FileManager.default
+        let resolved = RecordingLocation.resolve(file: url,
+                                                 folder: SessionRecorder.directoryURL,
+                                                 exists: { fm.fileExists(atPath: $0.path) })
+        noteRecordingIssue(resolved.problem, about: url)
+
+        switch resolved.target {
+        case .selectFile(let file):
+            NSWorkspace.shared.activateFileViewerSelecting([file])
+            return true
+        case .openFolder(let folder):
+            NSWorkspace.shared.open(folder)
+            // Something the list believed in has gone; a rescan costs one directory read.
+            if resolved.problem != nil { refreshRecordings() }
+            return false
+        case .nothing:
+            refreshRecordings()
+            return false
+        }
+    }
+
+    /// Plays one, in whatever the user has set to open a WAV.
+    ///
+    /// It deliberately does not fall through to Finder when the file is missing — a Play
+    /// button that opens a folder instead is a different button — but it diagnoses the
+    /// same way, so the two never disagree about the same absent file.
+    @discardableResult
+    func play(_ url: URL) -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            noteRecordingIssue("\(url.lastPathComponent) has been moved, renamed or "
+                               + "deleted since it was recorded — there is nothing left to play.",
+                               about: url)
+            refreshRecordings()
+            return false
+        }
+        // A WAV opens in QuickTime or Music depending on what the user has set. Either
+        // way it plays, which beats a path they have to go and find.
+        guard NSWorkspace.shared.open(url) else {
+            noteRecordingIssue("Nothing on this Mac would open \(url.lastPathComponent).", about: url)
+            return false
+        }
+        recordingIssue = nil
+        return true
+    }
+
+    func dismissLastRecording() {
+        lastRecording = nil
+        recordingIssue = nil
     }
 
     /// Stops a running task. The subprocess gets SIGTERM; the run then falls out of its
@@ -408,6 +737,24 @@ final class AppState: ObservableObject {
         // Re-publish nested object changes so views refresh.
         audio.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
         settingsStore.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
+        // Without this the recording clock in the header never moved: views observe
+        // `AppState`, and a nested `ObservableObject` publishes to nobody unless its
+        // changes are re-sent from here. The red dot came on, the timer sat at 0:00, and
+        // the app looked like it was capturing nothing even once it was.
+        recorder.objectWillChange.sink { [weak self] _ in
+            guard let self else { return }
+            self.objectWillChange.send()
+            // The recorder's clock ticks four times a second, which makes it the cheapest
+            // place to keep the storage meter honest — but asking the volume how much is
+            // free four times a second would be absurd, so it is throttled to once every
+            // ten. A disk does not fill faster than that, and a stale "room for 3 hours"
+            // during an hour-long recording is exactly the reading that gets someone into
+            // trouble.
+            guard self.recorder.isRecording,
+                  Date().timeIntervalSince(self.lastFreeSpaceCheck) >= 10 else { return }
+            self.lastFreeSpaceCheck = Date()
+            self.refreshFreeSpace()
+        }.store(in: &bag)
 
         client.onEvent = { [weak self] ev in self?.handle(ev) }
 
@@ -422,18 +769,39 @@ final class AppState: ObservableObject {
         responses.log = { [weak self] ev in self?.logResponse(ev) }
         responses.onChange = { [weak self] in self?.syncResponseState() }
 
-        audio.onMicPCM = { [weak self] data in
+        audio.onMicPCM = { [weak self] data, muted in
             guard let self else { return }
+            // Three consumers, one rule. `data` is already silence when `muted` is true —
+            // the engine substitutes it at the source, so nothing downstream can leak the
+            // real audio by forgetting to check the flag. See `MicMute`.
+            let route = MicMute.route(muted: muted, connected: self.client.isConnected)
             // Metering happens whether or not the socket is up: the measurement is of
             // what the user said, and it is not the network's business. The samples are
             // not retained — `UtteranceRecorder` keeps a running total and nothing else.
+            // Muted, there is nothing to measure, and counting the silence would report
+            // a five-minute utterance to a transcript line nobody ever spoke.
             //
             // A second consumer of this stream (an on-device recogniser) would be added
             // right here; see `LocalTranscriber` for what it would need.
-            self.utterance.ingest(pcm16: data)
-            guard self.client.isConnected else { return }
+            if route.toMeasurement { self.utterance.ingest(pcm16: data) }
+            // The recording's other half, and its clock. This tee was missing, which is
+            // why the recorder could go red and still write nothing: the model's voice
+            // was fed in (see `.audio` in `handle`) but the microphone never was, so a
+            // conversation the user did most of the talking in came out as zero seconds
+            // and was then discarded as "too short". It is deliberately outside the
+            // `isConnected` gate below — the recorder decides for itself whether it is
+            // running, and a socket blip must not punch a hole in the timeline. It is
+            // outside the mute gate for the same reason, one step further: muting must
+            // leave a silent stretch in the file, not a splice.
+            if route.toRecorder { self.recorder.appendMic(data) }
+            guard route.toModel else { return }
             self.client.appendAudio(data)
         }
+
+        // The gate the user left closed last time they quit. Applied before anything can
+        // be captured, so a muted launch is muted from the first buffer rather than from
+        // whenever a view happens to read the setting.
+        audio.setMuted(settings.micMuted)
 
         // What the user has agreed to keep. Read once here, and re-applied whenever
         // Settings changes it — see `applyPrivacySettings()`.
@@ -449,6 +817,19 @@ final class AppState: ObservableObject {
             self.isSummarizing = self.summaries.isSummarizing
             self.objectWillChange.send()
         }
+
+        // Quitting mid-recording used to throw the whole thing away: the samples live in
+        // memory until `stop()` writes them, and the process exiting takes them with it.
+        // `willTerminate` is delivered synchronously on the main thread, so there is
+        // still time to turn what was captured into a file.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.recorder.isRecording else { return }
+                    self.finishRecording(reason: "the app quit")
+                }
+            }
 
         // Which conversation we are in, before anything can be recorded into the wrong
         // one. The store already minted a fresh session id in its own init, so the
@@ -477,6 +858,11 @@ final class AppState: ObservableObject {
                 Task { @MainActor in
                     self?.refreshScreenPermission(reason: "app-activated")
                     await self?.refreshDisplays()
+                    // A camera plugged in, a camera unplugged, and — the common one — a
+                    // permission the user has just come back from granting.
+                    self?.cameras = CameraCapture.options()
+                    self?.cameraPermission = CameraCapture.permission()
+                    self?.refreshFreeSpace()
                 }
             }
             .store(in: &bag)
@@ -530,6 +916,14 @@ final class AppState: ObservableObject {
             }
             self.screenPermission = s
             await self.refreshDisplays()
+            // Now that the displays are known, the capture estimate can be a real number
+            // rather than the 16:9 stand-in. Cameras are enumerated here too — the list
+            // costs a device query, not a capture, so it is safe on launch and means the
+            // picker is populated before anyone opens it.
+            self.cameras = CameraCapture.options()
+            self.cameraPermission = CameraCapture.permission()
+            self.refreshFreeSpace()
+            self.activePlan = self.capturePlan(for: self.settings.captureMode)
         }
         note("Ready. Hit Connect and just talk. ⌘⇧2 shows me your screen.")
 
@@ -569,8 +963,63 @@ final class AppState: ObservableObject {
 
         do { try audio.start() }
         catch { connection = .error("Audio: \(error.localizedDescription)"); return }
+        // `start()` builds a new tap; the gate is engine state and survives it, but
+        // re-asserting from the setting here is what keeps the two from ever disagreeing
+        // if one of them is changed from somewhere else.
+        audio.setMuted(settings.micMuted)
 
         client.connect(token: token, model: settings.model)
+    }
+
+    // MARK: - Mute
+
+    /// Whether the microphone is gated shut. The engine owns the flag; this is what the
+    /// views read.
+    var isMicMuted: Bool { audio.isMuted }
+
+    /// Set when a mute lands mid-utterance, so the `speech_stopped` the server sends
+    /// afterwards is understood as cleanup rather than as a turn the user took.
+    private var discardedUtteranceOnMute = false
+
+    func toggleMicMute() { setMicMuted(!audio.isMuted) }
+
+    /// Opens or closes the microphone.
+    ///
+    /// The gate itself is one line — everything else here is about the half-sentence that
+    /// was in flight when the button was pressed. Muting mid-utterance leaves a fragment
+    /// in three places at once: the server's input buffer, the local utterance meter, and
+    /// a pending transcript line on screen. Left alone, the server never hears the
+    /// trailing silence that would close the turn, so the fragment waits and is glued to
+    /// the front of whatever is said after the unmute.
+    func setMicMuted(_ on: Bool) {
+        guard on != audio.isMuted else { return }
+        audio.setMuted(on)
+        // Persisted immediately rather than on quit: the reason to mute is usually that
+        // someone has walked into the room, and that is not a moment to be relying on a
+        // clean shutdown.
+        settings.micMuted = on
+
+        if on, userSpeaking {
+            userSpeaking = false
+            utterance.discard()
+            pendingUtteranceAudio = nil
+            discardedUtteranceOnMute = true
+            if client.isConnected { client.clearInputAudio() }
+            // The coordinator is holding everything back until this turn finishes. It
+            // never will, so end it here or the next queued reply is stuck behind a
+            // sentence that no longer exists.
+            responses.userSpeechStopped()
+        }
+
+        // Filed only when there is something for it to explain. A note on every toggle
+        // would let someone flipping the button turn the transcript into a list of their
+        // own clicks; a silent stretch in a live conversation or in a recording, on the
+        // other hand, looks like a fault until something says otherwise.
+        if connection == .live || recorder.isRecording {
+            note(MicMute.note(muted: on))
+        } else {
+            FileHandle.standardError.write(Data("[app] \(MicMute.note(muted: on))\n".utf8))
+        }
     }
 
     func disconnect() {
@@ -583,9 +1032,15 @@ final class AppState: ObservableObject {
         stopSummaryClock()
         utterance.discard()
         pendingUtteranceAudio = nil
+        discardedUtteranceOnMute = false
         // The conversation is NOT ended here. A session is the app's own idea of a
         // conversation now, not the socket's — closing the socket is putting the phone
         // down, not throwing away what was said.
+        // Close the recording before the tap it feeds on goes away. Leaving it running
+        // is what left the button red with a dead timer after a disconnect: nothing more
+        // could ever arrive, but nothing said so, and the samples already captured were
+        // stranded in memory rather than written to disk.
+        if recorder.isRecording { finishRecording(reason: "the session ended") }
         client.disconnect()
         audio.stop()
         connection = .idle
@@ -714,6 +1169,10 @@ final class AppState: ObservableObject {
 
         case .speechStarted:
             userSpeaking = true
+            // A new utterance supersedes any fragment thrown away by a mute, whether or
+            // not the server ever got round to closing it. Without this the flag could
+            // outlive the event it was set for and swallow the end of a real turn.
+            discardedUtteranceOnMute = false
             utterance.begin()
             // Barge-in. The server already truncates its own response because
             // turn_detection.interrupt_response is true, so sending response.cancel
@@ -729,6 +1188,15 @@ final class AppState: ObservableObject {
 
         case .speechStopped:
             userSpeaking = false
+            // The user muted mid-sentence, so this is the server acknowledging an
+            // utterance that was already thrown away at both ends. Opening a transcript
+            // line for it would leave an empty pending bubble waiting forever on words
+            // that were deliberately never sent.
+            if discardedUtteranceOnMute {
+                discardedUtteranceOnMute = false
+                responses.userSpeechStopped()
+                return
+            }
             // Parked until the transcript for this utterance arrives, which is a
             // separate event and usually about a second later.
             pendingUtteranceAudio = utterance.end()

@@ -25,9 +25,12 @@ you: "the spacing on that button is off, tighten it up"
 | **A queue, not a refusal** | Ask for a second change to the same repo and it waits its turn instead of being turned away — reorder or drop what's queued, and the next one starts on its own |
 | **Conversations that keep** | Every conversation is saved under a name taken from what you actually asked for, and comes back after a restart. New one with ⌘N; switch between them from the top of the transcript |
 | **Recaps** | One button writes a summary of the conversation, keeps it where you can re-read it, and saves it as a markdown note |
+| **Record it** | Both halves of the conversation to one file — and, if you ask, your screen or your face camera with it. It tells you what that costs in disk before you press the button, and warns you before it fills the drive |
 | **Native tools** | Calendar, clipboard, Notion, and any macOS Shortcut you own — answered in milliseconds, not by spinning up an agent |
 | **Live cost meter** | Real token counts from the API, and dollars per minute. Budget mode cuts it to roughly a third |
 | **Painted backdrops** | Six places that change with your local hour, or your own photos |
+| **Moving backdrops** | Ocean, clouds, aurora, fluid, silk, nebula — drawn on the GPU, or your own video loop |
+| **Settings you can see past** | A floating pane, not a sheet: the app stays live behind it, it sizes itself to whichever tab is open, and you can shove it out of the way of what you are judging |
 
 ## Requirements
 
@@ -112,3 +115,5 @@ Three implementations exist because they were built simultaneously to be compare
   of itself, what it refuses to keep, and how it gets summarised.
 - [docs/MARKDOWN-RENDERING.md](docs/MARKDOWN-RENDERING.md) — why `**done**` used to render
   as five literal asterisks.
+- [docs/RELEASE-NOTES.md](docs/RELEASE-NOTES.md) — what changed, and what each change does
+  not do yet.

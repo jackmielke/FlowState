@@ -23,7 +23,7 @@ struct WelcomeView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("VANTAGE")
+                Text("FLOW")
                     .font(.system(size: 12, weight: .bold, design: .rounded)).tracking(2.4)
                     .foregroundStyle(Theme.accentInk)
                 Text("A voice you can talk to, that can see your screen.")

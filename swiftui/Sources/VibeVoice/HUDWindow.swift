@@ -30,6 +30,11 @@ final class HUDPanel: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         isOpaque = false
         backgroundColor = .clear
+        // The widget is black in both system appearances, so it has to *be* dark as far
+        // as AppKit is concerned. Theme's tokens resolve against the drawing view's
+        // appearance; leave this on aqua and every label inside paints near-black on
+        // black the moment someone switches the desktop to light mode.
+        appearance = NSAppearance(named: .darkAqua)
         hasShadow = true
         isMovableByWindowBackground = true
         hidesOnDeactivate = false

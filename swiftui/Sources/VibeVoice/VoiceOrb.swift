@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum OrbMode {
-    case idle, listening, speaking, connecting, error
+    case idle, listening, speaking, connecting, error, muted
 
     /// The neutral modes need their own light values: a mid-grey that reads as
     /// "resting" against near-black reads as "smudge" against paper.
@@ -22,6 +22,18 @@ enum OrbMode {
                 ? [Color(red: 0.46, green: 0.50, blue: 0.64), Color(red: 0.28, green: 0.32, blue: 0.46)]
                 : [Color(red: 0.65, green: 0.68, blue: 0.78), Color(red: 0.36, green: 0.40, blue: 0.52)]
         case .error:      return [Theme.bad, Color(red: 0.55, green: 0.16, blue: 0.20)]
+        case .muted:
+            // Desaturated on purpose, and it is the only mode that is. Muted is not a
+            // fault — `error` already owns red at full strength — it is the app sitting
+            // there with its ears closed, and a drained orb says that without competing
+            // with a real problem for the same colour.
+            return light
+                ? [Color(red: 0.52, green: 0.42, blue: 0.44),
+                   Color(red: 0.36, green: 0.28, blue: 0.30),
+                   Color(red: 0.48, green: 0.30, blue: 0.30)]
+                : [Color(red: 0.56, green: 0.44, blue: 0.46),
+                   Color(red: 0.32, green: 0.24, blue: 0.26),
+                   Color(red: 0.44, green: 0.26, blue: 0.28)]
         }
     }
 }

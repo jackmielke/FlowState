@@ -1,4 +1,4 @@
-# Vibe Voice — shared product spec (all 3 implementations must match)
+# FlowState — shared product spec (all 3 implementations must match)
 
 A local-only macOS app for talking to OpenAI's realtime voice model, which can also
 look at your screen. Three parallel implementations (electron/, swiftui/, tauri/)
@@ -25,6 +25,17 @@ built to the SAME spec so they can be compared head-to-head.
 6. **Connection state** — obvious idle / connecting / live / error states. Errors from
    the API must surface in the UI with the real message, not a generic "failed".
 7. **Mic level meter** — live input level so you can tell it's hearing you.
+
+## Beyond the shared spec (swiftui only)
+
+Not required of the other two implementations, and not built in them. Listed here so the
+comparison is honest about what is being compared:
+
+- **Capture modes.** The record button writes audio (a WAV, the original behaviour), audio
+  + screen, audio + camera, or both composited, the last three as one QuickTime movie with
+  the same conversation mixdown on its audio track. Chosen from the header menu or
+  Settings › Data, with a per-mode size estimate and disk warnings before recording and
+  while it runs. See `swiftui/README.md` › "Recording the screen and the camera".
 
 ## Design direction
 Dark, modern, "state-of-the-art". Think Linear / Raycast / Arc.

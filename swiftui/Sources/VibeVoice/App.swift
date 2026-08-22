@@ -18,6 +18,9 @@ struct VibeVoiceApp: App {
         Window("FlowState", id: "main") {
             ContentView(state: state)
                 .ignoresSafeArea(.all, edges: .top)
+                // Renders Settings to PNGs and quits, when FLOWSTATE_SNAPSHOT is set.
+                // Does nothing at all otherwise — see SettingsSnapshot.
+                .task { await SettingsSnapshot.runIfRequested(state: state) }
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)

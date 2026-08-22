@@ -7,7 +7,7 @@ import Foundation
 /// from three sources in descending order of how much they actually say:
 ///
 ///  1. **Topic** — the first substantive thing the user asked for, with the throat-clearing
-///     taken off the front ("hey vantage, could you…"). This is what people remember a
+///     taken off the front ("hey FlowState, could you…"). This is what people remember a
 ///     conversation by, and it is available from the very first turn.
 ///  2. **Context summary** — the running summary, when the user's own lines were all too
 ///     short to name anything ("yes", "do it", "no, the other one").
@@ -63,7 +63,7 @@ public enum SessionTitle {
 
     /// The first thing the user said that names anything.
     ///
-    /// Not simply the first line: openings are "hey", "hi vantage", "you there?" far more
+    /// Not simply the first line: openings are "hey", "hi FlowState", "you there?" far more
     /// often than they are the actual question, and a list full of conversations called
     /// "Hey" is a list nobody reads twice.
     static func topic(fromUserLines entries: [ConversationEntry]) -> String? {
@@ -114,12 +114,19 @@ public enum SessionTitle {
         "do you think you could", "i would like you to", "i'd like you to",
         "i want you to", "i need you to", "could you please", "can you please",
         "would you please", "quick question", "i was wondering",
-        "hey vantage", "hey vibe", "hey flow", "hey there",
+        // The app's own name, and every name it has shipped under. The old ones stay:
+        // they are still sitting in transcripts recorded before the rename, and a title
+        // reading "Vantage can you check the build" helps nobody.
+        "hey flowstate", "hey flow state", "hey vantage", "hey vibe", "hey flow",
+        "hey there",
         "could you", "can you", "would you", "will you", "help me",
         "i want to", "i need to", "i wanna", "tell me about", "tell me",
         "let's", "lets", "please", "hello", "hey", "hi", "yo",
         "okay", "ok", "alright", "so", "um", "uh", "erm", "well", "actually", "just",
-        "vantage", "vibe",
+        // Bare, for lines that open on the name alone. "flow" on its own is deliberately
+        // NOT here — it is an ordinary word ("flow charts", "the flow of the request")
+        // and stripping it would mangle real topics.
+        "flowstate", "flow state", "vantage", "vibe",
     ]
 
     /// Trailing politeness. Same problem as the openers, at the other end.
