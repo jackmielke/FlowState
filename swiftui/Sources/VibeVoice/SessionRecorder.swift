@@ -297,15 +297,20 @@ final class SessionRecorder: ObservableObject, @unchecked Sendable {
     /// the recording where it stopped in the room.
     ///
     /// - Parameter seconds: offset from the first system-audio buffer, from the capture
-    ///   stream's own clock. Not a count of how much has arrived — a dropped buffer
-    ///   would otherwise pull everything after it earlier and slide the two halves of
-    ///   the conversation out of sync for the rest of the recording.
+    ///   offset from the moment recording began, taken from the capture stream's own
+    ///   host-clock timestamps — the same origin the video track uses. Not a count of
+    ///   how much has arrived: a dropped buffer would pull everything after it earlier
+    ///   and slide the two halves of the conversation apart for the rest of the file.
     func appendSystemAudio(_ samples: [Int16], at seconds: Double) {
         guard !samples.isEmpty else { return }
         lock.lock()
         defer { lock.unlock() }
         guard isRecordingLocked else { return }
-        hasSystemAudio = true
+        if !hasSystemAudio {
+            hasSystemAudio = true
+            Self.log.notice("speakers joined \(seconds, format: .fixed(precision: 3))s into the recording")
+            FileHandle.standardError.write(Data("[recorder] speakers joined \(String(format: "%.3f", seconds))s into the recording\n".utf8))
+        }
         write(samples, at: Int(seconds * Double(Self.sampleRate)))
         systemAudioChunks += 1
     }

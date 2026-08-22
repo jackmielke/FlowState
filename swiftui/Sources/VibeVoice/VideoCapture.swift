@@ -119,21 +119,6 @@ final class VideoTrackWriter: NSObject, RecordingVideoTrack, @unchecked Sendable
     /// recording ends up with a face larger than the one that was on screen.
     var compositesCamera = true
 
-    /// The PTS of the first audio buffer, which is what every later one is measured
-    /// from. Latched rather than taken from `sessionStart` because the audio and video
-    /// halves of an SCStream do not necessarily begin on the same tick.
-    private var systemAudioStart: CMTime?
-
-    private func audioStreamStart() -> CMTime? {
-        lock.lock(); defer { lock.unlock() }
-        return systemAudioStart
-    }
-
-    /// Called on the audio queue for the first buffer only.
-    fileprivate func latchAudioStart(_ pts: CMTime) {
-        lock.lock(); defer { lock.unlock() }
-        if systemAudioStart == nil { systemAudioStart = pts }
-    }
     private let audioQueue = DispatchQueue(label: "com.jackmielke.vibevoice.video.audio")
 
     /// Built once. A `CIContext` compiles and caches its render pipeline, so making one
@@ -156,7 +141,6 @@ final class VideoTrackWriter: NSObject, RecordingVideoTrack, @unchecked Sendable
         failed = nil
         lastFrameTime = nil
         latestCamera = nil
-        systemAudioStart = nil
         lock.unlock()
 
         // A leftover file at the same path makes AVAssetWriter refuse to start, and the
@@ -825,11 +809,16 @@ extension VideoTrackWriter: SCStreamOutput, SCStreamDelegate {
             // Timestamped against the stream's own clock, not against however many mic
             // buffers have arrived: this is the only half of the recording that knows
             // when it really happened.
+            // Measured against the writer's own session start, which is a host-clock
+            // reading taken the moment recording began — the same clock these buffers
+            // are stamped on, and the same origin the video track uses. Measuring from
+            // the first audio buffer instead would put every speaker sample early by
+            // however long the capture stream took to come up, which is a fifth to a
+            // third of a second, every time, for the whole recording.
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            latchAudioStart(pts)
-            guard let start = audioStreamStart(),
-                  let samples = SystemAudioTap.decode(sampleBuffer) else { return }
-            onSystemAudio?(samples, max(0, CMTimeGetSeconds(CMTimeSubtract(pts, start))))
+            lock.lock(); let origin = sessionStart; lock.unlock()
+            guard origin != .zero, let samples = SystemAudioTap.decode(sampleBuffer) else { return }
+            onSystemAudio?(samples, max(0, CMTimeGetSeconds(CMTimeSubtract(pts, origin))))
             return
         }
 
