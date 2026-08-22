@@ -77,15 +77,36 @@ final class CameraBubblePanel: NSPanel {
 struct CameraPreview: NSViewRepresentable {
     let session: AVCaptureSession?
     var mirrored: Bool = false
+    /// Applied by AppKit, not by SwiftUI.
+    ///
+    /// `.clipShape` and `.shadow` do not reach inside an `NSViewRepresentable`: SwiftUI
+    /// has no idea what the hosted view draws, so it clips nothing and casts the shadow
+    /// of the full rectangle. What that looks like is a square of black backing and a
+    /// square halo around a round bubble — which is exactly what it looked like.
+    var shape: CameraShape = .circle
 
     final class View: NSView {
         private var preview: AVCaptureVideoPreviewLayer?
         private weak var attached: AVCaptureSession?
 
+        private var shape: CameraShape = .circle
+
         override init(frame: NSRect) {
             super.init(frame: frame)
             wantsLayer = true
+            layer?.masksToBounds = true
+            // The letterbox behind the video, and nothing outside the mask.
             layer?.backgroundColor = NSColor.black.cgColor
+        }
+
+        func setShape(_ next: CameraShape) {
+            shape = next
+            applyMask()
+        }
+
+        private func applyMask() {
+            layer?.cornerRadius = min(bounds.width, bounds.height) * shape.cornerFraction
+            layer?.cornerCurve = shape == .rounded ? .continuous : .circular
         }
 
         required init?(coder: NSCoder) { fatalError("not used") }
@@ -116,6 +137,7 @@ struct CameraPreview: NSViewRepresentable {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             preview?.frame = bounds
+            applyMask()
             CATransaction.commit()
         }
     }
@@ -124,12 +146,14 @@ struct CameraPreview: NSViewRepresentable {
         let v = View()
         v.attach(session)
         v.setMirrored(mirrored)
+        v.setShape(shape)
         return v
     }
 
     func updateNSView(_ v: View, context: Context) {
         v.attach(session)
         v.setMirrored(mirrored)
+        v.setShape(shape)
     }
 }
 
@@ -160,10 +184,10 @@ struct CameraBubbleView: View {
 
     var body: some View {
         ZStack {
-            CameraPreview(session: session, mirrored: state.settings.cameraMirrored)
-                .clipShape(outline)
+            CameraPreview(session: session,
+                          mirrored: state.settings.cameraMirrored,
+                          shape: shape)
                 .overlay(outline.stroke(.white.opacity(0.22), lineWidth: 2))
-                .shadow(color: .black.opacity(0.35), radius: 14, y: 6)
 
             if size.isFullFrame {
                 // A small preview cannot show what a full-frame recording will look
@@ -183,7 +207,8 @@ struct CameraBubbleView: View {
         .animation(.easeOut(duration: 0.12), value: hovering)
         .animation(.easeOut(duration: 0.10), value: hoveredControl)
         .onHover { hovering = $0; if !$0 { hoveredControl = nil } }
-        .padding(6)   // room for the shadow, which the panel does not draw
+        // No shadow, and so no padding for one to land in: the panel is exactly the
+        // bubble, and every point of it is picture.
     }
 
     private func pill(_ text: String) -> some View {
