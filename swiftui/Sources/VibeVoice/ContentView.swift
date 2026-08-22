@@ -191,15 +191,12 @@ struct ContentView: View {
         .onAppear { state.applyEffectiveAppearance(); state.applyHUD() }
         .onChange(of: state.settings.backdrop) { _, _ in state.applyEffectiveAppearance() }
         .onChange(of: state.settings.appearance) { _, _ in state.applyEffectiveAppearance() }
-        // Settings is a floating pane, not a sheet: most of what it changes — backdrop,
-        // appearance, the orb, the transcript — can only be judged while you can still
-        // see it, so the app stays visible and live underneath and the pane can be
-        // dragged out of the way of whatever you are looking at.
-        .floatingPanel("Settings", isPresented: $state.showSettings,
-                       ideal: CGSize(width: 440, height: 620),
-                       key: "panel.settings.origin") {
-            SettingsView(state: state)
-        }
+        // Settings is its own window rather than a sheet: most of what it changes —
+        // backdrop, appearance, the orb, the transcript — can only be judged while you
+        // can still see the app, so it stays visible and live underneath. It was an
+        // in-window pane moved by a DragGesture, which is why it felt glitchy; dragging a
+        // view is not the same thing as moving a window. See SettingsWindowController.
+        .onChange(of: state.showSettings) { _, open in state.applySettingsWindow(open) }
         .sheet(isPresented: $state.showWelcome) {
             WelcomeView(state: state) { state.showWelcome = false }
         }

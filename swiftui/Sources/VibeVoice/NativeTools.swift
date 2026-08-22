@@ -134,6 +134,16 @@ enum NativeTools {
             effect: .writes(confirmation: "Want me to run that shortcut?")),
 
         ToolSpec(
+            name: "web_search",
+            summary: "Search the web",
+            description: "Look something up on the web and get a short spoken answer with "
+                       + "current information. Use whenever the answer depends on anything "
+                       + "recent, changing, or outside your training — prices, versions, "
+                       + "news, releases, someone's current role, whether something shipped. "
+                       + "Prefer this over guessing or saying you cannot know.",
+            parameters: [ToolParameter("query", description: "What to look up, as a question.", required: true)]),
+
+        ToolSpec(
             name: "notion_search",
             summary: "Search Notion",
             description: "Search the user's Notion for pages matching a query, newest first. "
@@ -156,6 +166,7 @@ enum NativeTools {
         case "list_shortcuts":  return shortcutList()
         case "run_shortcut":    return await runShortcut(name: args["name"] as? String ?? "",
                                                          input: args["input"] as? String)
+        case "web_search":      return await WebSearch.search(args["query"] as? String ?? "")
         case "notion_search":   return await Notion.search(args["query"] as? String ?? "")
         case "notion_read":     return await Notion.read(args["page"] as? String ?? "")
         default:                return "No such tool: \(name)."

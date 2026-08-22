@@ -102,6 +102,13 @@ final class AppState: ObservableObject {
 
     func applyHUD() { hud.apply() }
 
+    /// Settings lives in a real window now, not a panel drawn inside this one.
+    private lazy var settingsWindow = SettingsWindowController(state: self)
+
+    func applySettingsWindow(_ open: Bool) {
+        open ? settingsWindow.show() : settingsWindow.hide()
+    }
+
     /// The Dev Mode offer, if one is warranted right now. See `DevModeHint`.
     @Published private(set) var devOffer: DevModeHint.Trigger?
     private var assistantTurns = 0
