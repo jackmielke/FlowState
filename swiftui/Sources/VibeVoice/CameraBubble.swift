@@ -192,7 +192,7 @@ struct CameraBubbleView: View {
             if size.isFullFrame {
                 // A small preview cannot show what a full-frame recording will look
                 // like, so it says so rather than implying the crop is the circle.
-                pill("Full frame").offset(y: -size.diameter * 0.28)
+                pill("Fills the recording").offset(y: -size.diameter * 0.28)
             }
 
             if hovering && state.settings.cameraControls {

@@ -454,7 +454,10 @@ final class AppState: ObservableObject {
             // it — at exactly the size it appears. Compositing a second copy on top is
             // what put a face in the movie bigger than the one on the display. The
             // composite is only for when there is no bubble to capture.
-            writer.compositesCamera = !settings.cameraBubble
+            // Full frame is the exception, and has to be: the camera cannot fill the
+            // recording by being a bubble on screen, so that one size is drawn in even
+            // when there is a bubble. It covers the whole frame, bubble included.
+            writer.compositesCamera = !settings.cameraBubble || settings.cameraSize.isFullFrame
             // What actually came out of the speakers. See `SystemAudioTap`.
             writer.onSystemAudio = { [weak self] samples, seconds in
                 self?.recorder.appendSystemAudio(samples, at: seconds)
