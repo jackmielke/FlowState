@@ -153,6 +153,8 @@ final class SessionRecorder: ObservableObject, @unchecked Sendable {
         micChunks = 0
         assistantChunks = 0
         assistantTimeline.reset()
+        hasSystemAudio = false
+        systemAudioChunks = 0
         url = target
         // Held for the whole recording, and only for a video plan — `stop` uses its
         // presence, not the plan's, to decide who writes the file.
@@ -186,6 +188,7 @@ final class SessionRecorder: ObservableObject, @unchecked Sendable {
         let target = url
         let mic = micChunks
         let assistant = assistantChunks
+        let speakers = systemAudioChunks
         let video = videoTrack
         samples.removeAll(keepingCapacity: false)
         cursor = 0
@@ -200,7 +203,7 @@ final class SessionRecorder: ObservableObject, @unchecked Sendable {
 
         Self.log.notice("""
             stop — \(captured.count) samples (\(seconds, format: .fixed(precision: 2))s) \
-            from \(mic) mic + \(assistant) assistant chunks over \
+            from \(mic) mic + \(assistant) assistant + \(speakers) speaker chunks over \
             \(elapsed, format: .fixed(precision: 1))s wall clock
             """)
 
@@ -286,6 +289,34 @@ final class SessionRecorder: ObservableObject, @unchecked Sendable {
         micChunks += 1
     }
 
+    /// The speakers, at the moment they made the sound.
+    ///
+    /// When this is running it *replaces* `appendAssistant` rather than adding to it —
+    /// the system mix already contains the model's voice, exactly as much of it as was
+    /// actually played. That is the whole point: a reply the user talked over stops in
+    /// the recording where it stopped in the room.
+    ///
+    /// - Parameter seconds: offset from the first system-audio buffer, from the capture
+    ///   stream's own clock. Not a count of how much has arrived — a dropped buffer
+    ///   would otherwise pull everything after it earlier and slide the two halves of
+    ///   the conversation out of sync for the rest of the recording.
+    func appendSystemAudio(_ samples: [Int16], at seconds: Double) {
+        guard !samples.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard isRecordingLocked else { return }
+        hasSystemAudio = true
+        write(samples, at: Int(seconds * Double(Self.sampleRate)))
+        systemAudioChunks += 1
+    }
+
+    /// True once any speaker audio has arrived, which is what switches the model's own
+    /// stream off. Latched rather than read from settings so that a capture that fails
+    /// to produce audio — no output device, an unusual routing — silently falls back to
+    /// the old behaviour instead of recording a conversation with one voice in it.
+    private var hasSystemAudio = false
+    private var systemAudioChunks = 0
+
     /// The model's voice, laid out on the timeline from where its current turn began.
     ///
     /// Not written at `cursor`. See `AssistantTimeline` — the socket delivers a reply
@@ -297,6 +328,9 @@ final class SessionRecorder: ObservableObject, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard isRecordingLocked else { return }
+        // The speakers are already being recorded; this stream would be a second, longer
+        // copy of the same voice.
+        guard !hasSystemAudio else { return }
         let at = assistantTimeline.reserve(count: incoming.count, micHead: cursor)
         write(incoming, at: at)
         assistantChunks += 1

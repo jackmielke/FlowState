@@ -107,7 +107,7 @@ enum SettingsSnapshot {
     /// the live backdrop: this is a snapshot run, and a snapshot run that rewrites the
     /// settings file it happens to be inspecting is a trap, not a tool.
     private static func gallery(style: MotionStyle, scheme: ColorScheme) -> some View {
-        MotionStyleGallery(style: .constant(style),
+        MotionStyleGallery(look: .constant(LookSelection(backdrop: .motion, motionStyle: style)),
                            intensity: .constant(0.6),
                            assetsEnabled: .constant(true),
                            installError: .constant(nil))

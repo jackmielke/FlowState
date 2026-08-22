@@ -70,6 +70,19 @@ struct SettingsView: View {
         return " — " + name
     }
 
+    /// The line under the Still backdrops grid.
+    ///
+    /// It describes the chosen still backdrop when one is chosen. When a moving background
+    /// is up, no tile in this grid is ringed, and a caption still describing whichever
+    /// still backdrop was selected last would be describing something that is not on
+    /// screen — so it says that instead, and points at the section that is.
+    private var stillNote: String {
+        guard state.settings.backdrop != .motion else {
+            return "None of these is showing — \(state.settings.motionStyle.label), below, is. Pick one here to go back to a still backdrop."
+        }
+        return state.settings.backdrop.blurb + photoNote
+    }
+
 
     // The title, the close button and the drag handle are the panel's, not this view's —
     // see `FloatingPanel`. Settings owns the tab strip and everything below it.
@@ -281,8 +294,38 @@ struct SettingsView: View {
 
     /// Everything visual. Light or dark, what is behind the orb, and whether a small
     /// version of it floats over your other apps.
+    ///
+    /// The backdrops are two galleries, both always on screen: **Still backdrops**, which
+    /// hold one picture, and **Moving backgrounds**, which do not. They used to be one
+    /// grid with a Motion tile in it that revealed a second grid underneath — so the six
+    /// moving backdrops were a mode you had to switch into before you could even look at
+    /// them, and a click on one of their tiles while a still backdrop was up set a value
+    /// nothing was reading. Both sections stand on their own now and either one is a
+    /// complete choice.
     @ViewBuilder
     private var lookTab: some View {
+
+            // First, above both galleries: it is a decision about the whole app getting
+            // out of your way, not a footnote to whichever backdrop you happened to pick.
+            // It was previously buried at the bottom of the backdrop grid and only
+            // appeared for scenes, which meant it vanished when you switched to Midnight
+            // and looked like a setting that had been taken away.
+            section("Ambient mode") {
+                HStack {
+                    Text("Fade everything but the scene")
+                        .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                    Spacer()
+                    NeatToggle(isOn: Binding(
+                        get: { state.settings.ambientMode },
+                        set: { state.settings.ambientMode = $0; state.noteActivity() }))
+                        .accessibilityLabel("Ambient mode")
+                }
+                caption("After 45 seconds of quiet the panels fade out and leave the scene and the orb. The session keeps running — move the mouse to bring it back.")
+                if !state.settings.backdrop.isScene {
+                    caption("Nothing to reveal behind \(state.settings.backdrop.label) — this takes effect on one of the painted places or a moving background.")
+                }
+            }
+
 
             section("Appearance") {
                 AppearancePicker(mode: Binding(
@@ -296,27 +339,26 @@ struct SettingsView: View {
             }
 
 
-            section("Backdrop") {
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4),
+            section("Still backdrops") {
+                // Three across, matching the moving gallery below it: the two sections
+                // are read together now, and nine tiles in threes is three full rows
+                // rather than two-and-a-stray.
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3),
                           spacing: 12) {
-                    ForEach(Backdrop.allCases) { b in
-                        let on = state.settings.backdrop == b
+                    ForEach(Backdrop.stillBackdrops) { b in
+                        let on = state.settings.look.isShowing(b)
                         Button {
                             if b == .custom {
                                 if let path = BackdropPicker.choose() {
                                     state.settings.backdropImagePath = path
-                                    state.settings.backdrop = .custom
+                                    state.settings.look.choose(Backdrop.custom)
                                 }
                             } else {
-                                state.settings.backdrop = b
+                                state.settings.look.choose(b)
                             }
                         } label: {
                             VStack(spacing: 5) {
-                                // The swatch is decoration, never a hit target. The Motion
-                                // tile is a live Metal-backed view, and a view like that
-                                // inside a Button label swallows the tap — which is why
-                                // Motion was the one backdrop that could not be selected
-                                // while every inert swatch beside it worked.
+                                // The swatch is decoration, never a hit target.
                                 SwatchFrame(selected: on, radius: 7) {
                                     ZStack {
                                         if b == .custom {
@@ -324,14 +366,6 @@ struct SettingsView: View {
                                             Image(systemName: "photo")
                                                 .font(.system(size: 13))
                                                 .foregroundStyle(Theme.textDim)
-                                        } else if b == .motion {
-                                            // A still swatch cannot advertise the one
-                                            // thing this option has, so the tile is the
-                                            // thing itself, running.
-                                            MotionBackdropView(style: state.settings.motionStyle,
-                                                               intensity: state.settings.motionIntensity,
-                                                               assetsEnabled: state.settings.motionAssets,
-                                                               preview: true)
                                         } else {
                                             LinearGradient(colors: b.colors,
                                                            startPoint: .topLeading,
@@ -339,7 +373,7 @@ struct SettingsView: View {
                                         }
                                     }
                                     .frame(maxWidth: .infinity)
-                                    .frame(height: 42)
+                                    .frame(height: 48)
                                 }
                                 .allowsHitTesting(false)
                                 Text(b.label)
@@ -351,23 +385,23 @@ struct SettingsView: View {
                             // drawn content's shape.
                             //
                             // A Button's hit region is whatever its label hit-tests to,
-                            // so `allowsHitTesting(false)` above — which is there so the
-                            // live Motion tile cannot eat the click — also takes the
-                            // swatch out of the button. What was left was the one-line
-                            // caption underneath, which is why Motion could only be
-                            // selected by clicking the word rather than the picture.
-                            // Stating the shape restores the tile without giving the
-                            // content its hit test back.
+                            // so `allowsHitTesting(false)` above — which keeps a live
+                            // tile from eating the click — also takes the swatch out of
+                            // the button. What is left without this is the one-line
+                            // caption underneath, which is a 10-point target for a
+                            // 42-point picture. Stating the shape restores the tile
+                            // without giving the content its hit test back.
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         // The selected backdrop is marked by a ring and a checkmark,
                         // neither of which VoiceOver can see. Say it instead.
                         .accessibilityLabel("Backdrop: \(b.label)")
+                        .accessibilityHint(b.blurb)
                         .accessibilityAddTraits(on ? [.isSelected] : [])
                     }
                 }
-                caption(state.settings.backdrop.blurb + photoNote)
+                caption(stillNote)
 
                 if state.settings.backdrop == .custom,
                    PhotoBackdrop.isFolder(state.settings.backdropImagePath) {
@@ -381,10 +415,8 @@ struct SettingsView: View {
                         accessibilityLabel: "Seconds between photos")
                 }
                 if state.settings.backdrop.place != nil {
-                    caption("The places are painted rather than photographed, so they stay sharp at any size and add nothing to the app's two megabytes.")
-                }
+                    caption("The places are painted rather than photographed, so they stay sharp at any size and add nothing to the app\'s two megabytes.")
 
-                if state.settings.backdrop.place != nil {
                     SegmentedPicker(options: [(value: "auto", label: "Auto")]
                                     + Daylight.allCases.map {
                                         (value: $0.rawValue, label: $0.rawValue.prefix(1).uppercased() + $0.rawValue.dropFirst())
@@ -394,33 +426,16 @@ struct SettingsView: View {
                                         set: { state.settings.daylightMode = $0 }),
                                     accessibilityPrefix: "Daylight")
                     caption(state.settings.daylightMode == "auto"
-                            ? "Following your clock — right now it's \(Daylight.now().label.lowercased()). The scene changes as the day does."
+                            ? "Following your clock — right now it\'s \(Daylight.now().label.lowercased()). The scene changes as the day does."
                             : "Pinned to \(state.settings.daylightMode).")
                 }
-
-                // Ambient mode belongs to every backdrop that is a picture, not just the
-                // painted places — fading the chrome away to leave a moving backdrop is
-                // the case it is best at.
-                if state.settings.backdrop.isScene {
-                    HStack {
-                        Text("Ambient mode")
-                            .font(.system(size: 12.5)).foregroundStyle(Theme.text)
-                        Spacer()
-                        NeatToggle(isOn: Binding(
-                            get: { state.settings.ambientMode },
-                            set: { state.settings.ambientMode = $0; state.noteActivity() }))
-                            .accessibilityLabel("Ambient mode")
-                    }
-                    caption("After 45 seconds of quiet the panels fade out and leave the scene and the orb. The session keeps running — move the mouse to bring it back.")
-                }
             }
 
-            // Its own heading rather than a block nested inside Backdrop: once you have
-            // picked Motion, which of the nine and how hard it moves is the whole of what
-            // you are there to do, and it is nine live previews and two controls deep.
-            if state.settings.backdrop == .motion {
-                section("Moving background") { motionControls }
-            }
+
+            // Always here, never behind a toggle: which of the nine and how hard it moves
+            // is nine live previews and two controls deep, and none of it can be judged
+            // from a 42-point swatch in somebody else\'s grid.
+            section("Moving backgrounds") { motionControls }
 
 
             section("Camera bubble") {
@@ -1009,8 +1024,13 @@ struct SettingsView: View {
 
     /// The picker for `Backdrop.motion`, which lives in `MotionStyleGallery` so it can be
     /// rendered — and looked at — without a Settings pane around it.
+    ///
+    /// It is handed the whole `LookSelection` rather than just the style, because picking
+    /// a moving background has to switch the backdrop to `.motion` too. With only the
+    /// style to write, a click here while a still backdrop was showing changed a value
+    /// nothing on screen was reading.
     private var motionControls: some View {
-        MotionStyleGallery(style: binding(\.motionStyle),
+        MotionStyleGallery(look: binding(\.look),
                            intensity: binding(\.motionIntensity),
                            assetsEnabled: binding(\.motionAssets),
                            installError: $motionInstallError)

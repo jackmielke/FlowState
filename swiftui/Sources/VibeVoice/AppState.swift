@@ -408,6 +408,15 @@ final class AppState: ObservableObject {
             // Same description the floating bubble draws itself from, so the circle the
             // user framed is the circle that lands in the movie.
             writer.cameraOverlay = cameraOverlay
+            // The bubble is already on screen, so ScreenCaptureKit has already recorded
+            // it — at exactly the size it appears. Compositing a second copy on top is
+            // what put a face in the movie bigger than the one on the display. The
+            // composite is only for when there is no bubble to capture.
+            writer.compositesCamera = !settings.cameraBubble
+            // What actually came out of the speakers. See `SystemAudioTap`.
+            writer.onSystemAudio = { [weak self] samples, seconds in
+                self?.recorder.appendSystemAudio(samples, at: seconds)
+            }
             // A capture that dies on its own — display unplugged, permission pulled
             // mid-session — would otherwise be discovered only when the movie turns out
             // to end early. Stopping here keeps what was captured and says why.
@@ -1121,6 +1130,10 @@ final class AppState: ObservableObject {
     /// `response.create` would be rejected by the API.
     var isResponding: Bool { responsePhase == .requested || responsePhase == .active }
 
+    /// Set when the user talks over a reply, cleared when the next reply starts.
+    /// See `.speechStarted` for what it is for.
+    private var interruptedResponseIsMute = false
+
     /// True while a cancel is in flight and has not been acknowledged.
     var isCancellingResponse: Bool { responsePhase == .cancelling }
 
@@ -1208,6 +1221,9 @@ final class AppState: ObservableObject {
 
         case .responseStarted(let id):
             responses.responseCreated(id: id)
+            // A new response is a new thing to say, so whatever was being suppressed
+            // from the interrupted one no longer applies.
+            interruptedResponseIsMute = false
 
         case .sessionUpdated:
             break
@@ -1226,6 +1242,13 @@ final class AppState: ObservableObject {
             if audio.isPlayingAudio {
                 audio.flushPlayback()
                 closeAssistantTurn()
+                // Flushing empties the queue; it does not stop the socket. The server
+                // truncates the response, but the audio it had already put on the wire
+                // keeps arriving for a moment afterwards, and enqueueing that is why
+                // the assistant appeared to carry on talking over an interruption —
+                // cut off, then resuming a beat later. Everything left from the
+                // interrupted response is dropped until the next one begins.
+                interruptedResponseIsMute = true
             }
             // Server VAD is about to open a turn of its own for this utterance, so
             // nothing we have queued may go out until that has been and gone.
@@ -1302,6 +1325,10 @@ final class AppState: ObservableObject {
             responses.responseFinished(status: status)
 
         case .audio(let pcm):
+            // In flight when the user interrupted — see `.speechStarted`. Not recorded
+            // either: it was never heard, and a recording of what was not heard is the
+            // thing the speaker capture exists to stop producing.
+            guard !interruptedResponseIsMute else { break }
             audio.enqueue(pcm16: pcm)
             recorder.appendAssistant(pcm)
 

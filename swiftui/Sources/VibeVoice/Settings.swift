@@ -121,6 +121,18 @@ struct AppSettings: Codable, Equatable {
     /// Fade the chrome away when nothing has happened for a while, leaving the scene.
     var ambientMode: Bool = true
 
+    /// The two Look-pane fields as the one thing they behave like.
+    ///
+    /// `backdrop` and `motionStyle` are stored separately — they always have been, and the
+    /// settings file is not going to be rewritten over a UI change — but every rule about
+    /// them involves both at once: picking a moving background sets the backdrop as well
+    /// as the style, and a tile counts as selected only when the pair agrees. Those rules
+    /// live in `LookSelection`, in Core, where they can be tested; this is the seam.
+    var look: LookSelection {
+        get { LookSelection(backdrop: backdrop, motionStyle: motionStyle) }
+        set { backdrop = newValue.backdrop; motionStyle = newValue.motionStyle }
+    }
+
     /// Show Flow in the menu bar, so it is reachable without hunting for its window.
     var menuBarEnabled: Bool = true
     /// Summon hotkey. Empty string = off.

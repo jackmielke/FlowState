@@ -2,31 +2,18 @@ import SwiftUI
 import AppKit
 import VibeVoiceCore
 
-/// The scene behind the orb.
+/// How a `Backdrop` is drawn.
+///
+/// The cases, their names and which kind each one is live in `VibeVoiceCore` — see
+/// `LookBackdrop.swift` — so the Look pane's two galleries are stated somewhere that can
+/// be tested without a window. What is left here is the half that needs SwiftUI: the
+/// palettes, the painted places and the veil that keeps text readable on top of them.
 ///
 /// The place presets are painted, not photographed — layered gradients tuned to the light
 /// of somewhere rather than a picture of it. That keeps the app a couple of megabytes,
 /// ships nothing with a licence attached, and scales to any window size without going
 /// soft. If you want the real thing, `custom` takes your own photo.
-enum Backdrop: String, Codable, CaseIterable, Identifiable {
-    case midnight, paper, bali, capeTown, sanFrancisco, alps, tokyo, sahara, motion, custom
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .midnight:      return "Midnight"
-        case .paper:         return "Paper"
-        case .bali:          return "Bali"
-        case .capeTown:      return "Cape Town"
-        case .sanFrancisco:  return "San Francisco"
-        case .alps:          return "Alps"
-        case .tokyo:         return "Tokyo"
-        case .sahara:        return "Sahara"
-        case .motion:        return "Motion"
-        case .custom:        return "Your photo"
-        }
-    }
+extension Backdrop {
 
     var blurb: String {
         switch self {
@@ -38,7 +25,7 @@ enum Backdrop: String, Codable, CaseIterable, Identifiable {
         case .alps:         return Place.alps.blurb
         case .tokyo:        return Place.tokyo.blurb
         case .sahara:       return Place.sahara.blurb
-        case .motion:       return "Something flowing, rather than somewhere. Pick a style below."
+        case .motion:       return "Something flowing, rather than somewhere."
         case .custom:       return "Any image on this Mac."
         }
     }
@@ -67,18 +54,6 @@ enum Backdrop: String, Codable, CaseIterable, Identifiable {
         case .custom:       return [hex(0x0B0B0F), hex(0x131722)]
         }
     }
-
-    /// Whether UI text should sit on a dark or light ground. Scenic presets are dark
-    /// enough at the top that the existing light-on-dark type keeps working.
-    var prefersDarkText: Bool { self == .paper }
-
-    /// Whether this backdrop is a picture rather than a flat theme colour.
-    ///
-    /// Three separate behaviours hang off this — the chrome is pinned dark, ambient mode
-    /// is offered, and `BackdropView` is used instead of the plain gradient — and all
-    /// three used to test `place != nil`, which was the same question right up until a
-    /// backdrop existed that is a scene without being a place.
-    var isScene: Bool { place != nil || self == .motion }
 
     /// How strongly to veil the scene behind the reading area.
     ///

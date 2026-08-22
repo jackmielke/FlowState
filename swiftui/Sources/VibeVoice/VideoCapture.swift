@@ -105,6 +105,35 @@ final class VideoTrackWriter: NSObject, RecordingVideoTrack, @unchecked Sendable
 
     private let screenQueue = DispatchQueue(label: "com.jackmielke.vibevoice.video.screen")
     private let cameraQueue = DispatchQueue(label: "com.jackmielke.vibevoice.video.camera")
+    private let systemAudioQueue = DispatchQueue(label: "com.jackmielke.vibevoice.video.systemaudio")
+
+    /// Every buffer of speaker output, with its offset in seconds from the first one.
+    /// `SessionRecorder` lays these down on the timeline; see `appendSystemAudio`.
+    var onSystemAudio: (([Int16], Double) -> Void)?
+
+    /// Whether to draw the camera into the frame.
+    ///
+    /// False when the floating bubble is up: the bubble is a window on the display SCK
+    /// is capturing, so it is already in the recording, at the size it actually appears
+    /// and in the place it was actually dragged to. Drawing the inset as well is how a
+    /// recording ends up with a face larger than the one that was on screen.
+    var compositesCamera = true
+
+    /// The PTS of the first audio buffer, which is what every later one is measured
+    /// from. Latched rather than taken from `sessionStart` because the audio and video
+    /// halves of an SCStream do not necessarily begin on the same tick.
+    private var systemAudioStart: CMTime?
+
+    private func audioStreamStart() -> CMTime? {
+        lock.lock(); defer { lock.unlock() }
+        return systemAudioStart
+    }
+
+    /// Called on the audio queue for the first buffer only.
+    fileprivate func latchAudioStart(_ pts: CMTime) {
+        lock.lock(); defer { lock.unlock() }
+        if systemAudioStart == nil { systemAudioStart = pts }
+    }
     private let audioQueue = DispatchQueue(label: "com.jackmielke.vibevoice.video.audio")
 
     /// Built once. A `CIContext` compiles and caches its render pipeline, so making one
@@ -127,6 +156,7 @@ final class VideoTrackWriter: NSObject, RecordingVideoTrack, @unchecked Sendable
         failed = nil
         lastFrameTime = nil
         latestCamera = nil
+        systemAudioStart = nil
         lock.unlock()
 
         // A leftover file at the same path makes AVAssetWriter refuse to start, and the
@@ -189,7 +219,11 @@ final class VideoTrackWriter: NSObject, RecordingVideoTrack, @unchecked Sendable
         self.sessionStart = start
         lock.unlock()
 
-        if wanted.mode.capturesCamera { try startCamera(plan: wanted) }
+        // Camera-only has no screen to be on, so it always needs its own capture;
+        // composited modes need one only when there is no bubble already on screen.
+        if wanted.mode.capturesCamera && (compositesCamera || !wanted.mode.capturesScreen) {
+            try startCamera(plan: wanted)
+        }
         if wanted.mode.capturesScreen { startScreen(plan: wanted) }
 
         Self.log.notice("""
@@ -293,8 +327,17 @@ final class VideoTrackWriter: NSObject, RecordingVideoTrack, @unchecked Sendable
                 // our behalf; not so much that a stall costs hundreds of megabytes of RAM.
                 cfg.queueDepth = 5
 
+                // What actually came out of the speakers, rather than a reconstruction
+                // of what we think should have. See `SystemAudioTap` for why this is
+                // the difference between a recording and a re-enactment.
+                cfg.capturesAudio = true
+                cfg.excludesCurrentProcessAudio = false
+                cfg.sampleRate = SystemAudioTap.captureRate
+                cfg.channelCount = 2
+
                 let stream = SCStream(filter: filter, configuration: cfg, delegate: self)
                 try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.screenQueue)
+                try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: self.systemAudioQueue)
                 try await stream.startCapture()
                 self.store(stream: stream)
                 Self.log.notice("screen capture started on display \(display.displayID, privacy: .public)")
@@ -699,7 +742,21 @@ final class VideoTrackWriter: NSObject, RecordingVideoTrack, @unchecked Sendable
 extension VideoTrackWriter: SCStreamOutput, SCStreamDelegate {
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, CMSampleBufferIsValid(sampleBuffer) else { return }
+        guard CMSampleBufferIsValid(sampleBuffer) else { return }
+
+        if type == .audio {
+            // Timestamped against the stream's own clock, not against however many mic
+            // buffers have arrived: this is the only half of the recording that knows
+            // when it really happened.
+            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            latchAudioStart(pts)
+            guard let start = audioStreamStart(),
+                  let samples = SystemAudioTap.decode(sampleBuffer) else { return }
+            onSystemAudio?(samples, max(0, CMTimeGetSeconds(CMTimeSubtract(pts, start))))
+            return
+        }
+
+        guard type == .screen else { return }
 
         // SCK reports every frame it considered, including ones where nothing changed.
         // Encoding those would be paying full price to say "still the same", so only
@@ -712,7 +769,7 @@ extension VideoTrackWriter: SCStreamOutput, SCStreamDelegate {
         else { return }
 
         lock.lock()
-        let wantsCamera = plan.mode.capturesCamera
+        let wantsCamera = plan.mode.capturesCamera && compositesCamera
         let camera = latestCamera
         lock.unlock()
 

@@ -804,12 +804,22 @@ struct PaintedMotion: View {
 /// be renderable on its own, which `SettingsSnapshot` does. Everything it changes arrives
 /// as a binding, so it has no opinion about where those are stored.
 struct MotionStyleGallery: View {
-    @Binding var style: MotionStyle
+    /// Both halves of the Look choice, not just the style.
+    ///
+    /// A moving background is only on screen when the backdrop is `.motion` as well, so
+    /// this gallery has to be able to set both — see `LookSelection.choose(_:)`. It reads
+    /// both too: a tile is ringed only when the pair agrees, so a style that is merely
+    /// remembered while a photo is up does not claim to be showing.
+    @Binding var look: LookSelection
     @Binding var intensity: Double
     @Binding var assetsEnabled: Bool
     /// Why the last chosen file could not be installed. Owned by the caller, because it
     /// describes one click rather than a preference.
     @Binding var installError: String?
+
+    /// The style the controls below apply to: the one showing, or — while a still
+    /// backdrop is up — the one that would show.
+    private var style: MotionStyle { look.motionStyle }
 
     /// Where the current style's pixels are coming from, asked once per redraw rather
     /// than per frame.
@@ -843,15 +853,23 @@ struct MotionStyleGallery: View {
                 }
                 .accessibilityLabel("Preview: \(style.label)")
                 .accessibilityValue(style.blurb)
+                // The tap target of last resort, and the honest one while a still
+                // backdrop is up: the big preview shows what you would get, so clicking
+                // it is a way of asking for it.
+                .contentShape(Rectangle())
+                .onTapGesture { choose(style) }
 
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3),
                       spacing: 12) {
-                ForEach(MotionStyle.allCases) { s in
-                    let on = style == s
+                ForEach(Backdrop.movingBackgrounds) { s in
+                    let on = look.isShowing(s)
                     Button {
-                        withAnimation(.easeOut(duration: 0.18)) { style = s }
+                        choose(s)
                     } label: {
                         VStack(spacing: 5) {
+                            // Every tile here is a live renderer, and a live renderer
+                            // inside a Button label swallows the click — which is why
+                            // `MotionBackdropView` hit-tests to nothing at all.
                             SwatchFrame(selected: on, radius: 7) {
                                 MotionBackdropView(style: s,
                                                    intensity: intensity,
@@ -859,21 +877,37 @@ struct MotionStyleGallery: View {
                                                    preview: true)
                                     .frame(height: 48)
                             }
+                            .allowsHitTesting(false)
                             Text(s.label)
                                 .font(.system(size: 10.5, weight: on ? .medium : .regular))
                                 .foregroundStyle(on ? Theme.text : Theme.textDim)
                                 .lineLimit(1)
                         }
+                        // Without this the button's hit region is whatever its label
+                        // hit-tests to — and since the picture above deliberately does
+                        // not, that left the 10-point word underneath as the only place
+                        // a moving background could be clicked. Half a line of text under
+                        // a 48-point tile reads as "not clickable", which is exactly how
+                        // this was reported. Stating the shape gives the whole tile back
+                        // without letting the renderer eat the click again.
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .help(s.blurb)
-                    .accessibilityLabel("Motion style: \(s.label)")
+                    .accessibilityLabel("Moving background: \(s.label)")
                     .accessibilityHint(s.blurb)
                     .accessibilityAddTraits(on ? [.isSelected] : [])
                 }
             }
 
             note(style.blurb)
+
+            // Says out loud what the missing ring says quietly. Both galleries are on
+            // screen at once now, so "which of these am I actually looking at" is a
+            // question the pane has to answer rather than imply.
+            if !look.isShowing(style) {
+                note("Not showing — \(look.backdrop.label) is. Click any tile above to switch to a moving background.")
+            }
 
             HStack(spacing: 14) {
                 NeatSlider(value: $intensity, range: 0...1)
@@ -929,6 +963,12 @@ struct MotionStyleGallery: View {
         // Not at launch: a user who never opens the Look tab should not pay for nine
         // offscreen canvases they will not see.
         .task { MotionThumbnail.prepareAll() }
+    }
+
+    /// Picks `s`, which also means switching the backdrop to `.motion` — the section is on
+    /// screen whatever is currently showing, so a click in it has to be a whole choice.
+    private func choose(_ s: MotionStyle) {
+        withAnimation(.easeOut(duration: 0.18)) { look.choose(s) }
     }
 
     private func note(_ s: String) -> some View {

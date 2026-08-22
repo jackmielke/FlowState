@@ -21,6 +21,8 @@ struct VibeVoiceApp: App {
                 // Renders Settings to PNGs and quits, when FLOWSTATE_SNAPSHOT is set.
                 // Does nothing at all otherwise — see SettingsSnapshot.
                 .task { await SettingsSnapshot.runIfRequested(state: state) }
+                // Also a no-op unless asked for — see RecordingSmokeTest.
+                .task { await RecordingSmokeTest.runIfRequested(state: state) }
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)

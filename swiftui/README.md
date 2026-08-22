@@ -473,7 +473,7 @@ placeholder rather than as themselves. Everything around them is real.
 
 ## Moving backdrops
 
-**Settings → Look → Backdrop → Motion**, then pick one of nine: **Ocean**, **Clouds**,
+**Settings → Look → Moving backgrounds**, then pick one of nine: **Ocean**, **Clouds**,
 **Aurora**, **Fluid**, **Silk**, **Nebula**, **Rain**, **Embers**, **Prism**. Every tile in
 the picker is the real thing running at preview size, because these differ almost entirely
 in *how they move* — a still grid of them would be nine coloured rectangles and a guess.
@@ -483,9 +483,19 @@ another palette: Rain falls, Embers rise, Prism slides across. Embers is also th
 warm-dark one in the set. A tenth style that drifted like Clouds in a different colour
 would add a row to the grid and nothing to the choice.
 
-Picking Motion opens a **Moving background** section under the backdrop grid: the chosen
-style running at full width above the thumbnails, so it can be judged at something like
-the size it will actually be seen at without closing Settings.
+The Look tab has two galleries and both are always on screen: **Still backdrops**
+(Midnight, Paper, the six painted places, your own photo) and **Moving backgrounds**.
+Clicking a moving tile is a complete choice — it switches the backdrop as well as the
+style — so there is no mode to enter first. Above the thumbnails the chosen style runs at
+full width, so it can be judged at something like the size it will actually be seen at
+without closing Settings.
+
+This used to be one grid with a **Motion** tile in it that revealed a second grid below,
+which made the moving backdrops a mode rather than a choice — and a click on one of their
+tiles while a still backdrop was showing set a value nothing was reading, so the whole
+section looked dead. `LookSelection` (`Sources/VibeVoiceCore/LookBackdrop.swift`) is where
+both halves of the choice now move together, and `LookBackdropTests` is why that stays
+true.
 
 The **Motion** slider under the grid is amplitude and contrast. It deliberately does not
 touch speed: a backdrop that speeds up is a backdrop you start watching instead of the
@@ -495,7 +505,8 @@ These are darker and flatter than they could be, on purpose. A transcript in 11-
 has to stay readable on top of whatever this draws, so each style keeps its bright end
 away from the top and bottom of the window where the header, the buttons and the sidebar
 live. Ambient mode (fade the chrome after 45 seconds of quiet) works with these as well as
-with the painted places, and is the best thing to pair them with.
+with the painted places, and is the best thing to pair them with — it sits at the top of
+the Look tab, above both galleries.
 
 ### Three renderers, in this order
 
