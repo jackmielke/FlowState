@@ -131,6 +131,7 @@ final class AppState: ObservableObject {
 
     private func activeDisplayChanged(to id: CGDirectDisplayID) {
         Self.displayLog.notice("active display -> \(id, privacy: .public)")
+        FileHandle.standardError.write(Data("[display] attention -> \(id)\n".utf8))
         // The bubble goes wherever the work is, always — it is a thing on screen, and a
         // camera preview on a screen you are not looking at is not a preview.
         cameraBubble.followDisplay(id)
@@ -210,12 +211,9 @@ final class AppState: ObservableObject {
     /// Every display FlowState could look at. Re-read on launch, on activation, and
     /// whenever macOS reports a display arriving or leaving.
     @Published var displays: [DisplayOption] = []
-    /// The display the last frame actually came from — not the one that was requested.
-    @Published var lastCaptureDisplay: String?
     /// Which display this window sits on, i.e. what "follow the active display" means at
     /// this instant. See `refreshActiveDisplay()`.
     @Published private var windowDisplayID: CGDirectDisplayID?
-    @Published var lastCaptureNote: String?
     /// The realtime session id, from `session.created`. Shown in the header and in the
     /// menu bar; it says whether a socket is open, not which conversation this is.
     @Published var sessionID: String?
@@ -533,7 +531,15 @@ final class AppState: ObservableObject {
         let saved = CGDirectDisplayID(settings.screenDisplayID)
         if saved != DisplayOption.followsActiveID,
            displays.contains(where: { $0.displayID == saved }) { return saved }
-        return ScreenCapture.activeDisplayID()
+        // The settled answer, not the instantaneous one.
+        //
+        // A screenshot taken while the pointer happens to be crossing to the other
+        // screen used to capture that screen — and when the pointer was off every
+        // screen it fell back to the window holding focus, which is "wherever I clicked
+        // last" rather than "where I am working". One notion of attention now drives
+        // the camera, the recording and the frames sent to the model, and it is the one
+        // that has to hold still to count. See `ActiveDisplayGate`.
+        return displayWatcher.current ?? ScreenCapture.activeDisplayID()
     }
 
     /// Why this mode cannot start, or nil when it can.
@@ -2544,7 +2550,7 @@ final class AppState: ObservableObject {
     /// label derived straight from it would keep showing the old screen after you drag
     /// the window to another one, right up until something unrelated redrew the view.
     func refreshActiveDisplay() {
-        let id = ScreenCapture.activeDisplayID()
+        let id = displayWatcher.current ?? ScreenCapture.activeDisplayID()
         if windowDisplayID != id { windowDisplayID = id }
     }
 
@@ -2658,8 +2664,6 @@ final class AppState: ObservableObject {
                 image: frame.thumbnail,
                 sessionID: currentSessionID,
                 entryID: entry?.id))
-            lastCaptureNote = String(format: "%.0f KB", Double(frame.bytes) / 1024)
-            lastCaptureDisplay = frame.display.name
             // A pick that silently fell back (display unplugged between the pick and the
             // capture) is corrected here rather than left to lie in the picker.
             if let wanted = requestedDisplayID, wanted != frame.display.displayID {

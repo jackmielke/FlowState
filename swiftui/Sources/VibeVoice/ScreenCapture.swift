@@ -281,6 +281,22 @@ enum ScreenCapture {
 
     // MARK: - Displays
 
+    /// Where the pointer is, right now, or nil when it is off every screen.
+    ///
+    /// Deliberately no fallback. Somebody watching this over time — `ActiveDisplayGate` —
+    /// wants "I cannot see the pointer" to be distinguishable from "the pointer is
+    /// here", so that a moment between screens holds the last answer instead of
+    /// producing a different one.
+    static func pointerDisplayID() -> CGDirectDisplayID? {
+        // NSEvent.mouseLocation and NSScreen.frame share the same bottom-left origin
+        // global space, so this is a straight containment test.
+        let mouse = NSEvent.mouseLocation
+        guard let under = NSScreen.screens.first(where: { $0.frame.contains(mouse) }),
+              let num = under.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+        else { return nil }
+        return num.uint32Value
+    }
+
     /// The display the app itself is on, i.e. what "follow the active display" resolves to.
     static func activeDisplayID() -> CGDirectDisplayID? {
         // Follow the POINTER, not the window.

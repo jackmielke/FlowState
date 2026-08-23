@@ -233,12 +233,6 @@ struct ContentView: View {
 
                 Spacer()
 
-                if let n = state.lastCaptureNote {
-                    Text("last frame \(n)\(lastCaptureFrom)")
-                        .font(.system(size: 10.5, design: .monospaced))
-                        .foregroundStyle(Theme.textFaint)
-                }
-
                 costReadout
 
                 QualityToggle(mode: state.settings.qualityMode) { state.setQualityMode($0) }
@@ -353,13 +347,6 @@ struct ContentView: View {
         .background(Capsule().fill(Theme.accent.opacity(0.92)))
         .modifier(PulseIf(active: true))
         .help(watchingHelp)
-    }
-
-    /// Which screen the last frame came from — worth the header width only once there is
-    /// more than one it could have been.
-    private var lastCaptureFrom: String {
-        guard state.displays.count > 1, let name = state.lastCaptureDisplay else { return "" }
-        return " · \(name)"
     }
 
     /// Names the screen once there is more than one, so a pill that says something is

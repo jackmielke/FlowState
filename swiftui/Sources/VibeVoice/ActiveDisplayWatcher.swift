@@ -51,7 +51,7 @@ final class ActiveDisplayWatcher {
     }
 
     private func tick() {
-        guard let changed = gate.observe(ScreenCapture.activeDisplayID(), at: Date()) else { return }
+        guard let changed = gate.observe(ScreenCapture.pointerDisplayID(), at: Date()) else { return }
         onChange?(changed)
     }
 }
