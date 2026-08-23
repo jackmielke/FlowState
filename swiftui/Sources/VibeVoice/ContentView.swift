@@ -38,13 +38,15 @@ struct ContentView: View {
 
     private var recordHelp: String {
         if state.isRecording { return "Stop recording and save it" }
-        if !state.audio.running { return "Connect first — there is no microphone running to record from" }
         if let problem = state.recordingError { return problem }
         let mode = state.settings.captureMode
         let size = CaptureStorage.rateLabel(for: state.capturePlan(for: mode))
+        // Only a live session makes it "this conversation". Without one this is a
+        // recorder, and saying otherwise would promise a transcript that is not coming.
+        let what = state.audio.running ? "this conversation" : "your screen and microphone"
         return mode == .audioOnly
-            ? "Record this conversation (\(size))"
-            : "Record this conversation — \(mode.menuLabel.lowercased()), \(size)"
+            ? "Record \(state.audio.running ? "this conversation" : "your microphone") (\(size))"
+            : "Record \(what) — \(mode.menuLabel.lowercased()), \(size)"
     }
 
     /// The record glyph, which says what would be captured. `record.circle` for audio is
@@ -272,10 +274,9 @@ struct ContentView: View {
                         .foregroundStyle(state.isRecording ? Theme.bad : Theme.textDim)
                 }
                 .buttonStyle(IconButtonStyle())
-                // Nothing to tee off until the capture tap is running, so the button is
-                // out rather than going red over a session that cannot be recorded.
-                .disabled(!state.isRecording && !state.audio.running)
-                .opacity(state.isRecording || state.audio.running ? 1 : 0.45)
+                // Always live. Recording opens the microphone itself when no session
+                // has — a screen recorder that first requires you to connect to OpenAI
+                // has the product the wrong way round.
                 .help(recordHelp)
                 .accessibilityLabel(state.isRecording ? "Stop recording" : "Record")
                 .accessibilityValue(state.settings.captureMode.menuLabel)

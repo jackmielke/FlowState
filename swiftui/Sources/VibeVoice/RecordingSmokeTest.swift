@@ -33,17 +33,17 @@ enum RecordingSmokeTest {
     static func runIfRequested(state: AppState) async {
         guard let seconds else { return }
 
-        // The recorder is fed from the capture tap, which only exists while the engine
-        // is running — so the test has to open a real session. That is the point: a
-        // smoke test that bypassed the live path would not be testing the path.
-        if !state.audio.running {
+        // No session by default: recording opens the microphone itself now, and a smoke
+        // test that billed a realtime session every run would not get run.
+        // FLOWSTATE_RECORD_TEST_CONNECT=1 exercises the with-assistant path.
+        if ProcessInfo.processInfo.environment["FLOWSTATE_RECORD_TEST_CONNECT"] == "1" {
             say("connecting…")
             await state.connect()
             for _ in 0..<60 where !state.audio.running {
                 try? await Task.sleep(for: .milliseconds(250))
             }
+            guard state.audio.running else { say("FAILED — audio engine never started"); exit(1) }
         }
-        guard state.audio.running else { say("FAILED — audio engine never started"); exit(1) }
 
         let started = state.startRecording(mode: mode)
         say("start (\(mode.rawValue)): \(started)")

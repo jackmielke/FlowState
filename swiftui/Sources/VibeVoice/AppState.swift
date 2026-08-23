@@ -418,8 +418,26 @@ final class AppState: ObservableObject {
         // The recorder is fed from the capture tap, and the tap only exists while the
         // engine is running. Turning the button red here would be a lie that only comes
         // out at stop time, as an empty file.
-        guard audio.running else {
-            let why = "Nothing to record yet — hit Connect first, then record."
+        // Open the microphone for the recording's sake if no session has opened it.
+        //
+        // Recording used to require a live session, which put a screen recorder behind a
+        // socket to OpenAI and a running meter. That is backwards: capturing your screen
+        // and your voice is the product, and the assistant is the thing added on top of
+        // it. So a recording will open the microphone itself, and — see
+        // `finishRecording` — close it again afterwards if nothing else wanted it.
+        if !audio.running, let why = openMicrophoneForRecording() {
+            note(why)
+            banner = why
+            objectWillChange.send()
+            return why
+        }
+
+        // Deliberately not a second `audio.running` check. The engine publishes that
+        // flag on the next turn of the main queue, so it is still false here even
+        // though the tap is installed and delivering — a guard on it would refuse every
+        // recording that opened its own microphone.
+        guard audio.isCapturing else {
+            let why = "Nothing to record yet — the microphone could not be opened."
             Self.recordingLog.notice("start refused — audio engine not running")
             note(why)
             objectWillChange.send()
@@ -492,6 +510,31 @@ final class AppState: ObservableObject {
              : "Recording this conversation — \(wanted.menuLabel.lowercased()), \(plan.summary).")
         objectWillChange.send()
         return wanted == .audioOnly ? "Recording." : "Recording \(wanted.menuLabel.lowercased())."
+    }
+
+    /// True when the microphone is open only because something is being recorded.
+    /// Cleared by whoever closes it. See `startRecording`.
+    private var micOpenedForRecording = false
+
+    /// - Returns: nil on success, or why it could not be opened.
+    private func openMicrophoneForRecording() -> String? {
+        do { try audio.start() }
+        catch { return "Audio: \(error.localizedDescription)" }
+        audio.setMuted(settings.micMuted)
+        micOpenedForRecording = true
+        Self.recordingLog.notice("opened the microphone for a recording — no session")
+        return nil
+    }
+
+    /// Closes it again, unless a session is using it.
+    private func releaseMicrophoneAfterRecording() {
+        guard micOpenedForRecording else { return }
+        micOpenedForRecording = false
+        // A session opened while the recording ran now owns the microphone, and closing
+        // it here would mute a live conversation.
+        guard !client.isConnected else { return }
+        audio.stop()
+        Self.recordingLog.notice("closed the microphone — the recording it was open for has finished")
     }
 
     // MARK: - What is being captured
@@ -616,6 +659,7 @@ final class AppState: ObservableObject {
         // Before the writer is dropped, or the bubble is left previewing a session that
         // is being torn down and goes black.
         cameraBubbleUse(session: nil)
+        releaseMicrophoneAfterRecording()
         // The writer has closed its file by now, so nothing else should be holding it —
         // and a stale one would keep the storage meter reading a file that is finished.
         activeVideo = nil

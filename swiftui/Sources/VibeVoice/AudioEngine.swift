@@ -201,6 +201,14 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
         startUITimer()
     }
 
+    /// Whether the capture tap is actually installed and running.
+    ///
+    /// `running` is the published mirror of this, set on the next turn of the main queue
+    /// so SwiftUI sees it as a change rather than a write during view evaluation. That
+    /// makes it useless to anything asking immediately after `start()` — which is what
+    /// a recording that opens its own microphone does.
+    var isCapturing: Bool { engine.isRunning }
+
     func stop() {
         guard running else { return }
         uiTimer?.invalidate(); uiTimer = nil
