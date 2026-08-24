@@ -28,13 +28,40 @@ final class WakePhraseTests: XCTestCase {
         XCTAssertFalse(WakePhrase.heyFlow.matches("flow state"))
     }
 
-    /// A live transcript is reported over and over as it is refined. One utterance, one
-    /// wake.
+    /// A live transcript is reported over and over as it is refined. One saying of the
+    /// phrase, one wake.
     func testFiresOnceWhileTheTranscriptGrows() {
         var s = WakeListenerState()
         XCTAssertTrue(s.heard("hey flow", phrase: .heyFlow, now: at(0)))
         XCTAssertFalse(s.heard("hey flow are", phrase: .heyFlow, now: at(0.3)))
         XCTAssertFalse(s.heard("hey flow are you there", phrase: .heyFlow, now: at(0.9)))
+    }
+
+    /// The bug this tail rule exists for.
+    ///
+    /// A continuous recognition task reports one transcript that grows for up to a
+    /// minute, so a phrase said once was still in that string forever — and the old
+    /// "contains" check, plus a one-shot arm, meant the SECOND saying of it could never
+    /// fire. Which is what "the wake word does not work" looked like from outside.
+    func testSayingItAgainLaterFiresAgain() {
+        var s = WakeListenerState()
+        XCTAssertTrue(s.heard("hey flow", phrase: .heyFlow, now: at(0)))
+
+        // …a minute of other conversation, all in the same transcript…
+        let chatter = " so anyway I was thinking about the recording thing and whether it "
+                    + "should follow me between screens which would be really impactful "
+        XCTAssertFalse(s.heard("hey flow" + chatter, phrase: .heyFlow, now: at(20)))
+
+        // …and then it is said again.
+        XCTAssertTrue(s.heard("hey flow" + chatter + " hey flow", phrase: .heyFlow, now: at(30)))
+    }
+
+    /// And the phrase buried in the middle of a long transcript is history, not a wake.
+    func testAnOldMatchStopsCounting() {
+        var s = WakeListenerState()
+        let old = "hey flow " + String(repeating: "and then we talked about it ", count: 6)
+        _ = s.heard("hey flow", phrase: .heyFlow, now: at(0))
+        XCTAssertFalse(s.heard(old, phrase: .heyFlow, now: at(30)))
     }
 
     func testRearmsOnTheNextUtterance() {
@@ -44,6 +71,15 @@ final class WakePhraseTests: XCTestCase {
         // Still inside the cooldown, so a repeat right away is refused.
         XCTAssertFalse(s.heard("hey flow", phrase: .heyFlow, now: at(1)))
         XCTAssertTrue(s.heard("hey flow", phrase: .heyFlow, now: at(10)))
+    }
+
+    func testArmedReportsWhetherItWouldFire() {
+        var s = WakeListenerState()
+        XCTAssertTrue(s.armed)
+        _ = s.heard("hey flow", phrase: .heyFlow, now: at(0))
+        XCTAssertFalse(s.armed)
+        s.utteranceEnded()
+        XCTAssertTrue(s.armed)
     }
 
     func testSilenceNeverWakesIt() {

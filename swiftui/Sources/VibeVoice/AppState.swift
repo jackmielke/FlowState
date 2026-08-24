@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import AppKit
 import AVFoundation
+import Speech
 import Combine
 import os
 import VibeVoiceCore
@@ -605,6 +606,38 @@ final class AppState: ObservableObject {
                 try? line.write(to: URL(fileURLWithPath: "/tmp/flowstate-sleep-test.txt"),
                                 atomically: true, encoding: .utf8)
                 exit(after ? 0 : 1)
+            }
+        }
+
+        // Reports every link in the wake chain after idling for a bit, because "the wake
+        // word does not work" has half a dozen possible causes in three files and no way
+        // to tell them apart from the outside.
+        if ProcessInfo.processInfo.environment["FLOWSTATE_WAKE_DIAG"] == "1" {
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(12))
+                var out = ""
+                func say(_ k: String, _ v: Any) { out += "  \(k.padding(toLength: 26, withPad: " ", startingAt: 0)) \(v)\n" }
+                say("setting wakeWord", self.settings.wakeWord)
+                say("setting clapToWake", self.settings.clapToWake)
+                say("clap sensitivity", self.settings.clapSensitivity)
+                say("speech permission", SFSpeechRecognizer.authorizationStatus().rawValue)
+                say("engine capturing", self.audio.isCapturing)
+                say("mic holders", self.micHolders.sorted())
+                say("mic muted", self.audio.isMuted)
+                say("connected", self.client.isConnected)
+                say("listener running", self.wake.isRunning)
+                say("listener problem", self.wake.problem ?? "none")
+                say("clap enabled", self.wake.clapEnabled)
+                say("snoozed", self.wake.isSnoozed)
+                say("BUFFERS FED", self.wake.buffersFed)
+                say("room level", self.wake.roomLevel)
+                say("recent peak", self.wake.inputPeak)
+                say("clap threshold", self.wake.clapThreshold)
+                say("last heard", self.wake.lastHeard.isEmpty ? "(nothing)" : self.wake.lastHeard)
+                try? out.write(to: URL(fileURLWithPath: "/tmp/flowstate-wake-diag.txt"),
+                               atomically: true, encoding: .utf8)
+                FileHandle.standardError.write(Data(("[wake-diag]\n" + out).utf8))
+                exit(0)
             }
         }
 

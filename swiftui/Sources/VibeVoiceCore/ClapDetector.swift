@@ -83,6 +83,20 @@ public struct ClapDetector: Equatable, Sendable {
     /// How different the two claps may be, as a ratio of the louder to the quieter.
     public var pairTolerance: Float { 2.2 + 1.8 * sensitivity }
 
+    /// How much louder the first loud frame must be than the one immediately before it.
+    ///
+    /// The sharpest discriminator there is, and the one that survives a processed
+    /// microphone. Voice processing — which this app must run, or the assistant hears
+    /// itself — applies gain control and suppresses impulsive noise, so a clap arrives
+    /// quieter than it was and speech arrives louder. Absolute level then separates the
+    /// two badly: measured on this Mac, ordinary speech peaks around 0.11 while a clap
+    /// lands near 0.12.
+    ///
+    /// What processing cannot disguise is the RISE. A clap goes from nothing to its peak
+    /// inside one 10 ms frame. A spoken syllable takes three to five frames to get there,
+    /// however loud it ends up.
+    public var riseRatio: Float { 5 - 2 * sensitivity }
+
     /// After waking, ignore everything — including the applause that follows somebody
     /// demonstrating it.
     public var cooldown: TimeInterval { 2.5 }
@@ -100,6 +114,10 @@ public struct ClapDetector: Equatable, Sendable {
     /// is something to judge, the gap it should be judged against reads as zero and the
     /// rule silently never fires. Which is exactly what it did.
     private var transientQuietRun: TimeInterval = .greatestFiniteMagnitude
+    /// The previous frame's peak, for the attack test.
+    private var previousPeak: Float = 0
+    /// How abrupt this transient's onset was.
+    private var transientRise: Float = 0
     private var lastClapAt: TimeInterval?
     private var lastClapPeak: Float = 0
     /// Whether the last loud run was itself accepted as a clap.
@@ -128,6 +146,7 @@ public struct ClapDetector: Equatable, Sendable {
         let loud = peak > threshold
 
         defer {
+            previousPeak = peak
             if !loud {
                 background += (peak - background) * 0.05
                 background = max(background, 0.004)
@@ -145,6 +164,7 @@ public struct ClapDetector: Equatable, Sendable {
                 transientStart = now
                 transientPeak = peak
                 transientQuietRun = lastLoudAt.map { now - $0 } ?? .greatestFiniteMagnitude
+                transientRise = peak / Swift.max(previousPeak, 0.0005)
             } else {
                 transientPeak = max(transientPeak, peak)
             }
@@ -157,6 +177,13 @@ public struct ClapDetector: Equatable, Sendable {
         let length = now - start
         transientStart = nil
         transientPeak = 0
+
+        // Rule 0, and the strongest: it has to have arrived, not arisen.
+        if transientRise < riseRatio {
+            lastClapAt = nil
+            previousRunWasClap = false
+            return .rejected("came up too gradually — that is a voice, not a clap", peak: top)
+        }
 
         if length > maxLength {
             lastClapAt = nil
@@ -214,6 +241,8 @@ public struct ClapDetector: Equatable, Sendable {
     public mutating func reset() {
         transientStart = nil
         transientPeak = 0
+        transientRise = 0
+        previousPeak = 0
         lastClapAt = nil
         previousRunWasClap = false
     }

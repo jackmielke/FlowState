@@ -97,3 +97,45 @@ final class ClapEndToEndTests: XCTestCase {
     }
 }
 
+
+extension ClapEndToEndTests {
+
+    /// The case the level threshold cannot separate.
+    ///
+    /// Measured on the real machine: with voice processing in the path, speech peaks at
+    /// about 0.11 and a clap lands near 0.12. Anything deciding on loudness alone has to
+    /// either take both or refuse both — which is exactly what was happening.
+    func testSeparatesAQuietClapFromLouderSpeech() {
+        // A clap: nothing, then everything, then gone.
+        var clapping = ClapDetector(sensitivity: 0.8)
+        var events: [ClapEvent] = []
+        var t = 0.0
+        while t < 3 {
+            var peak: Float = 0.005
+            for c in [1.5, 1.8] where t >= c && t < c + 0.05 {
+                peak = max(peak, 0.12 * exp(-10 * Float((t - c) / 0.05)))
+            }
+            events.append(clapping.feed(peak: peak, at: t))
+            t += sub
+        }
+        XCTAssertTrue(events.contains { if case .wake = $0 { return true }; return false },
+                      "a quiet clap should still wake it")
+
+        // Speech: louder at its peak, but it takes four frames to get there.
+        var talking = ClapDetector(sensitivity: 0.8)
+        var speechEvents: [ClapEvent] = []
+        t = 0
+        while t < 3 {
+            var peak: Float = 0.005
+            for syllable in stride(from: 1.0, to: 2.6, by: 0.22) where t >= syllable && t < syllable + 0.18 {
+                let age = Float((t - syllable) / 0.18)
+                // Rises over ~40 ms, holds, falls away.
+                peak = max(peak, 0.16 * sin(Float.pi * age))
+            }
+            speechEvents.append(talking.feed(peak: peak, at: t))
+            t += sub
+        }
+        XCTAssertFalse(speechEvents.contains { if case .wake = $0 { return true }; return false },
+                       "speech louder than the clap must still be refused")
+    }
+}

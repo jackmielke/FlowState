@@ -54,16 +54,30 @@ public struct WakePhrase: Equatable, Sendable {
 /// rule is: once fired, stay quiet until the transcript has been reset — which is what
 /// the end of an utterance looks like from here.
 public struct WakeListenerState: Equatable, Sendable {
-    public private(set) var armed = true
     public private(set) var lastFiredAt: Date?
 
-    /// Ignore everything until this moment.
-    ///
-    /// For the panic key. Hanging up on an accidental wake is not enough on its own —
-    /// whatever triggered it is still happening, so the clap that opened a session by
-    /// mistake opens another one two seconds later and the user is now fighting the app.
-    /// Silence has to be something you can ask for, not just something you hope for.
+    /// Ignore everything until this moment. For the panic key — see `AppState.hush`.
     public private(set) var snoozedUntil: Date?
+
+    /// The shortest gap between two wakes, so a phrase heard twice as the recogniser
+    /// settles cannot open two sessions.
+    public var cooldown: TimeInterval = 3
+
+    /// Only the end of the transcript is considered.
+    ///
+    /// A continuous recognition task reports ONE transcript that grows for as long as the
+    /// task lives — up to a minute here. So a phrase said once stays in that string
+    /// forever, and a simple "does it contain the phrase" is true from then on. Matching
+    /// only the tail means the phrase stops counting as soon as enough has been said
+    /// after it, which is what makes "said just now" different from "said at some point".
+    public var tailCharacters = 45
+
+    /// Length of the transcript when it last fired, so growth past the match re-arms it
+    /// without needing the recogniser to declare the utterance over — which, on device
+    /// and mid-flow, it often does not.
+    private var firedAtLength: Int?
+
+    public init() {}
 
     public mutating func snooze(until: Date) { snoozedUntil = until }
 
@@ -72,26 +86,33 @@ public struct WakeListenerState: Equatable, Sendable {
         return now < snoozedUntil
     }
 
-    /// The shortest gap between two wakes, so a phrase heard twice as the recogniser
-    /// settles cannot open two sessions.
-    public var cooldown: TimeInterval = 3
-
-    public init() {}
-
     /// - Parameter transcript: everything heard in the current utterance so far.
-    /// - Returns: true exactly once per utterance containing the phrase.
+    /// - Returns: true exactly once per saying of the phrase.
     public mutating func heard(_ transcript: String,
                                phrase: WakePhrase,
                                now: Date) -> Bool {
-        guard phrase.matches(transcript) else { return false }
+        let normalised = WakePhrase.normalise(transcript)
+        let tail = String(normalised.suffix(tailCharacters))
+        guard phrase.matches(tail) else {
+            // The phrase has scrolled out of the tail: whatever was said is over.
+            if let fired = firedAtLength, normalised.count > fired { firedAtLength = nil }
+            return false
+        }
         guard !isSnoozed(at: now) else { return false }
-        guard armed else { return false }
+        if let fired = firedAtLength {
+            // Same saying of it, reported again as the recogniser refines the line.
+            guard normalised.count > fired + tailCharacters else { return false }
+        }
         if let last = lastFiredAt, now.timeIntervalSince(last) < cooldown { return false }
-        armed = false
+        firedAtLength = normalised.count
         lastFiredAt = now
         return true
     }
 
-    /// The recogniser finished an utterance and the next one starts from nothing.
-    public mutating func utteranceEnded() { armed = true }
+    /// The recogniser finished an utterance, or was restarted, and the next one starts
+    /// from nothing.
+    public mutating func utteranceEnded() { firedAtLength = nil }
+
+    /// True when a wake would be allowed right now, ignoring what was said.
+    public var armed: Bool { firedAtLength == nil }
 }

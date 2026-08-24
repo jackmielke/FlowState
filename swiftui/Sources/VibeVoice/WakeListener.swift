@@ -148,8 +148,14 @@ final class WakeListener {
     /// a false trigger can be looked at afterwards rather than remembered.
     private(set) var phraseTrace: [WakeTrace] = []
 
+    /// How many buffers have reached this, ever. The single most useful number when the
+    /// wake phrase "does not work": zero means the audio never arrives and nothing in
+    /// this file is at fault.
+    private(set) nonisolated(unsafe) var buffersFed = 0
+
     /// Called from the audio tap with the same buffers the socket receives.
     nonisolated func feed(_ pcm16: Data) {
+        buffersFed += 1
         guard let format = Self.format() else { return }
         let frames = pcm16.count / 2
         guard frames > 0,
@@ -197,10 +203,16 @@ final class WakeListener {
                 guard let self else { return }
                 if let result {
                     let text = result.bestTranscription.formattedString
+                    let changed = text != self.lastHeard
                     self.lastHeard = text
                     if self.state.heard(text, phrase: self.phrase, now: Date()) {
-                        self.notePhrase(.woke, detail: text)
+                        self.notePhrase(.woke, detail: "heard \"\(text.suffix(40))\"")
                         self.onWake?()
+                    } else if changed, !text.isEmpty {
+                        // Everything it heard, whether or not it matched. Without this the
+                        // panel can say only that nothing happened, which is the one thing
+                        // already obvious from the outside.
+                        self.notePhrase(.rejected, detail: "\"\(text.suffix(40))\"")
                     }
                     if result.isFinal { self.state.utteranceEnded() }
                 }
@@ -211,6 +223,13 @@ final class WakeListener {
     }
 
     private func notePhrase(_ kind: WakeTrace.Kind, detail: String) {
+        // One line per utterance rather than per refinement: partial results arrive
+        // several times a second and each is a longer version of the last.
+        if let last = phraseTrace.first, last.kind == kind,
+           Date().timeIntervalSince(last.at) < 1.2 {
+            phraseTrace[0] = WakeTrace(at: Date(), kind: kind, peak: 0, detail: detail)
+            return
+        }
         phraseTrace.insert(WakeTrace(at: Date(), kind: kind, peak: 0, detail: detail), at: 0)
         if phraseTrace.count > 20 { phraseTrace.removeLast() }
     }
