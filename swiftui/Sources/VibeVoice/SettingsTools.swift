@@ -48,6 +48,37 @@ enum SettingsTools {
             SettingChoice(key: "devNarrate", spoken: "narrating what it is coding",
                           aliases: ["narration", "progress updates"]),
             SettingChoice(key: "menuBarEnabled", spoken: "the menu bar icon", aliases: ["menu bar"]),
+
+            // Numbers. Every one of these is a slider somewhere, and every one of them is
+            // the kind of thing you want to adjust while looking at the result rather
+            // than while looking for the slider.
+            SettingChoice(key: "speed", spoken: "how fast it talks",
+                          aliases: ["speaking speed", "talking speed", "speech rate"],
+                          range: 0.5...1.5, unit: nil),
+            SettingChoice(key: "screenInterval", spoken: "how often it looks at the screen",
+                          aliases: ["screen interval", "watch interval"],
+                          range: 2...30, unit: "seconds"),
+            SettingChoice(key: "motionIntensity", spoken: "how much the background moves",
+                          aliases: ["motion intensity", "movement"],
+                          range: 0...1, asPercent: true),
+            SettingChoice(key: "clapSensitivity", spoken: "how easily clapping wakes it",
+                          aliases: ["clap sensitivity"],
+                          range: 0...1, asPercent: true),
+            SettingChoice(key: "vadThreshold", spoken: "how sensitive its hearing is",
+                          aliases: ["voice detection", "mic sensitivity"],
+                          range: 0...1, asPercent: true),
+            SettingChoice(key: "silenceDurationMs", spoken: "how long it waits before replying",
+                          aliases: ["silence duration", "pause before replying"],
+                          range: 200...1500, unit: "milliseconds"),
+            SettingChoice(key: "maxScreenFrames", spoken: "how many screenshots it remembers",
+                          aliases: ["screen frames"],
+                          range: 0...10, unit: nil),
+            SettingChoice(key: "screenshotSize", spoken: "how detailed the screenshots are",
+                          aliases: ["screenshot size", "screenshot detail"],
+                          range: 640...2560, unit: "pixels"),
+            SettingChoice(key: "photoRotateSeconds", spoken: "how often the photo changes",
+                          aliases: ["photo rotation"],
+                          range: 0...900, unit: "seconds"),
         ]
     }
 

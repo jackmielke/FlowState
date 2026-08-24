@@ -2668,15 +2668,60 @@ final class AppState: ObservableObject {
     /// Applies a spoken settings change. See `SettingsTools` for what is reachable and
     /// `SettingCommand` for how the words are matched.
     func changeSetting(name: String, to spoken: String) -> String {
+        let catalogue = SettingsTools.catalogue(settings)
+        // The present value, so "a bit faster" has something to be faster than.
+        let now = SettingCommand.find(name, in: catalogue).map { number(of: $0.key) } ?? 0
         switch SettingCommand.resolve(setting: name, value: spoken,
-                                      catalogue: SettingsTools.catalogue(settings)) {
+                                      catalogue: catalogue, current: now) {
         case .failed(let why):
             return why.spoken
         case .ok(let choice, let value):
             let said = apply(choice.key, value)
             objectWillChange.send()
             return said
+        case .number(let choice, let value):
+            let said = applyNumber(choice, value)
+            objectWillChange.send()
+            return said
         }
+    }
+
+    /// Turn-taking lives on the server, so changing it means telling the session.
+    private func pushSessionUpdate() {
+        guard client.isConnected else { return }
+        client.sendSessionUpdate(settings, nativeTools: tools.realtimeTools())
+    }
+
+    private func number(of key: String) -> Double {
+        switch key {
+        case "speed":              return settings.speed
+        case "screenInterval":     return settings.screenInterval
+        case "motionIntensity":    return settings.motionIntensity
+        case "clapSensitivity":    return settings.clapSensitivity
+        case "vadThreshold":       return settings.vadThreshold
+        case "silenceDurationMs":  return settings.silenceDurationMs
+        case "maxScreenFrames":    return Double(settings.maxScreenFrames)
+        case "screenshotSize":     return Double(settings.screenshotSize)
+        case "photoRotateSeconds": return settings.photoRotateSeconds
+        default:                   return 0
+        }
+    }
+
+    private func applyNumber(_ choice: SettingChoice, _ v: Double) -> String {
+        switch choice.key {
+        case "speed":              settings.speed = v
+        case "screenInterval":     settings.screenInterval = v; syncScreenTimer()
+        case "motionIntensity":    settings.motionIntensity = v
+        case "clapSensitivity":    settings.clapSensitivity = v; wake.clapSensitivity = Float(v)
+        case "vadThreshold":       settings.vadThreshold = v; pushSessionUpdate()
+        case "silenceDurationMs":  settings.silenceDurationMs = v; pushSessionUpdate()
+        case "maxScreenFrames":    settings.maxScreenFrames = Int(v.rounded())
+        case "screenshotSize":     settings.screenshotSize = Int(v.rounded())
+        case "photoRotateSeconds": settings.photoRotateSeconds = v
+        default: return "I couldn't change that one."
+        }
+        let name = choice.spoken.prefix(1).uppercased() + choice.spoken.dropFirst()
+        return "\(name): \(SettingCommand.say(v, choice))."
     }
 
     /// One switch statement rather than key paths and reflection: every one of these has

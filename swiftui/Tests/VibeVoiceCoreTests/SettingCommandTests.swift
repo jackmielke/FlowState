@@ -72,3 +72,69 @@ final class SettingCommandTests: XCTestCase {
         XCTAssertTrue(e.spoken.contains("and a few more"), e.spoken)
     }
 }
+
+final class SettingNumberTests: XCTestCase {
+
+    private let speed = SettingChoice(key: "speed", spoken: "how fast it talks",
+                                      range: 0.5...1.5)
+    private let interval = SettingChoice(key: "screenInterval", spoken: "the screen interval",
+                                        range: 2...30, unit: "seconds")
+    private let intensity = SettingChoice(key: "motionIntensity", spoken: "the movement",
+                                         range: 0...1, asPercent: true)
+
+    func testPullsANumberOutOfASentence() {
+        XCTAssertEqual(SettingCommand.number("about 8 seconds", in: interval), 8)
+        XCTAssertEqual(SettingCommand.number("12", in: interval), 12)
+        XCTAssertEqual(SettingCommand.number("1.2", in: speed), 1.2)
+    }
+
+    /// A value outside the range means "as far as it goes", not "no".
+    func testClampsRatherThanRefusing() {
+        XCTAssertEqual(SettingCommand.number("100 seconds", in: interval), 30)
+        XCTAssertEqual(SettingCommand.number("0", in: interval), 2)
+    }
+
+    /// "Sixty percent" and "0.6" are the same request, and both get said.
+    func testPercentagesAndFractionsBothWork() throws {
+        XCTAssertEqual(try XCTUnwrap(SettingCommand.number("60%", in: intensity)), 0.6, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(SettingCommand.number("0.6", in: intensity)), 0.6, accuracy: 0.001)
+        XCTAssertEqual(SettingCommand.number("sixty", in: intensity), nil, "words are the model's job")
+    }
+
+    func testTheWordsPeopleUseInsteadOfNumbers() throws {
+        XCTAssertEqual(SettingCommand.number("max", in: speed), 1.5)
+        XCTAssertEqual(SettingCommand.number("slowest", in: speed), 0.5)
+        XCTAssertEqual(try XCTUnwrap(SettingCommand.number("half", in: intensity)), 0.5, accuracy: 0.001)
+    }
+
+    /// The request this is really for: adjusting by ear, without knowing the number.
+    func testRelativeChanges() throws {
+        XCTAssertEqual(try XCTUnwrap(SettingCommand.nudge("a bit faster", in: speed, from: 1.0)),
+                       1.15, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(SettingCommand.nudge("slower", in: speed, from: 1.0)),
+                       0.85, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(SettingCommand.nudge("much faster", in: speed, from: 1.0)),
+                       1.3, accuracy: 0.001)
+        XCTAssertNil(SettingCommand.nudge("purple", in: speed, from: 1.0))
+    }
+
+    func testRelativeChangesStopAtTheEnds() {
+        XCTAssertEqual(SettingCommand.nudge("faster", in: speed, from: 1.5), 1.5)
+        XCTAssertEqual(SettingCommand.nudge("slower", in: speed, from: 0.5), 0.5)
+    }
+
+    /// Read back the way a person would say it, not as a float.
+    func testSpokenBack() {
+        XCTAssertEqual(SettingCommand.say(0.6, intensity), "60%")
+        XCTAssertEqual(SettingCommand.say(8, interval), "8 seconds")
+        XCTAssertEqual(SettingCommand.say(1.2, speed), "1.2")
+    }
+
+    /// A relative request resolves through `resolve`, using the current value.
+    func testResolveHandlesRelative() {
+        let r = SettingCommand.resolve(setting: "speed", value: "a bit faster",
+                                       catalogue: [speed], current: 1.0)
+        guard case .number(_, let v) = r else { return XCTFail("expected a number") }
+        XCTAssertEqual(v, 1.15, accuracy: 0.001)
+    }
+}

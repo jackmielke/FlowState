@@ -101,7 +101,15 @@ struct AppSettings: Codable, Equatable {
 
     /// The scene behind the orb. Midnight and Paper follow the existing theme; the place
     /// presets and a custom photo are painted by `BackdropView`.
-    var backdrop: Backdrop = .midnight
+    /// Aurora, moving, out of the box.
+    ///
+    /// The old default was a flat near-black field, which is the safe choice and the
+    /// wrong one: the first thing anybody sees decides whether they keep the app open,
+    /// and this is an app whose whole argument is that it is nicer to be in the room
+    /// with than a terminal. It costs a GPU shader behind the orb — `MotionBudget`
+    /// already drops it to one frame when the window is occluded or Reduce Motion is on,
+    /// which is the version of "it is free when nobody is looking" that matters.
+    var backdrop: Backdrop = .motion
     var backdropImagePath: String = ""
     /// "auto" follows the local clock; otherwise a pinned Daylight raw value.
     var daylightMode: String = "auto"
@@ -109,7 +117,7 @@ struct AppSettings: Codable, Equatable {
     var photoRotateSeconds: Double = 120
 
     /// Which moving backdrop `Backdrop.motion` shows.
-    var motionStyle: MotionStyle = .fluid
+    var motionStyle: MotionStyle = .aurora
     /// 0…1 — how much the motion moves. Amplitude and contrast only: nothing here
     /// changes the speed, because a backdrop you notice speeding up is a backdrop you
     /// start watching instead of the person you are talking to.
