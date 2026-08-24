@@ -620,13 +620,25 @@ struct SettingsView: View {
 
                 // "Off" is one of the choices rather than a switch beside them: turning
                 // the shortcut off and picking a different one are the same decision.
-                SegmentedPicker(options: HotkeyCombo.all.map { (value: $0.id, label: $0.label) }
+                SegmentedPicker(options: HotkeyCombo.summonChoices.map { (value: $0.id, label: $0.label) }
                                         + [(value: "", label: "Off")],
                                 selection: Binding(
                                     get: { state.settings.summonHotkey },
                                     set: { state.settings.summonHotkey = $0; state.applySummonHotkey() }),
                                 accessibilityPrefix: "Summon shortcut")
                 caption("Summons \(kAssistantDisplayName) from any app, and hides it again if it is already in front. ⌘⇧2 still sends a screenshot from anywhere. If a shortcut does nothing, another app already owns it — pick a different one.")
+
+                HStack {
+                    Text("Talk to it").font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                    Spacer()
+                }
+                SegmentedPicker(options: HotkeyCombo.connectChoices.map { (value: $0.id, label: $0.label) }
+                                        + [(value: "", label: "Off")],
+                                selection: Binding(
+                                    get: { state.settings.connectHotkey },
+                                    set: { state.settings.connectHotkey = $0; state.applyConnectHotkey() }),
+                                accessibilityPrefix: "Connect shortcut")
+                caption("Connects from anywhere, and hangs up if a session is already open — without going to find the window first. The point of something always there is that reaching it is not a task. A bare chord like holding ⌃⇧ on its own would need an event tap, and that means an Accessibility prompt, so this asks for a real key instead.")
             }
 
 

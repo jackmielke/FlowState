@@ -13,13 +13,49 @@ import VibeVoiceCore
 /// prompt is.
 struct ModelSummarizer: Summarizer {
 
-    let name = "gpt-4.1-mini"
+    /// Which model writes it.
+    ///
+    /// Two, not one. The rolling summaries exist to keep the conversation's own context
+    /// small — they are written every few minutes, most are never read by a human, and a
+    /// cheap fast model is the right tool. The recap at the end of a session is the one
+    /// somebody actually reads, and it is written once, so it is worth the better model
+    /// and the wait.
+    enum Grade {
+        /// Every few minutes, mostly for the model's own benefit.
+        case rolling
+        /// Once, over a whole conversation, for a person.
+        case final
+
+        var model: String {
+            switch self {
+            case .rolling: return "gpt-4.1-mini"
+            case .final:   return "gpt-5"
+            }
+        }
+
+        /// GPT-5 thinks before it writes, and the thinking is billed against this same
+        /// ceiling. A budget sized for the visible answer is spent entirely on reasoning
+        /// and the reply comes back EMPTY with finish_reason "length" — measured: 220
+        /// tokens in, 220 reasoning tokens out, no content. That failure is silent,
+        /// because an empty summary looks exactly like a model that had nothing to say,
+        /// and it falls through to the offline summariser. Hence the headroom.
+        var maxOutputTokens: Int {
+            switch self {
+            case .rolling: return 700
+            case .final:   return 4_000
+            }
+        }
+    }
+
+    let grade: Grade
+
+    init(grade: Grade = .rolling) { self.grade = grade }
+
+    var name: String { grade.model }
 
     /// Falls back to this when there is no key or the call fails, so the feature never
     /// simply stops working. A worse summary beats a missing one.
     private let fallback = ExtractiveSummarizer()
-
-    private static let model = "gpt-4.1-mini"
 
     /// Written against the failure modes the first drafts actually showed.
     ///
@@ -109,14 +145,27 @@ struct ModelSummarizer: Summarizer {
         r.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         r.setValue("application/json", forHTTPHeaderField: "Content-Type")
         r.timeoutInterval = 45
-        r.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": Self.model,
-            "temperature": 0.3,
+        // Two families, two shapes of request. Live-probed against this account rather
+        // than assumed, because the differences are all silent or fatal:
+        //   * `max_tokens` is REJECTED by gpt-5 — "use max_completion_tokens instead".
+        //   * `temperature: 0.3` is REJECTED by gpt-5 — only the default 1 is allowed.
+        //   * and see `Grade.maxOutputTokens` for the empty-reply trap.
+        let reasons = grade.model.hasPrefix("gpt-5") || grade.model.hasPrefix("o")
+        var body: [String: Any] = [
+            "model": grade.model,
             "messages": [
                 ["role": "system", "content": system],
                 ["role": "user", "content": user],
             ],
-        ])
+        ]
+        if reasons {
+            body["max_completion_tokens"] = grade.maxOutputTokens
+        } else {
+            body["max_tokens"] = grade.maxOutputTokens
+            body["temperature"] = 0.3
+        }
+        r.timeoutInterval = reasons ? 120 : 45
+        r.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await URLSession.shared.data(for: r)
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
@@ -126,10 +175,20 @@ struct ModelSummarizer: Summarizer {
             throw NSError(domain: "Summary", code: code, userInfo: [NSLocalizedDescriptionKey: m])
         }
         guard let choices = json["choices"] as? [[String: Any]],
-              let message = choices.first?["message"] as? [String: Any],
+              let first = choices.first,
+              let message = first["message"] as? [String: Any],
               let content = message["content"] as? String else {
             throw NSError(domain: "Summary", code: -1,
                           userInfo: [NSLocalizedDescriptionKey: "no content in the reply"])
+        }
+        // Named rather than silently falling through, because this is what running out
+        // of reasoning budget looks like from here and it is indistinguishable from a
+        // model that had nothing to say.
+        if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let why = (first["finish_reason"] as? String) ?? "unknown"
+            throw NSError(domain: "Summary", code: -2, userInfo: [
+                NSLocalizedDescriptionKey: "\(grade.model) returned nothing (finish_reason: \(why))",
+            ])
         }
         return content
     }

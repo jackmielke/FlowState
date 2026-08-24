@@ -25,7 +25,26 @@ struct HotkeyCombo: Equatable, Identifiable {
         id: "cmdShiftF", label: "⌘⇧F",
         keyCode: UInt32(kVK_ANSI_F), modifiers: UInt32(cmdKey | shiftKey))
 
-    static let all = [cmdShiftSpace, optionSpace, cmdShiftF]
+    static let ctrlShiftSpace = HotkeyCombo(
+        id: "ctrlShiftSpace", label: "⌃⇧Space",
+        keyCode: UInt32(kVK_Space), modifiers: UInt32(controlKey | shiftKey))
+
+    static let ctrlShiftV = HotkeyCombo(
+        id: "ctrlShiftV", label: "⌃⇧V",
+        keyCode: UInt32(kVK_ANSI_V), modifiers: UInt32(controlKey | shiftKey))
+
+    static let cmdShiftL = HotkeyCombo(
+        id: "cmdShiftL", label: "⌘⇧L",
+        keyCode: UInt32(kVK_ANSI_L), modifiers: UInt32(cmdKey | shiftKey))
+
+    /// Split rather than one list of six: a segmented control with seven segments in a
+    /// 440-point pane is unreadable, and the two keys should not offer each other's
+    /// combos anyway — binding both to the same chord registers one and silently loses
+    /// the other.
+    static let summonChoices = [cmdShiftSpace, optionSpace, cmdShiftF]
+    static let connectChoices = [ctrlShiftSpace, ctrlShiftV, cmdShiftL]
+
+    static let all = summonChoices + connectChoices
 
     static func named(_ id: String) -> HotkeyCombo {
         all.first { $0.id == id } ?? .cmdShiftSpace
@@ -60,6 +79,17 @@ final class GlobalHotkey {
     }
 
     func unregisterSummon() { unbind(id: 2) }
+
+    /// Connect / hang up, from anywhere.
+    ///
+    /// A separate slot from summon on purpose: bringing the window forward and opening a
+    /// session are different intentions, and the one worth having under a finger is the
+    /// one that does not require finding the window first.
+    func registerConnect(_ combo: HotkeyCombo, action: @escaping () -> Void) {
+        bind(id: 3, keyCode: combo.keyCode, modifiers: combo.modifiers, action: action)
+    }
+
+    func unregisterConnect() { unbind(id: 3) }
 
     // MARK: -
 

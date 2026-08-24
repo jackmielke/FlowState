@@ -138,6 +138,14 @@ struct AppSettings: Codable, Equatable {
     /// Summon hotkey. Empty string = off.
     var summonHotkey: String = "cmdShiftSpace"
 
+    /// Connect or hang up from anywhere. Empty string = off.
+    ///
+    /// Defaults to ⌃⇧Space rather than a modifier-only chord like Wispr Flow's
+    /// double-tap. Carbon hotkeys need a real key and cost no permission; watching for
+    /// bare modifiers means an event tap, which means Accessibility, and this app has
+    /// already spent enough of its owner's patience on macOS privacy dialogs.
+    var connectHotkey: String = "ctrlShiftSpace"
+
     /// Commit what each task changed, on the current branch, when it finishes.
     ///
     /// Without this Dev Mode edits the working tree and stops, so a session's work is
@@ -234,6 +242,7 @@ struct AppSettings: Codable, Equatable {
         case devNarrate, devNarrateInterval, devNarrateMax, devPermissionMode
         case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
         case photoRotateSeconds, menuBarEnabled, summonHotkey, devNudgeDismissed
+        case connectHotkey
         case motionStyle, motionIntensity, motionAssets
         case devAutoCommit, devAutoPush, hudEnabled, hudStyle, cameraBubble
         case cameraSize, cameraCorner, cameraShape, cameraControls, cameraMirrored
@@ -290,6 +299,7 @@ extension AppSettings {
         motionAssets      = v(.motionAssets, d.motionAssets)
         menuBarEnabled    = v(.menuBarEnabled, d.menuBarEnabled)
         summonHotkey      = v(.summonHotkey, d.summonHotkey)
+        connectHotkey     = v(.connectHotkey, d.connectHotkey)
         devNudgeDismissed = v(.devNudgeDismissed, d.devNudgeDismissed)
         devAutoCommit     = v(.devAutoCommit, d.devAutoCommit)
         devAutoPush       = v(.devAutoPush, d.devAutoPush)

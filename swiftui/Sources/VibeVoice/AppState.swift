@@ -337,6 +337,21 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Connect or hang up without going to find the window.
+    ///
+    /// The point of an assistant that is always there is that reaching it is not a task.
+    /// Summoning the window and opening a session were the same key before, which meant
+    /// starting a conversation began with looking at an app.
+    func applyConnectHotkey() {
+        guard !settings.connectHotkey.isEmpty else {
+            GlobalHotkey.shared.unregisterConnect()
+            return
+        }
+        GlobalHotkey.shared.registerConnect(HotkeyCombo.named(settings.connectHotkey)) { [weak self] in
+            Task { @MainActor in self?.toggleConnection() }
+        }
+    }
+
     func applyEffectiveAppearance() {
         if settings.backdrop.isScene {
             AppearanceMode.dark.applyToApp()
@@ -1038,6 +1053,7 @@ final class AppState: ObservableObject {
         for name in settings.disabledTools { tools.setEnabled(false, for: name) }
 
         applySummonHotkey()
+        applyConnectHotkey()
         // NOT applyHUD() here. Building the widget's hosting view during init means
         // constructing a view that observes this very object while SwiftUI is still
         // assembling the scene graph, which crashes the app on launch. ContentView calls
@@ -1174,10 +1190,12 @@ final class AppState: ObservableObject {
     func disconnect() {
         stopScreenTimer()
         stopResponseWatchdog()
-        // One last summary of whatever was said since the previous one, before the
-        // session id stops meaning anything. Fire-and-forget: it lands in the transcript
-        // and the note file even though the socket is gone.
-        summaries.summarizeNow()
+        // One recap of the WHOLE conversation, before the session id stops meaning
+        // anything — not a summary of the tail that happened not to be covered yet.
+        // This is the one that gets read, so it is the one that gets the better model
+        // and the whole transcript. Fire-and-forget: it lands in the note file and the
+        // panel even though the socket is gone.
+        summaries.summarizeSession(currentSessionID)
         stopSummaryClock()
         utterance.discard()
         pendingUtteranceAudio = nil
@@ -1487,7 +1505,7 @@ final class AppState: ObservableObject {
             // Same close-out as a deliberate disconnect: a dropped socket ends the
             // conversation just as thoroughly, and leaving the clock ticking would keep
             // summarising a session that is over.
-            summaries.summarizeNow()
+            summaries.summarizeSession(currentSessionID)
             stopSummaryClock()
             utterance.discard()
             pendingUtteranceAudio = nil
@@ -2373,9 +2391,19 @@ final class AppState: ObservableObject {
         // after the user is already looking at a different one. It belongs in the file it
         // names and in the panel either way — but not on screen in a conversation it is
         // not about.
+        // Only the recap goes on screen.
+        //
+        // The rolling summaries are context compression: they exist so the model can
+        // refer to an hour ago without the whole history still being on the wire. Every
+        // one of them was also being printed into the transcript, so a long conversation
+        // filled up with summaries of itself — the thing the user is reading, interrupted
+        // every few minutes by a paraphrase of what they just said. They still run, they
+        // are still filed, they are still in the panel; they just stop shouting.
         if summary.sessionID == currentSessionID {
-            transcript.append(TranscriptItem(speaker: .system, text: line,
-                                             sessionID: summary.sessionID))
+            if delivery.isFinal {
+                transcript.append(TranscriptItem(speaker: .system, text: line,
+                                                 sessionID: summary.sessionID))
+            }
             latestSummary = summary
         }
         summaryProblem = nil

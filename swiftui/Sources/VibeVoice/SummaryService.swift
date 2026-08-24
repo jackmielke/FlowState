@@ -104,6 +104,10 @@ final class SummaryService {
         /// Whether this summary should also be filed back into the live conversation, so
         /// the assistant can refer to it.
         var fileIntoChat: Bool
+        /// A recap of a whole conversation, rather than one of the rolling summaries
+        /// that keep the model's context small. Only this one is worth putting in front
+        /// of the user — see `AppState.handleSummary`.
+        var isFinal: Bool = false
     }
 
     /// Called on the main actor with every finished summary, so `AppState` can put it in
@@ -128,13 +132,19 @@ final class SummaryService {
          // A real model by default now. It falls back to the extractive placeholder on
          // its own when there is no key or the call fails, so this stays offline-safe
          // while producing notes rather than quoted lines.
-         summarizer: Summarizer = ModelSummarizer(),
+         summarizer: Summarizer = ModelSummarizer(grade: .rolling),
+         // The one somebody reads. Written once per conversation, over the whole of it,
+         // by the better model — see `ModelSummarizer.Grade`.
+         finalSummarizer: Summarizer = ModelSummarizer(grade: .final),
          sinks: [NoteSink] = [MarkdownNoteSink()]) {
         self.store = store
         self.job = SummaryJob(policy: policy)
         self.summarizer = summarizer
+        self.finalSummarizer = finalSummarizer
         self.sinks = sinks
     }
+
+    private let finalSummarizer: Summarizer
 
     func begin(session id: String) { job.begin(session: id) }
     func end() { job.end() }
@@ -171,11 +181,14 @@ final class SummaryService {
             if job.isRunning { return "I'm already writing one — give me a second." }
             return "There isn't enough of that conversation to summarise yet."
         }
-        run(digest)
+        run(digest, using: finalSummarizer, final: true)
         return "Summarising \(digest.entries.count) turns."
     }
 
-    private func run(_ digest: SummaryDigest) {
+    private func run(_ digest: SummaryDigest,
+                     using summarizer: Summarizer? = nil,
+                     final: Bool = false) {
+        let summarizer = summarizer ?? self.summarizer
         onActivity?()
         Task { @MainActor in
             guard let text = await summarizer.summarize(digest),
@@ -197,7 +210,8 @@ final class SummaryService {
                 }
             }
             onSummary?(summary, Delivery(noteReceipt: receipt,
-                                         fileIntoChat: job.policy.destination.writesChat))
+                                         fileIntoChat: job.policy.destination.writesChat,
+                                         isFinal: final))
             onActivity?()
         }
     }

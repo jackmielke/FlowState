@@ -110,3 +110,31 @@ response.output_text.delta                           -> text delta (text modalit
 response.created                                     -> a response is now running (yours OR server VAD's)
 response.done                                        -> check .response.status; ALWAYS releases the lock
 error                                                -> ALWAYS log these, they're specific
+
+## GPT-5 on /v1/chat/completions (summaries)
+
+Live-probed 2026-08-22 against this account. All three of these differ from the
+gpt-4.x request the summariser was built around, and two of them fail silently
+enough to be worth writing down.
+
+- `max_tokens` is REJECTED outright: *"Unsupported parameter: 'max_tokens' is not
+  supported with this model. Use 'max_completion_tokens' instead."*
+- `temperature: 0.3` is REJECTED: *"Only the default (1) value is supported."*
+  Any non-default temperature, not just this one.
+- **The reasoning tokens are billed against `max_completion_tokens`.** This is the
+  dangerous one. Measured: a three-bullet summary request with
+  `max_completion_tokens: 220` came back `finish_reason: "length"`, 220 reasoning
+  tokens, and `content: ""`. Not an error — an empty string. Anything that treats
+  "no content" as "the model had nothing to say" will silently fall through to its
+  fallback and never report a problem.
+
+  A real summary of an eight-line transcript spent **1,856 reasoning tokens** before
+  writing 158 of output, so the budget has to be thousands, not hundreds.
+  `ModelSummarizer.Grade.maxOutputTokens` uses 4,000.
+
+- Latency is the other consequence: that same call took **26.7 s**. The 45 s timeout
+  that was fine for `gpt-4.1-mini` is not obviously fine here; the summariser uses
+  120 s for reasoning models.
+
+Models confirmed available on this key: `gpt-5`, `gpt-5-mini`, `gpt-5-nano`,
+`gpt-5-pro`, `gpt-5-codex`, `o3`, `o3-pro`, `o4-mini`, the `gpt-4.1` family.
