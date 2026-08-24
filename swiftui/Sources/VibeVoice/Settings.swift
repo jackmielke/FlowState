@@ -157,6 +157,12 @@ struct AppSettings: Codable, Equatable {
     /// Start or stop recording from anywhere. Empty string = off.
     var recordHotkey: String = "cmdShiftR"
 
+    /// Stop everything, now. Empty string = off.
+    var hushHotkey: String = "ctrlShiftEscape"
+    /// How long the wake trigger stays quiet after the hush key. Long enough to get out
+    /// of whatever set it off; short enough that nobody has to remember to undo it.
+    var hushSeconds: Double = 90
+
     /// Let it start the conversation when something is worth saying — a coding task
     /// finishing. Off by default: an app that opens a microphone and talks to you
     /// unprompted has to be asked for, not discovered.
@@ -305,7 +311,7 @@ struct AppSettings: Codable, Equatable {
         case devNarrate, devNarrateInterval, devNarrateMax, devPermissionMode
         case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
         case photoRotateSeconds, menuBarEnabled, summonHotkey, devNudgeDismissed
-        case connectHotkey, recordHotkey, proactive, wakeWord, wakePhrase, clapToWake, clapSensitivity
+        case connectHotkey, recordHotkey, hushHotkey, hushSeconds, proactive, wakeWord, wakePhrase, clapToWake, clapSensitivity
         case earcons, captions, ambientClock
         case motionStyle, motionIntensity, motionAssets
         case devAutoCommit, devAutoPush, hudEnabled, hudStyle, cameraBubble
@@ -365,6 +371,8 @@ extension AppSettings {
         summonHotkey      = v(.summonHotkey, d.summonHotkey)
         connectHotkey     = v(.connectHotkey, d.connectHotkey)
         recordHotkey      = v(.recordHotkey, d.recordHotkey)
+        hushHotkey        = v(.hushHotkey, d.hushHotkey)
+        hushSeconds       = v(.hushSeconds, d.hushSeconds)
         proactive         = v(.proactive, d.proactive)
         wakeWord          = v(.wakeWord, d.wakeWord)
         wakePhrase        = v(.wakePhrase, d.wakePhrase)

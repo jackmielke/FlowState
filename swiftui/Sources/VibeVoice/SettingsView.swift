@@ -639,6 +639,19 @@ struct SettingsView: View {
                                     set: { state.settings.connectHotkey = $0; state.applyConnectHotkey() }),
                                 accessibilityPrefix: "Connect shortcut")
                 HStack {
+                    Text("Stop everything")
+                        .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                    Spacer()
+                }
+                SegmentedPicker(options: HotkeyCombo.hushChoices.map { (value: $0.id, label: $0.label) }
+                                        + [(value: "", label: "Off")],
+                                selection: Binding(
+                                    get: { state.settings.hushHotkey },
+                                    set: { state.settings.hushHotkey = $0; state.applyHushHotkey() }),
+                                accessibilityPrefix: "Stop shortcut")
+                caption("Hangs up, and never starts anything — that is the difference between it and the connect shortcut, which toggles. Somebody reaching for silence in a hurry does not know what state the app is in, and a key that might connect is worse than no key. It also keeps the wake phrase and the clap quiet for \(Int(state.settings.hushSeconds)) seconds, because whatever set it off by accident is usually still happening.")
+
+                HStack {
                     Text("Start or stop recording")
                         .font(.system(size: 12.5)).foregroundStyle(Theme.text)
                     Spacer()

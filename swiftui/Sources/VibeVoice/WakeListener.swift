@@ -94,6 +94,22 @@ final class WakeListener {
     /// not reliably still listening, and waiting for the fifty-second recycle to notice
     /// means up to fifty seconds where the wake phrase silently does nothing — right
     /// after hanging up, which is exactly when somebody tries it.
+    /// Ignore both the phrase and the clap for a while. See `WakeListenerState.snooze`.
+    func snooze(seconds: TimeInterval) {
+        let until = Date().addingTimeInterval(seconds)
+        state.snooze(until: until)
+        claps.snooze(until: until)
+        snoozedUntil = until
+    }
+
+    /// When the quiet ends, for the pill and the tooltip. Nil when not snoozed.
+    private(set) var snoozedUntil: Date?
+
+    var isSnoozed: Bool {
+        guard let snoozedUntil else { return false }
+        return Date() < snoozedUntil
+    }
+
     func restart() {
         guard isRunning else { return start() }
         claps.reset()
@@ -254,12 +270,17 @@ final class ClapBox: @unchecked Sendable {
     /// Decays rather than resetting, so a meter driven by it falls smoothly instead of
     /// flickering between a peak and zero.
     private var peakHold: Float = 0
+    private var snoozedUntil: Date?
 
     /// 10 ms at 24 kHz. Fine enough to see a clap's attack and its decay as separate
     /// things, coarse enough that a peak is a handful of comparisons.
     private static let subFrame = 240
 
     /// True when a pair completed inside this buffer.
+    func snooze(until: Date) {
+        lock.lock(); snoozedUntil = until; lock.unlock()
+    }
+
     func feed(_ pcm16: Data) -> Bool {
         let total = pcm16.count / 2
         guard total > 0 else { return false }
@@ -293,8 +314,16 @@ final class ClapBox: @unchecked Sendable {
                 case .rejected(let why, let pk):
                     note(WakeTrace(at: Date(), kind: .rejected, peak: pk, detail: why))
                 case .wake(let pk):
-                    note(WakeTrace(at: Date(), kind: .woke, peak: pk, detail: "two claps"))
-                    woke = true
+                    // Detected, recorded, and deliberately not acted on while snoozed:
+                    // the panel should still show that it heard the pair, or the panic
+                    // key looks like the detector breaking.
+                    if let until = snoozedUntil, Date() < until {
+                        note(WakeTrace(at: Date(), kind: .rejected, peak: pk,
+                                       detail: "two claps — but you asked for quiet"))
+                    } else {
+                        note(WakeTrace(at: Date(), kind: .woke, peak: pk, detail: "two claps"))
+                        woke = true
+                    }
                 }
                 i = end
             }

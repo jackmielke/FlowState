@@ -53,11 +53,24 @@ struct HotkeyCombo: Equatable, Identifiable {
         id: "optionShiftR", label: "⌥⇧R",
         keyCode: UInt32(kVK_ANSI_R), modifiers: UInt32(optionKey | shiftKey))
 
+    static let ctrlShiftEscape = HotkeyCombo(
+        id: "ctrlShiftEscape", label: "⌃⇧Esc",
+        keyCode: UInt32(kVK_Escape), modifiers: UInt32(controlKey | shiftKey))
+
+    static let cmdShiftEscape = HotkeyCombo(
+        id: "cmdShiftEscape", label: "⌘⇧Esc",
+        keyCode: UInt32(kVK_Escape), modifiers: UInt32(cmdKey | shiftKey))
+
+    static let cmdShiftPeriod = HotkeyCombo(
+        id: "cmdShiftPeriod", label: "⌘⇧.",
+        keyCode: UInt32(kVK_ANSI_Period), modifiers: UInt32(cmdKey | shiftKey))
+
     static let summonChoices = [cmdShiftSpace, optionSpace, cmdShiftF]
+    static let hushChoices = [ctrlShiftEscape, cmdShiftEscape, cmdShiftPeriod]
     static let recordChoices = [cmdShiftR, ctrlShiftR, optionShiftR]
     static let connectChoices = [ctrlShiftF, ctrlShiftSpace, cmdShiftL]
 
-    static let all = summonChoices + connectChoices + recordChoices
+    static let all = summonChoices + connectChoices + recordChoices + hushChoices
 
     static func named(_ id: String) -> HotkeyCombo {
         all.first { $0.id == id } ?? .cmdShiftSpace
@@ -114,6 +127,17 @@ final class GlobalHotkey {
     }
 
     func unregisterRecord() { unbind(id: 4) }
+
+    /// Stop. Never starts anything.
+    ///
+    /// Separate from the connect key on purpose: that one toggles, and a toggle is the
+    /// wrong shape for a panic key. Somebody reaching for silence in a hurry does not
+    /// know what state the app is in, and a key that might CONNECT is worse than no key.
+    func registerHush(_ combo: HotkeyCombo, action: @escaping () -> Void) {
+        bind(id: 5, keyCode: combo.keyCode, modifiers: combo.modifiers, action: action)
+    }
+
+    func unregisterHush() { unbind(id: 5) }
 
     // MARK: -
 

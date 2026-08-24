@@ -360,17 +360,25 @@ struct ContentView: View {
     /// Both of these are toggles, not badges — switchable in the moment either turns out
     /// to be wrong, mid-call or mid-recording, without going to find a checkbox.
     private var listeningPill: some View {
-        let on = state.settings.wakeWord
+        let on = state.settings.wakeWord && !state.wake.isSnoozed
         return Button {
-            state.settings.wakeWord.toggle()
+            // While snoozed the pill reads as off, so clicking it has to mean "listen
+            // again" rather than toggling a setting that was never changed.
+            if state.wake.isSnoozed {
+                state.wake.snooze(seconds: 0)
+            } else {
+                state.settings.wakeWord.toggle()
+            }
             state.applyWakeWord()
         } label: {
             statusPill("antenna.radiowaves.left.and.right", "HEY FLOW",
                        tint: Theme.accent.opacity(0.55), on: on)
         }
         .buttonStyle(.plain)
-        .help(on ? "Listening for the wake phrase, on-device. Click to stop."
-                 : "Not listening for the wake phrase. Click to start.")
+        .help(state.wake.isSnoozed
+              ? "Quiet for a moment — you pressed the stop key. Click to listen again."
+              : on ? "Listening for the wake phrase, on-device. Click to stop."
+                   : "Not listening for the wake phrase. Click to start.")
         .accessibilityLabel("Wake phrase")
         .accessibilityValue(on ? "on" : "off")
     }

@@ -413,6 +413,40 @@ final class AppState: ObservableObject {
         }
     }
 
+    func applyHushHotkey() {
+        guard !settings.hushHotkey.isEmpty else {
+            GlobalHotkey.shared.unregisterHush()
+            return
+        }
+        GlobalHotkey.shared.registerHush(HotkeyCombo.named(settings.hushHotkey)) { [weak self] in
+            Task { @MainActor in self?.hush() }
+        }
+    }
+
+    /// Stop. Hangs up if there is anything to hang up, and makes it stay stopped.
+    ///
+    /// Hanging up alone is not enough for an accidental wake: whatever triggered it —
+    /// a television, a door, somebody clapping in a meeting — is still happening, so the
+    /// session reopens seconds later and the user is now fighting their own Mac. The
+    /// wake trigger goes quiet for a while too.
+    @discardableResult
+    func hush() -> String {
+        let wasLive = client.isConnected
+        if wasLive { disconnect() }
+        captions.clear()
+        wake.snooze(seconds: settings.hushSeconds)
+        // A confirmation that does not require looking: the same falling pair that means
+        // "leaving", which is what just happened.
+        sound(.sleep, "sleep")
+        let quiet = Int(settings.hushSeconds)
+        let said = wasLive
+            ? "Stopped. Quiet for \(quiet) seconds."
+            : "Quiet for \(quiet) seconds."
+        note(said)
+        objectWillChange.send()
+        return said
+    }
+
     /// Listens for a few seconds and sets the clap dial from what it hears.
     ///
     /// Opens the microphone itself if nothing else has: the panel is reachable with no
@@ -1326,6 +1360,7 @@ final class AppState: ObservableObject {
         applySummonHotkey()
         applyConnectHotkey()
         applyRecordHotkey()
+        applyHushHotkey()
         startOutreach()
         applyWakeWord()
         // NOT applyHUD() here. Building the widget's hosting view during init means

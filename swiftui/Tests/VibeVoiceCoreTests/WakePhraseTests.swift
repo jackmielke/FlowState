@@ -52,3 +52,29 @@ final class WakePhraseTests: XCTestCase {
         XCTAssertFalse(s.heard("what were we saying", phrase: .heyFlow, now: at(1)))
     }
 }
+
+extension WakePhraseTests {
+
+    /// The panic key's job: hanging up is not enough, because whatever caused the
+    /// accidental wake is still going on and would trigger another one seconds later.
+    func testSnoozeSuppressesTheWakePhrase() {
+        var s = WakeListenerState()
+        s.snooze(until: at(60))
+        XCTAssertFalse(s.heard("hey flow", phrase: .heyFlow, now: at(1)))
+        XCTAssertFalse(s.heard("hey flow", phrase: .heyFlow, now: at(59)))
+    }
+
+    func testItWakesAgainAfterTheSnooze() {
+        var s = WakeListenerState()
+        s.snooze(until: at(60))
+        _ = s.heard("hey flow", phrase: .heyFlow, now: at(10))
+        XCTAssertTrue(s.heard("hey flow", phrase: .heyFlow, now: at(61)))
+    }
+
+    /// A snooze that has been slept through is not a snooze, and must not keep it deaf.
+    func testAnExpiredSnoozeIsIgnored() {
+        var s = WakeListenerState()
+        s.snooze(until: at(5))
+        XCTAssertFalse(s.isSnoozed(at: at(6)))
+    }
+}

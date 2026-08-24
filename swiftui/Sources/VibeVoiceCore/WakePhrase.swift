@@ -57,6 +57,21 @@ public struct WakeListenerState: Equatable, Sendable {
     public private(set) var armed = true
     public private(set) var lastFiredAt: Date?
 
+    /// Ignore everything until this moment.
+    ///
+    /// For the panic key. Hanging up on an accidental wake is not enough on its own —
+    /// whatever triggered it is still happening, so the clap that opened a session by
+    /// mistake opens another one two seconds later and the user is now fighting the app.
+    /// Silence has to be something you can ask for, not just something you hope for.
+    public private(set) var snoozedUntil: Date?
+
+    public mutating func snooze(until: Date) { snoozedUntil = until }
+
+    public func isSnoozed(at now: Date) -> Bool {
+        guard let snoozedUntil else { return false }
+        return now < snoozedUntil
+    }
+
     /// The shortest gap between two wakes, so a phrase heard twice as the recogniser
     /// settles cannot open two sessions.
     public var cooldown: TimeInterval = 3
@@ -69,6 +84,7 @@ public struct WakeListenerState: Equatable, Sendable {
                                phrase: WakePhrase,
                                now: Date) -> Bool {
         guard phrase.matches(transcript) else { return false }
+        guard !isSnoozed(at: now) else { return false }
         guard armed else { return false }
         if let last = lastFiredAt, now.timeIntervalSince(last) < cooldown { return false }
         armed = false
