@@ -61,6 +61,15 @@ enum NativeTools {
                        + "writing it rather than inventing one."),
 
         ToolSpec(
+            name: "go_to_sleep",
+            summary: "Hang up",
+            description: "Close the session and stop listening. Use whenever the user says "
+                       + "go to sleep, that's all, we're done, goodbye, or you can go. "
+                       + "Say a short goodbye first — the microphone closes a moment after "
+                       + "you finish speaking, and going silent mid-sentence reads as a "
+                       + "crash. Do not ask them to confirm."),
+
+        ToolSpec(
             name: "memory_status",
             summary: "What's being kept",
             description: "What FlowState is currently recording about this conversation and "

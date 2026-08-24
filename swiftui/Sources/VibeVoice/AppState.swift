@@ -352,6 +352,64 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// The assistant speaking first. See `Outreach` and `OutreachPolicy`.
+    let outreach = Outreach()
+
+    func startOutreach() {
+        outreach.isInSession = { [weak self] in
+            guard let self else { return false }
+            if case .live = self.connection { return true }
+            return false
+        }
+        outreach.sayInline = { [weak self] text in
+            self?.client.sendSystemNote(
+                "[Tell the user, in your own words, briefly: \(text)]")
+            self?.client.createResponse()
+        }
+        outreach.speak = { [weak self] text in
+            guard let self else { return }
+            // Set BEFORE connecting, not after. `session.created` is what flips the
+            // connection to live and is also where the note is delivered, so anything
+            // that waits for live and *then* stores the text has already missed its own
+            // delivery — which is exactly what the first end-to-end run did: it opened a
+            // session, said nothing, and sat there.
+            self.pendingOutreach = text
+            Task { @MainActor in await self.connect() }
+        }
+        // Held items are delivered when the reason for holding them goes away, rather
+        // than never. A minute is well inside the two hours before one goes stale.
+        let t = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.outreach.flush() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        outreachTimer = t
+
+        // A way to see the whole path work without waiting for a real task to finish.
+        // It goes through `Outreach.raise` like anything else, so the quiet rules apply:
+        // set this while the screen is locked and nothing happens until it is unlocked.
+        if let test = ProcessInfo.processInfo.environment["FLOWSTATE_OUTREACH_TEST"],
+           !test.isEmpty {
+            outreach.raise(test)
+        }
+    }
+
+    private var outreachTimer: Timer?
+
+    /// Said as soon as the session is up. Held rather than sent from `speak` because the
+    /// note has to go after `session.created`, which is where the tools and the prompt
+    /// are configured — a message sent before that arrives into a session with no voice.
+    private var pendingOutreach: String?
+
+    private func deliverPendingOutreach() {
+        guard let text = pendingOutreach else { return }
+        pendingOutreach = nil
+        client.sendSystemNote(
+            "[You are starting this conversation, not answering one. Tell the user, "
+            + "briefly and in your own words: \(text) Then stop and wait — do not ask "
+            + "what else they need.]")
+        client.createResponse()
+    }
+
     func applyEffectiveAppearance() {
         if settings.backdrop.isScene {
             AppearanceMode.dark.applyToApp()
@@ -1054,6 +1112,7 @@ final class AppState: ObservableObject {
 
         applySummonHotkey()
         applyConnectHotkey()
+        startOutreach()
         // NOT applyHUD() here. Building the widget's hosting view during init means
         // constructing a view that observes this very object while SwiftUI is still
         // assembling the scene graph, which crashes the app on launch. ContentView calls
@@ -1330,6 +1389,7 @@ final class AppState: ObservableObject {
             responses.reset(reason: "session \(id) created")
             startResponseWatchdog()
             note("Live · session \(id)")
+            deliverPendingOutreach()
             syncScreenTimer()
 
         case .responseStarted(let id):
@@ -1554,6 +1614,8 @@ final class AppState: ObservableObject {
                     result = self.setQueuePaused((args["paused"] as? Bool) ?? true)
                 case "summarize_conversation":
                     result = self.summarizeSessionNow(showPanel: false)
+                case "go_to_sleep":
+                    result = self.goToSleep()
                 case "memory_status":
                     result = self.conversation.spokenStatus
                 case "pause_recording":
@@ -1744,6 +1806,15 @@ final class AppState: ObservableObject {
                 let mark = r.deniedTools.isEmpty ? (r.ok ? "✓" : "✗") : "⚠︎"
                 self.transcript.append(TranscriptItem(
                     speaker: .system, text: "\(mark) \(taskID) \(label): " + r.text))
+
+                // Worth interrupting for: a job the user asked for by voice, minutes ago,
+                // has an answer. Whether it is actually said now is `Outreach`'s call.
+                if self.settings.proactive {
+                    let outcome = r.deniedTools.isEmpty
+                        ? (r.ok ? "finished" : "failed")
+                        : "stopped and needs permission"
+                    self.outreach.raise("the task \(label) \(outcome). \(r.text)")
+                }
 
                 // The freed repo (or slot) is exactly what the queue was waiting for, so
                 // the next job starts here — before the summary of what just happened is
@@ -2531,6 +2602,24 @@ final class AppState: ObservableObject {
 
     /// The voice-reachable privacy switch. Pausing takes effect on the next line
     /// recorded, which is the next thing either of us says.
+    /// "You can go to sleep." Hangs up, after letting the goodbye finish.
+    ///
+    /// The delay is the whole difference between this feeling like an answer and feeling
+    /// like a dropped call: the tool result is handed back while the model is still
+    /// speaking its farewell, and tearing the socket down there cuts it off mid-word.
+    /// Two seconds is longer than any goodbye worth saying and shorter than a pause
+    /// anyone would notice.
+    func goToSleep() -> String {
+        Task { @MainActor in
+            for _ in 0..<40 where self.audio.isPlayingAudio {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            try? await Task.sleep(for: .milliseconds(400))
+            self.disconnect()
+        }
+        return "Going to sleep. Say goodbye now — the session closes right after you finish."
+    }
+
     func setRecording(paused: Bool) -> String {
         settings.privacy.paused = paused
         applyPrivacySettings()

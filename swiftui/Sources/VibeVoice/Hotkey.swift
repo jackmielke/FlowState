@@ -29,9 +29,9 @@ struct HotkeyCombo: Equatable, Identifiable {
         id: "ctrlShiftSpace", label: "⌃⇧Space",
         keyCode: UInt32(kVK_Space), modifiers: UInt32(controlKey | shiftKey))
 
-    static let ctrlShiftV = HotkeyCombo(
-        id: "ctrlShiftV", label: "⌃⇧V",
-        keyCode: UInt32(kVK_ANSI_V), modifiers: UInt32(controlKey | shiftKey))
+    static let ctrlShiftF = HotkeyCombo(
+        id: "ctrlShiftF", label: "⌃⇧F",
+        keyCode: UInt32(kVK_ANSI_F), modifiers: UInt32(controlKey | shiftKey))
 
     static let cmdShiftL = HotkeyCombo(
         id: "cmdShiftL", label: "⌘⇧L",
@@ -42,7 +42,7 @@ struct HotkeyCombo: Equatable, Identifiable {
     /// combos anyway — binding both to the same chord registers one and silently loses
     /// the other.
     static let summonChoices = [cmdShiftSpace, optionSpace, cmdShiftF]
-    static let connectChoices = [ctrlShiftSpace, ctrlShiftV, cmdShiftL]
+    static let connectChoices = [ctrlShiftF, ctrlShiftSpace, cmdShiftL]
 
     static let all = summonChoices + connectChoices
 

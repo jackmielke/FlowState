@@ -144,7 +144,12 @@ struct AppSettings: Codable, Equatable {
     /// double-tap. Carbon hotkeys need a real key and cost no permission; watching for
     /// bare modifiers means an event tap, which means Accessibility, and this app has
     /// already spent enough of its owner's patience on macOS privacy dialogs.
-    var connectHotkey: String = "ctrlShiftSpace"
+    var connectHotkey: String = "ctrlShiftF"
+
+    /// Let it start the conversation when something is worth saying — a coding task
+    /// finishing. Off by default: an app that opens a microphone and talks to you
+    /// unprompted has to be asked for, not discovered.
+    var proactive: Bool = false
 
     /// Commit what each task changed, on the current branch, when it finishes.
     ///
@@ -242,7 +247,7 @@ struct AppSettings: Codable, Equatable {
         case devNarrate, devNarrateInterval, devNarrateMax, devPermissionMode
         case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
         case photoRotateSeconds, menuBarEnabled, summonHotkey, devNudgeDismissed
-        case connectHotkey
+        case connectHotkey, proactive
         case motionStyle, motionIntensity, motionAssets
         case devAutoCommit, devAutoPush, hudEnabled, hudStyle, cameraBubble
         case cameraSize, cameraCorner, cameraShape, cameraControls, cameraMirrored
@@ -300,6 +305,7 @@ extension AppSettings {
         menuBarEnabled    = v(.menuBarEnabled, d.menuBarEnabled)
         summonHotkey      = v(.summonHotkey, d.summonHotkey)
         connectHotkey     = v(.connectHotkey, d.connectHotkey)
+        proactive         = v(.proactive, d.proactive)
         devNudgeDismissed = v(.devNudgeDismissed, d.devNudgeDismissed)
         devAutoCommit     = v(.devAutoCommit, d.devAutoCommit)
         devAutoPush       = v(.devAutoPush, d.devAutoPush)

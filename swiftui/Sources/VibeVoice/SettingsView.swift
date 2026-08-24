@@ -638,9 +638,19 @@ struct SettingsView: View {
                                     get: { state.settings.connectHotkey },
                                     set: { state.settings.connectHotkey = $0; state.applyConnectHotkey() }),
                                 accessibilityPrefix: "Connect shortcut")
-                caption("Connects from anywhere, and hangs up if a session is already open — without going to find the window first. The point of something always there is that reaching it is not a task. A bare chord like holding ⌃⇧ on its own would need an event tap, and that means an Accessibility prompt, so this asks for a real key instead.")
+                caption("Control-Shift-F by default. (⌃ is Control, ⇧ is Shift, ⌘ is Command.) Connects from anywhere, and hangs up if a session is already open — without going to find the window first. The point of something always there is that reaching it is not a task. A bare chord like holding ⌃⇧ on its own would need an event tap, and that means an Accessibility prompt, so this asks for a real key instead.")
             }
 
+
+            section("Let it start the conversation") {
+                HStack {
+                    Text("Speak up when something finishes")
+                        .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                    Spacer()
+                    NeatToggle(isOn: binding(\.proactive))
+                }
+                caption("When a coding task finishes, \(kAssistantDisplayName) opens a session and tells you, instead of waiting to be asked. It stays quiet if your screen is locked, if you have been away from the keyboard for three minutes, if a conferencing app is running, or if it interrupted you in the last ten minutes — and anything it sat on for more than two hours it drops rather than announcing as news. Say \"go to sleep\" and it hangs up.")
+            }
 
             section("Tools") {
                 ForEach(state.tools.specs) { spec in
