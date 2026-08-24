@@ -182,6 +182,13 @@ struct AppSettings: Codable, Equatable {
     /// silence in those moments is indistinguishable from a crash.
     var earcons: Bool = true
 
+    /// Subtitles for the conversation, floating over whatever you are doing.
+    ///
+    /// On by default. The app's window is usually not in front — it is a voice assistant
+    /// — so the transcript inside it is invisible exactly when it matters most: when it
+    /// has misheard you and you cannot tell why the answer is strange.
+    var captions: Bool = true
+
     /// Commit what each task changed, on the current branch, when it finishes.
     ///
     /// Without this Dev Mode edits the working tree and stops, so a session's work is
@@ -279,7 +286,7 @@ struct AppSettings: Codable, Equatable {
         case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
         case photoRotateSeconds, menuBarEnabled, summonHotkey, devNudgeDismissed
         case connectHotkey, proactive, wakeWord, wakePhrase, clapToWake, clapSensitivity
-        case earcons
+        case earcons, captions
         case motionStyle, motionIntensity, motionAssets
         case devAutoCommit, devAutoPush, hudEnabled, hudStyle, cameraBubble
         case cameraSize, cameraCorner, cameraShape, cameraControls, cameraMirrored
@@ -343,6 +350,7 @@ extension AppSettings {
         clapToWake        = v(.clapToWake, d.clapToWake)
         clapSensitivity   = v(.clapSensitivity, d.clapSensitivity)
         earcons           = v(.earcons, d.earcons)
+        captions          = v(.captions, d.captions)
         devNudgeDismissed = v(.devNudgeDismissed, d.devNudgeDismissed)
         devAutoCommit     = v(.devAutoCommit, d.devAutoCommit)
         devAutoPush       = v(.devAutoPush, d.devAutoPush)

@@ -682,6 +682,18 @@ struct SettingsView: View {
                 }
             }
 
+            section("Captions") {
+                HStack {
+                    Text("Subtitles over everything")
+                        .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                    Spacer()
+                    NeatToggle(isOn: Binding(
+                        get: { state.settings.captions },
+                        set: { state.settings.captions = $0; state.applyCaptions() }))
+                }
+                caption("A small floating strip near the bottom of whichever screen you are working on, showing what you said and what it is saying back. It follows you between displays, never takes a click, and fades a few seconds after the last word. Its real job is the misheard sentence — seeing your own words is what explains an answer to a question you did not ask.")
+            }
+
             section("Sounds") {
                 HStack {
                     Text("Small sounds for waking and hanging up")

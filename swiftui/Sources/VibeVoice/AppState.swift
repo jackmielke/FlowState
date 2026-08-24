@@ -135,6 +135,9 @@ final class AppState: ObservableObject {
         // The bubble goes wherever the work is, always — it is a thing on screen, and a
         // camera preview on a screen you are not looking at is not a preview.
         cameraBubble.followDisplay(id)
+        captions.screen = NSScreen.screens.first {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id
+        }
 
         // The recording follows only if the user asked for "the active display" rather
         // than pinning one. Pinning a display and having it wander would be worse than
@@ -352,6 +355,14 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Subtitles over whatever the user is doing. See `CaptionBar`.
+    let captions = CaptionController()
+
+    func applyCaptions() {
+        captions.isEnabled = settings.captions
+        objectWillChange.send()
+    }
+
     /// The small sounds. See `Earcon`.
     private let earcons = EarconPlayer()
 
@@ -436,6 +447,16 @@ final class AppState: ObservableObject {
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(600))
                 _ = self.openSettings(tab: t)
+            }
+        }
+
+        // Shows a caption without needing a conversation, for checking placement and
+        // sizing on whatever display is in front.
+        if let text = ProcessInfo.processInfo.environment["FLOWSTATE_CAPTION_TEST"], !text.isEmpty {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(700))
+                self.captions.isEnabled = true
+                self.captions.say(.assistant, text)
             }
         }
 
@@ -1324,6 +1345,7 @@ final class AppState: ObservableObject {
         // for a connection that never opened, and a farewell chime for a session that
         // never happened is a lie about what just occurred.
         if client.isConnected { sound(.sleep, "sleep") }
+        captions.clear()
         stopScreenTimer()
         stopResponseWatchdog()
         // One recap of the WHOLE conversation, before the session id stops meaning
@@ -1526,6 +1548,9 @@ final class AppState: ObservableObject {
 
         case .userTranscript(let t):
             let clean = t.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Seeing your own words is half the value: a misheard sentence explains an
+            // answer to a question you did not ask.
+            captions.say(.user, clean, done: true)
             // The time they SPOKE, not the time the words arrived. This is what puts the
             // line in the right place both on screen and in the file — the two used to
             // disagree, because the screen ordered by arrival and the file by timestamp.
@@ -1558,7 +1583,13 @@ final class AppState: ObservableObject {
         case .assistantDelta(let d):
             if let id = assistantItemID, let i = transcript.firstIndex(where: { $0.id == id }) {
                 transcript[i].text += d
+                // `done: true` on every delta looks wrong and is not: the flag starts the
+                // linger clock, and each delta restarts it. A reply therefore stays up
+                // while it streams and disappears a few seconds after the last word,
+                // without needing to be told the turn ended.
+                captions.say(.assistant, transcript[i].text, done: true)
             } else {
+                captions.say(.assistant, d, done: true)
                 let item = TranscriptItem(speaker: .assistant, text: d, streaming: true,
                                           sessionID: currentSessionID)
                 insertOrdered(item)
