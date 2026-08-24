@@ -352,6 +352,38 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Always-listening wake phrase. See `WakeListener`.
+    let wake = WakeListener()
+
+    func applyWakeWord() {
+        guard settings.wakeWord else {
+            wake.stop()
+            releaseMicrophone(for: "wake")
+            objectWillChange.send()
+            return
+        }
+        Task { @MainActor in
+            guard await WakeListener.authorize() == .authorized else {
+                self.settings.wakeWord = false
+                self.banner = "Speech recognition is off for \(kAssistantDisplayName), so the wake phrase cannot run. Turn it on in System Settings › Privacy & Security › Speech Recognition."
+                self.objectWillChange.send()
+                return
+            }
+            self.wake.phrase = self.settings.wakePhrase == "heyFlowState" ? .heyFlowState : .heyFlow
+            self.wake.onWake = { [weak self] in
+                guard let self else { return }
+                // Already talking is the common case for a false positive, and there is
+                // nothing to do about it — the session is open, they were heard.
+                guard !self.client.isConnected else { return }
+                Task { @MainActor in await self.connect() }
+            }
+            self.openMicrophone(for: "wake")
+            self.wake.start()
+            if let p = self.wake.problem { self.banner = p; self.settings.wakeWord = false }
+            self.objectWillChange.send()
+        }
+    }
+
     /// The assistant speaking first. See `Outreach` and `OutreachPolicy`.
     let outreach = Outreach()
 
@@ -498,7 +530,7 @@ final class AppState: ObservableObject {
         // and your voice is the product, and the assistant is the thing added on top of
         // it. So a recording will open the microphone itself, and — see
         // `finishRecording` — close it again afterwards if nothing else wanted it.
-        if !audio.running, let why = openMicrophoneForRecording() {
+        if !audio.isCapturing, let why = openMicrophone(for: "recording") {
             note(why)
             banner = why
             objectWillChange.send()
@@ -585,29 +617,35 @@ final class AppState: ObservableObject {
         return wanted == .audioOnly ? "Recording." : "Recording \(wanted.menuLabel.lowercased())."
     }
 
-    /// True when the microphone is open only because something is being recorded.
-    /// Cleared by whoever closes it. See `startRecording`.
-    private var micOpenedForRecording = false
+    /// Who currently wants the microphone open, other than a live session.
+    ///
+    /// A set rather than a flag because there are two of them now — a recording and the
+    /// wake word — and they overlap. Closing the microphone when a recording stops, while
+    /// the wake word is still listening, would silently turn the wake word off; a flag
+    /// per feature would mean every new one has to remember every old one.
+    private var micHolders: Set<String> = []
 
     /// - Returns: nil on success, or why it could not be opened.
-    private func openMicrophoneForRecording() -> String? {
+    @discardableResult
+    private func openMicrophone(for holder: String) -> String? {
+        micHolders.insert(holder)
+        guard !audio.isCapturing else { return nil }
         do { try audio.start() }
-        catch { return "Audio: \(error.localizedDescription)" }
+        catch {
+            micHolders.remove(holder)
+            return "Audio: \(error.localizedDescription)"
+        }
         audio.setMuted(settings.micMuted)
-        micOpenedForRecording = true
-        Self.recordingLog.notice("opened the microphone for a recording — no session")
+        Self.recordingLog.notice("opened the microphone for \(holder, privacy: .public)")
         return nil
     }
 
-    /// Closes it again, unless a session is using it.
-    private func releaseMicrophoneAfterRecording() {
-        guard micOpenedForRecording else { return }
-        micOpenedForRecording = false
-        // A session opened while the recording ran now owns the microphone, and closing
-        // it here would mute a live conversation.
-        guard !client.isConnected else { return }
+    /// Closes it again, unless a session or another holder is using it.
+    private func releaseMicrophone(for holder: String) {
+        guard micHolders.remove(holder) != nil else { return }
+        guard micHolders.isEmpty, !client.isConnected else { return }
         audio.stop()
-        Self.recordingLog.notice("closed the microphone — the recording it was open for has finished")
+        Self.recordingLog.notice("closed the microphone — nothing else wanted it")
     }
 
     // MARK: - What is being captured
@@ -732,7 +770,7 @@ final class AppState: ObservableObject {
         // Before the writer is dropped, or the bubble is left previewing a session that
         // is being torn down and goes black.
         cameraBubbleUse(session: nil)
-        releaseMicrophoneAfterRecording()
+        releaseMicrophone(for: "recording")
         // The writer has closed its file by now, so nothing else should be holding it —
         // and a stale one would keep the storage meter reading a file that is finished.
         activeVideo = nil
@@ -1003,8 +1041,13 @@ final class AppState: ObservableObject {
             // Muted, there is nothing to measure, and counting the silence would report
             // a five-minute utterance to a transcript line nobody ever spoke.
             //
-            // A second consumer of this stream (an on-device recogniser) would be added
-            // right here; see `LocalTranscriber` for what it would need.
+            // The second consumer this stream was always going to have. Only while no
+            // session is open: once there is one, the words are already going somewhere
+            // that understands them, and running a recogniser as well would be paying
+            // twice to hear the same sentence.
+            if !muted, !self.client.isConnected, self.settings.wakeWord {
+                self.wake.feed(data)
+            }
             if route.toMeasurement { self.utterance.ingest(pcm16: data) }
             // The recording's other half, and its clock. This tee was missing, which is
             // why the recorder could go red and still write nothing: the model's voice
@@ -1113,6 +1156,7 @@ final class AppState: ObservableObject {
         applySummonHotkey()
         applyConnectHotkey()
         startOutreach()
+        applyWakeWord()
         // NOT applyHUD() here. Building the widget's hosting view during init means
         // constructing a view that observes this very object while SwiftUI is still
         // assembling the scene graph, which crashes the app on launch. ContentView calls

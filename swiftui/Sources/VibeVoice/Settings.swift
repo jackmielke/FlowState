@@ -151,6 +151,16 @@ struct AppSettings: Codable, Equatable {
     /// unprompted has to be asked for, not discovered.
     var proactive: Bool = false
 
+    /// Listen for a wake phrase whenever nothing else is going on.
+    ///
+    /// Off by default. This holds the microphone open all day — recognition is
+    /// on-device and nothing leaves the Mac, but an app that listens continuously is
+    /// something a person opts into knowingly, not something they find switched on.
+    var wakeWord: Bool = false
+    /// Which phrase. Two words on purpose: "flow" alone is a word this user says
+    /// constantly, including as the name of another app.
+    var wakePhrase: String = "heyFlow"
+
     /// Commit what each task changed, on the current branch, when it finishes.
     ///
     /// Without this Dev Mode edits the working tree and stops, so a session's work is
@@ -247,7 +257,7 @@ struct AppSettings: Codable, Equatable {
         case devNarrate, devNarrateInterval, devNarrateMax, devPermissionMode
         case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
         case photoRotateSeconds, menuBarEnabled, summonHotkey, devNudgeDismissed
-        case connectHotkey, proactive
+        case connectHotkey, proactive, wakeWord, wakePhrase
         case motionStyle, motionIntensity, motionAssets
         case devAutoCommit, devAutoPush, hudEnabled, hudStyle, cameraBubble
         case cameraSize, cameraCorner, cameraShape, cameraControls, cameraMirrored
@@ -306,6 +316,8 @@ extension AppSettings {
         summonHotkey      = v(.summonHotkey, d.summonHotkey)
         connectHotkey     = v(.connectHotkey, d.connectHotkey)
         proactive         = v(.proactive, d.proactive)
+        wakeWord          = v(.wakeWord, d.wakeWord)
+        wakePhrase        = v(.wakePhrase, d.wakePhrase)
         devNudgeDismissed = v(.devNudgeDismissed, d.devNudgeDismissed)
         devAutoCommit     = v(.devAutoCommit, d.devAutoCommit)
         devAutoPush       = v(.devAutoPush, d.devAutoPush)

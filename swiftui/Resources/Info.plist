@@ -38,6 +38,8 @@
 	<string>Local-only. No telemetry.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>FlowState uses your microphone so you can talk to it.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Listens for the wake phrase on this Mac. Recognition runs on-device and nothing is sent anywhere until you say it.</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>FlowState captures your screen so it can see what you are looking at.</string>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>

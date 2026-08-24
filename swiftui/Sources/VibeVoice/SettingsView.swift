@@ -652,6 +652,26 @@ struct SettingsView: View {
                 caption("When a coding task finishes, \(kAssistantDisplayName) opens a session and tells you, instead of waiting to be asked. It stays quiet if your screen is locked, if you have been away from the keyboard for three minutes, if a conferencing app is running, or if it interrupted you in the last ten minutes — and anything it sat on for more than two hours it drops rather than announcing as news. Say \"go to sleep\" and it hangs up.")
             }
 
+            section("Wake phrase") {
+                HStack {
+                    Text("Listen for \"Hey Flow\"")
+                        .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                    Spacer()
+                    NeatToggle(isOn: Binding(
+                        get: { state.settings.wakeWord },
+                        set: { state.settings.wakeWord = $0; state.applyWakeWord() }))
+                }
+                SegmentedPicker(options: [("heyFlow", "Hey Flow"), ("heyFlowState", "Hey FlowState")],
+                                selection: Binding(
+                                    get: { state.settings.wakePhrase },
+                                    set: { state.settings.wakePhrase = $0; state.applyWakeWord() }),
+                                accessibilityPrefix: "Wake phrase")
+                caption("Recognition runs on-device — the audio never leaves this Mac, and it works with no network. It does hold the microphone open whenever no session is running, which costs battery. Two words on purpose: \"flow\" on its own is a word you say constantly, including as the name of another app, and it will not wake on that.")
+                if !state.wake.lastHeard.isEmpty {
+                    caption("Last heard: \(state.wake.lastHeard)")
+                }
+            }
+
             section("Tools") {
                 ForEach(state.tools.specs) { spec in
                     HStack(alignment: .top) {

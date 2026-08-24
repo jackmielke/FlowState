@@ -229,6 +229,13 @@ struct ContentView: View {
 
                 if state.isWatching { watchingPill }
 
+                // Two states worth seeing without opening Settings, because both mean
+                // the app does something when you are not looking at it: one listens
+                // when you have not spoken to it, the other speaks when you have not
+                // asked. Anything that acts on its own says so on the face of the app.
+                if state.settings.wakeWord { listeningPill }
+                if state.settings.proactive { proactivePill }
+
                 if state.devTaskRunning { codingPill }
 
                 if responseLabel != nil { responsePill }
@@ -335,6 +342,42 @@ struct ContentView: View {
         .padding(.horizontal, 9).padding(.vertical, 4)
         .background(Capsule().fill(Theme.fill)
             .overlay(Capsule().stroke(Theme.hairline, lineWidth: 1)))
+    }
+
+    /// Both of these are toggles, not badges. The point of putting them here is being
+    /// able to turn them off in the moment they turn out to be wrong — mid-call, or
+    /// mid-recording — without going and finding a checkbox.
+    private var listeningPill: some View {
+        Button {
+            state.settings.wakeWord = false
+            state.applyWakeWord()
+        } label: {
+            statusPill("ear.fill", "HEY FLOW", tint: Theme.accent.opacity(0.55))
+        }
+        .buttonStyle(.plain)
+        .help("Listening for the wake phrase, on-device. Click to stop.")
+    }
+
+    private var proactivePill: some View {
+        Button {
+            state.settings.proactive = false
+        } label: {
+            statusPill("bell.fill", "PROACTIVE", tint: Theme.voice.opacity(0.75))
+        }
+        .buttonStyle(.plain)
+        .help("It will open a session to tell you when a task finishes. Click to stop.")
+    }
+
+    private func statusPill(_ symbol: String, _ text: String, tint: Color) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: symbol).font(.system(size: 8.5))
+            Text(text)
+                .font(.system(size: 9.5, weight: .bold, design: .rounded)).tracking(0.8)
+        }
+        .foregroundStyle(Theme.onAccent)
+        .padding(.horizontal, 8).padding(.vertical, 4)
+        .background(Capsule().fill(tint))
+        .contentShape(Capsule())
     }
 
     private var watchingPill: some View {
