@@ -39,13 +39,32 @@ public struct ClapDetector: Equatable, Sendable {
 
     public init(sensitivity: Float = 0.5) { self.sensitivity = sensitivity }
 
-    /// How much louder than the room a frame must be. 14× at the default, because speech
-    /// peaks at roughly 4-6× and this has to sit clear of that even in a quiet room.
-    public var attackRatio: Float { 22 - 16 * sensitivity }
+    /// The two thresholds the dial moves, as `a - b * sensitivity`.
+    ///
+    /// Named constants rather than numbers written into the expressions, because
+    /// `ClapCalibration` has to solve these backwards — "what sensitivity would admit a
+    /// clap this loud" — and a calibration working from a stale copy of the coefficients
+    /// recommends a setting that does not do what it says.
+    public static let floorAt: (Float, Float) = (0.34, 0.28)
+    /// Bottoms out at 4x rather than 6x for the same reason the floor was lowered: a
+    /// clap only six times the room is a real clap in a room with a fan in it, and the
+    /// top of the dial has to be able to admit one. The other four rules — length,
+    /// quiet-before, decay, matched pair — are what keep that honest.
+    public static let ratioAt: (Float, Float) = (22, 18)
+
+    /// How much louder than the room a frame must be. Speech peaks at roughly 4-6× and
+    /// this has to sit clear of that even in a quiet room.
+    public var attackRatio: Float { Self.ratioAt.0 - Self.ratioAt.1 * sensitivity }
 
     /// And loud in absolute terms. A silent room makes every ratio enormous, so without
     /// this two keyboard taps are a wake word.
-    public var floor: Float { 0.34 - 0.22 * sensitivity }
+    ///
+    /// Reaches 0.06 at the top of the dial rather than 0.12: a quiet clapper at arm's
+    /// length from a laptop microphone lands around there, and a floor that cannot go
+    /// below their claps is a dial that cannot be turned up enough to hear them. Found by
+    /// a calibration test asking for a setting that would admit a 0.12 clap, and getting
+    /// one that would not.
+    public var floor: Float { Self.floorAt.0 - Self.floorAt.1 * sensitivity }
 
     /// A clap is over almost immediately.
     public var maxLength: TimeInterval { 0.06 + 0.04 * TimeInterval(sensitivity) }
@@ -83,10 +102,22 @@ public struct ClapDetector: Equatable, Sendable {
     private var transientQuietRun: TimeInterval = .greatestFiniteMagnitude
     private var lastClapAt: TimeInterval?
     private var lastClapPeak: Float = 0
+    /// Whether the last loud run was itself accepted as a clap.
+    ///
+    /// The rule below wants the moment before a clap to be quiet, so that a clap inside a
+    /// sentence is read as a syllable. Applied without this, it also rejects the SECOND
+    /// CLAP OF EVERY PAIR — the gap people leave is 0.15 to 0.5 seconds and the
+    /// quiet-before window is 0.3, so the first clap counts as "other sound" and the pair
+    /// can never complete. That is why clapping did not work at all.
+    private var previousRunWasClap = false
     private var lastWakeAt: TimeInterval?
 
     /// The running estimate of the room, for a tuning display.
     public var roomLevel: Float { background }
+
+    /// What a transient has to beat right now. Shown in the tuning panel so "it did not
+    /// hear me" becomes "you were 6 dB under".
+    public var threshold: Float { Swift.max(background * attackRatio, floor) }
 
     /// Feeds one frame.
     ///
@@ -94,7 +125,6 @@ public struct ClapDetector: Equatable, Sendable {
     ///   - peak: highest absolute sample in the frame, 0...1.
     ///   - at: the frame's time in seconds, from any fixed origin.
     public mutating func feed(peak: Float, at now: TimeInterval) -> ClapEvent {
-        let threshold = max(background * attackRatio, floor)
         let loud = peak > threshold
 
         defer {
@@ -130,24 +160,29 @@ public struct ClapDetector: Equatable, Sendable {
 
         if length > maxLength {
             lastClapAt = nil
+            previousRunWasClap = false
             return .rejected("too long to be a clap", peak: top)
         }
 
         // Rule 3: it has to fall off a cliff.
         if peak > top * decayTo {
             lastClapAt = nil
+            previousRunWasClap = false
             return .rejected("did not fall away fast enough", peak: top)
         }
 
-        // Rule 2: and it has to have come out of quiet.
-        if transientQuietRun < quietBefore {
+        // Rule 2: and it has to have come out of quiet — unless the only thing before it
+        // was the other half of this pair. Two claps are not "continuous sound".
+        if transientQuietRun < quietBefore && !previousRunWasClap {
             lastClapAt = nil
+            previousRunWasClap = false
             return .rejected("came in the middle of other sound", peak: top)
         }
 
         guard let previous = lastClapAt else {
             lastClapAt = start
             lastClapPeak = top
+            previousRunWasClap = true
             return .armed(peak: top)
         }
 
@@ -155,6 +190,7 @@ public struct ClapDetector: Equatable, Sendable {
         guard gap >= minGap, gap <= maxGap else {
             lastClapAt = start
             lastClapPeak = top
+            previousRunWasClap = true
             return .rejected(gap < minGap ? "the two were too close together"
                                           : "too long since the first one", peak: top)
         }
@@ -164,10 +200,12 @@ public struct ClapDetector: Equatable, Sendable {
         guard ratio <= pairTolerance else {
             lastClapAt = start
             lastClapPeak = top
+            previousRunWasClap = true
             return .rejected("the two did not sound alike", peak: top)
         }
 
         lastClapAt = nil
+        previousRunWasClap = false
         lastWakeAt = now
         return .wake(peak: top)
     }
@@ -177,5 +215,6 @@ public struct ClapDetector: Equatable, Sendable {
         transientStart = nil
         transientPeak = 0
         lastClapAt = nil
+        previousRunWasClap = false
     }
 }

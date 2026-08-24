@@ -18,15 +18,60 @@ struct WakeTuningView: View {
     /// from the audio thread twenty times a second per event, and driving SwiftUI from
     /// there would cost more than the detection.
     @State private var tick = 0
+    @State private var countdown: Int?
+    @State private var result: String?
     private let clock = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
+
+    /// Long enough for four or five claps without anybody feeling rushed.
+    private let listenFor = 7
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            // The calibration, first, because it is the thing to do rather than read.
+            VStack(alignment: .leading, spacing: 8) {
+                if let countdown {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Clap now — a few times, the way you normally would. \(countdown)s")
+                            .font(.system(size: 12.5, weight: .medium)).foregroundStyle(Theme.text)
+                    }
+                } else {
+                    Button {
+                        start()
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "hands.clap.fill").font(.system(size: 11))
+                            Text("Teach it my clap").font(.system(size: 12.5, weight: .medium))
+                        }
+                        .padding(.horizontal, 12).padding(.vertical, 7)
+                        .background(Capsule().fill(Theme.accent))
+                        .foregroundStyle(Theme.onAccent)
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!state.settings.wakeWord)
+                }
+
+                if let result {
+                    Text(result)
+                        .font(.system(size: 11.5)).foregroundStyle(Theme.text)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if !state.settings.wakeWord {
+                    Text("Switch the wake phrase on first — the microphone has to be open "
+                       + "for it to hear anything.")
+                        .font(.system(size: 11)).foregroundStyle(Theme.textFaint)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Divider().overlay(Theme.hairline)
+
             HStack {
                 Text("Room level")
                     .font(.system(size: 11)).foregroundStyle(Theme.textDim)
                 Spacer()
-                Text(db(state.wake.roomLevel))
+                Text("\(db(state.wake.roomLevel)) · a clap needs \(db(state.wake.clapThreshold))")
                     .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.textDim)
             }
             meter(state.wake.roomLevel)
@@ -86,6 +131,29 @@ struct WakeTuningView: View {
         }
         .onReceive(clock) { _ in tick &+= 1 }
         .id(tick)
+    }
+
+    /// Records for a few seconds, then sets the dial from what it heard.
+    private func start() {
+        result = nil
+        state.wake.beginClapCalibration()
+        countdown = listenFor
+        Task { @MainActor in
+            for remaining in stride(from: listenFor - 1, through: 0, by: -1) {
+                try? await Task.sleep(for: .seconds(1))
+                countdown = remaining
+            }
+            countdown = nil
+            guard let r = state.wake.endClapCalibration() else {
+                result = "I heard nothing at all — is the microphone working?"
+                return
+            }
+            result = r.advice
+            guard r.isUsable else { return }
+            state.settings.clapSensitivity = Double(r.sensitivity)
+            state.wake.clapSensitivity = r.sensitivity
+            state.wake.clearTrace()
+        }
     }
 
     private func colour(_ k: WakeTrace.Kind) -> Color {

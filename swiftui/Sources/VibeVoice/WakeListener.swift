@@ -104,6 +104,11 @@ final class WakeListener {
 
     /// Live numbers for the tuning panel.
     var roomLevel: Float { claps.roomLevel }
+    var clapThreshold: Float { claps.threshold }
+
+    func beginClapCalibration() { claps.beginCalibration() }
+    func endClapCalibration() -> ClapCalibration.Result? { claps.endCalibration() }
+    var isCalibrating: Bool { claps.isCalibrating }
     var trace: [WakeTrace] { claps.trace }
     func clearTrace() { claps.clearTrace() }
 
@@ -123,7 +128,14 @@ final class WakeListener {
             guard let src = raw.baseAddress, let dst = buffer.int16ChannelData?[0] else { return }
             memcpy(dst, src, frames * 2)
         }
-        if let peak = Self.peak(pcm16), claps.feed(peak: peak, at: Date()) {
+        // Sub-framed to 10 ms, and NOT one peak per callback.
+        //
+        // The tap hands over 2048 frames at the hardware rate — about 43 ms. Treating
+        // that as one unit gave the detector 43 ms of resolution to judge things that
+        // are measured in tens of milliseconds: a clap landing across two callbacks
+        // measured 85 ms long and was thrown out for "too long to be a clap", which is
+        // roughly half of all claps, rejected by arithmetic rather than by sound.
+        if claps.feed(pcm16) {
             Task { @MainActor [weak self] in
                 guard let self, self.clapEnabled else { return }
                 self.lastHeard = "(two claps)"
@@ -134,17 +146,7 @@ final class WakeListener {
         Task { @MainActor [weak self] in self?.request?.append(buffer) }
     }
 
-    /// Highest absolute sample in the frame, 0...1.
-    private nonisolated static func peak(_ pcm16: Data) -> Float? {
-        let n = pcm16.count / 2
-        guard n > 0 else { return nil }
-        return pcm16.withUnsafeBytes { raw -> Float in
-            let p = raw.bindMemory(to: Int16.self)
-            var m: Int32 = 0
-            for i in 0..<n { m = max(m, Int32(p[i].magnitude)) }
-            return Float(m) / 32_767
-        }
-    }
+
 
     private func beginTask() {
         endTask()
@@ -199,11 +201,89 @@ final class WakeListener {
 final class ClapBox: @unchecked Sendable {
     private let lock = NSLock()
     private var detector = ClapDetector()
-    private let started = Date()
-
-    /// The last few decisions, newest first, for the tuning panel. Bounded — this is a
-    /// diagnostic, not a log, and it is written to from the audio thread.
     private var recent: [WakeTrace] = []
+
+    /// Set while calibrating: every sub-frame peak is kept, whatever the thresholds say.
+    /// The thresholds are the unknown being measured, so they cannot be the filter.
+    private var recording: [ClapCalibration.Sample]?
+
+    func beginCalibration() {
+        lock.lock(); recording = []; lock.unlock()
+    }
+
+    /// - Returns: nil if calibration was never started.
+    func endCalibration() -> ClapCalibration.Result? {
+        lock.lock()
+        let taken = recording
+        recording = nil
+        lock.unlock()
+        guard let taken, !taken.isEmpty else { return nil }
+        return ClapCalibration.analyse(taken)
+    }
+
+    var isCalibrating: Bool {
+        lock.lock(); defer { lock.unlock() }; return recording != nil
+    }
+
+    /// Time derived from how much audio has been seen, not from the wall clock.
+    ///
+    /// The gap between two claps is a quarter of a second, and every rule here is
+    /// measured in tens of milliseconds. `Date()` at the moment a buffer happens to be
+    /// processed carries whatever scheduling jitter the machine had, which is the same
+    /// order as the thing being measured. Counting samples cannot drift and cannot jitter.
+    private var samplesSeen = 0
+
+    /// 10 ms at 24 kHz. Fine enough to see a clap's attack and its decay as separate
+    /// things, coarse enough that a peak is a handful of comparisons.
+    private static let subFrame = 240
+
+    /// True when a pair completed inside this buffer.
+    func feed(_ pcm16: Data) -> Bool {
+        let total = pcm16.count / 2
+        guard total > 0 else { return false }
+
+        var woke = false
+        pcm16.withUnsafeBytes { raw in
+            let p = raw.bindMemory(to: Int16.self)
+            var i = 0
+            lock.lock()
+            while i < total {
+                let end = Swift.min(i + Self.subFrame, total)
+                var m: Int32 = 0
+                for k in i..<end { m = Swift.max(m, Int32(p[k].magnitude)) }
+                let peak = Float(m) / 32_767
+                let at = Double(samplesSeen + i) / 24_000
+                if recording != nil { recording?.append(.init(at: at, peak: peak)) }
+
+                switch detector.feed(peak: peak, at: at) {
+                case .nothing:
+                    // Loud enough to notice but under the bar. Recorded because "I
+                    // clapped and nothing appeared" is the report that cannot be acted
+                    // on — this is what turns it into a number.
+                    if peak > detector.roomLevel * 4, peak > 0.05 {
+                        note(WakeTrace(at: Date(), kind: .rejected, peak: peak,
+                                       detail: "too quiet — needs \(Self.db(detector.threshold))"))
+                    }
+                case .armed(let pk):
+                    note(WakeTrace(at: Date(), kind: .armed, peak: pk,
+                                   detail: "clap heard — waiting for a second"))
+                case .rejected(let why, let pk):
+                    note(WakeTrace(at: Date(), kind: .rejected, peak: pk, detail: why))
+                case .wake(let pk):
+                    note(WakeTrace(at: Date(), kind: .woke, peak: pk, detail: "two claps"))
+                    woke = true
+                }
+                i = end
+            }
+            samplesSeen += total
+            lock.unlock()
+        }
+        return woke
+    }
+
+    private static func db(_ v: Float) -> String {
+        v <= 0.0005 ? "—" : String(format: "%.0f dB", 20 * log10(v))
+    }
 
     var sensitivity: Float {
         get { lock.lock(); defer { lock.unlock() }; return detector.sensitivity }
@@ -214,6 +294,11 @@ final class ClapBox: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }; return detector.roomLevel
     }
 
+    /// What a clap has to beat right now, for the tuning display.
+    var threshold: Float {
+        lock.lock(); defer { lock.unlock() }; return detector.threshold
+    }
+
     var trace: [WakeTrace] {
         lock.lock(); defer { lock.unlock() }; return recent
     }
@@ -222,26 +307,11 @@ final class ClapBox: @unchecked Sendable {
         lock.lock(); recent.removeAll(); lock.unlock()
     }
 
-    /// - Returns: true when the pair completed.
-    func feed(peak: Float, at now: Date) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        let event = detector.feed(peak: peak, at: now.timeIntervalSince(started))
-        switch event {
-        case .nothing:
-            return false
-        case .armed(let p):
-            note(WakeTrace(at: now, kind: .armed, peak: p, detail: "first of a pair — waiting for the second"))
-            return false
-        case .rejected(let why, let p):
-            note(WakeTrace(at: now, kind: .rejected, peak: p, detail: why))
-            return false
-        case .wake(let p):
-            note(WakeTrace(at: now, kind: .woke, peak: p, detail: "two claps"))
-            return true
-        }
-    }
-
+    /// Caller holds the lock.
     private func note(_ t: WakeTrace) {
+        // Near-misses arrive in bursts; one line per burst is enough to read.
+        if let last = recent.first, last.detail == t.detail,
+           Date().timeIntervalSince(last.at) < 0.25 { return }
         recent.insert(t, at: 0)
         if recent.count > 40 { recent.removeLast() }
     }
