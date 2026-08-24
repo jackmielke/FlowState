@@ -1165,6 +1165,11 @@ final class AppState: ObservableObject {
 
         for name in settings.disabledTools { tools.setEnabled(false, for: name) }
 
+        // Before anything else can decide not to run: this dumps the tool schema and
+        // quits, and hanging it off a view's `.task` made it depend on a window existing,
+        // which is not reliable when the binary is run directly.
+        RecordingSmokeTest.dumpToolsIfRequested(state: self)
+
         applySummonHotkey()
         applyConnectHotkey()
         startOutreach()
@@ -1673,8 +1678,6 @@ final class AppState: ObservableObject {
                 case "change_setting":
                     result = self.changeSetting(name: args["setting"] as? String ?? "",
                                                 to: args["value"] as? String ?? "")
-                case "list_settings":
-                    result = self.listSettings()
                 case "open_settings":
                     result = self.openSettings(tab: args["tab"] as? String)
                 case "go_to_sleep":
@@ -2668,7 +2671,7 @@ final class AppState: ObservableObject {
     /// Applies a spoken settings change. See `SettingsTools` for what is reachable and
     /// `SettingCommand` for how the words are matched.
     func changeSetting(name: String, to spoken: String) -> String {
-        let catalogue = SettingsTools.catalogue(settings)
+        let catalogue = SettingsTools.catalogue()
         // The present value, so "a bit faster" has something to be faster than.
         let now = SettingCommand.find(name, in: catalogue).map { number(of: $0.key) } ?? 0
         switch SettingCommand.resolve(setting: name, value: spoken,
@@ -2790,12 +2793,6 @@ final class AppState: ObservableObject {
         on ? "Floating widget on." : "Floating widget off."
     }
 
-    func listSettings() -> String {
-        let lines = SettingsTools.catalogue(settings).map { c -> String in
-            c.values.isEmpty ? c.spoken : "\(c.spoken) — \(c.values.joined(separator: ", "))"
-        }
-        return "I can change these by voice: " + lines.joined(separator: "; ") + "."
-    }
 
     func openSettings(tab: String?) -> String {
         if let raw = tab?.lowercased(),

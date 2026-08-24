@@ -30,6 +30,34 @@ enum RecordingSmokeTest {
         }
     }
 
+    /// Prints exactly what the model is told about the tools, and quits.
+    ///
+    /// The schema is assembled from three places and sent once, invisibly, when a session
+    /// opens — so "why did it pick that value" is otherwise unanswerable without a packet
+    /// capture. `FLOWSTATE_DUMP_TOOLS=1`.
+    static func dumpToolsIfRequested(state: AppState) {
+        guard ProcessInfo.processInfo.environment["FLOWSTATE_DUMP_TOOLS"] == "1" else { return }
+        // stderr, unbuffered, like every other diagnostic here — `print` to a redirected
+        // stdout is fully buffered and the `exit` below can beat the flush.
+        var out = ""
+        for tool in state.tools.realtimeTools() {
+            guard let name = tool["name"] as? String else { continue }
+            out += "── \(name)\n"
+            out += (tool["description"] as? String ?? "").split(separator: "\n")
+                    .map { "   \($0)" }.joined(separator: "\n") + "\n"
+            if let params = tool["parameters"] as? [String: Any],
+               let props = params["properties"] as? [String: [String: Any]] {
+                for (key, schema) in props.sorted(by: { $0.key < $1.key }) {
+                    let allowed = (schema["enum"] as? [String]).map { " = \($0.joined(separator: " | "))" } ?? ""
+                    out += "   • \(key)\(allowed)\n"
+                }
+            }
+            out += "\n"
+        }
+        FileHandle.standardError.write(Data(out.utf8))
+        exit(0)
+    }
+
     static func runIfRequested(state: AppState) async {
         guard let seconds else { return }
 

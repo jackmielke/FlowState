@@ -14,9 +14,12 @@ import VibeVoiceCore
 @MainActor
 enum SettingsTools {
 
-    static func catalogue(_ s: AppSettings) -> [SettingChoice] {
+    /// Fixed: every list here comes from a `CaseIterable` enum, so it does not depend
+    /// on what any setting currently is.
+    static func catalogue() -> [SettingChoice] {
         [
-            SettingChoice(key: "voice", spoken: "the voice", values: kVoices),
+            SettingChoice(key: "voice", spoken: "the voice", values: kVoices,
+                          aliases: ["accent", "how it sounds"]),
             SettingChoice(key: "backdrop", spoken: "the backdrop",
                           values: Backdrop.allCases.map { $0.label.lowercased() },
                           aliases: ["background", "wallpaper", "scene"]),
@@ -82,35 +85,75 @@ enum SettingsTools {
         ]
     }
 
+    /// What each voice sounds like.
+    ///
+    /// Because "a guy's voice" is how somebody actually asks, and `alloy`, `ash`, `verse`
+    /// tells the model nothing about which of those to pick. It guessed "casual guy",
+    /// which is not a value, and had to be corrected. A word each is enough.
+    static let voiceCharacter: [String: String] = [
+        "alloy": "neutral, even",
+        "ash": "male, warm",
+        "ballad": "male, soft and lilting",
+        "cedar": "male, low and calm",
+        "coral": "female, bright",
+        "echo": "male, flat and clear",
+        "marin": "female, warm",
+        "sage": "female, measured",
+        "shimmer": "female, light",
+        "verse": "male, expressive",
+    ]
+
+    /// The whole catalogue, spelled out for the model.
+    ///
+    /// Long, and worth it: it is sent once when the session opens, and the alternative is
+    /// a guess per request. Values are listed exactly as `change_setting` accepts them.
+    static func briefing() -> String {
+        catalogue().map { c -> String in
+            if c.isNumber, let r = c.range {
+                let lo = SettingCommand.say(r.lowerBound, c)
+                let hi = SettingCommand.say(r.upperBound, c)
+                return "\(c.key) (\(c.spoken)): a number from \(lo) to \(hi), or "
+                     + "\"a bit more\" / \"a bit less\""
+            }
+            if c.values.isEmpty { return "\(c.key) (\(c.spoken)): on or off" }
+            if c.key == "voice" {
+                let described = c.values.map { v in
+                    voiceCharacter[v].map { "\(v) — \($0)" } ?? v
+                }
+                return "voice (the voice): \(described.joined(separator: "; "))"
+            }
+            return "\(c.key) (\(c.spoken)): \(c.values.joined(separator: ", "))"
+        }.joined(separator: "\n")
+    }
+
     static var specs: [ToolSpec] {
         [
             ToolSpec(
                 name: "change_setting",
                 summary: "Change a setting",
-                description: "Change one of FlowState's own settings — the backdrop, the "
-                           + "voice, the camera, the widget, dev mode, the wake phrase. Use "
-                           + "whenever the user asks for the app itself to look or behave "
-                           + "differently. Say what you changed in a few words; do not read "
-                           + "the list of options back unless they got it wrong.",
+                description: "Change one of FlowState's own settings. Use whenever the user "
+                           + "asks for the app itself to look or behave differently. "
+                           + "ALWAYS pass a value from the list below — never invent one, and "
+                           + "never ask the user which option they want when what they said "
+                           + "clearly points at one of these. If they ask for \"a man's voice\" "
+                           + "or \"something calmer\", pick the closest listed value and say "
+                           + "which you picked. Say what you changed in a few words.\n\n"
+                           + briefing(),
                 parameters: [
-                    ToolParameter("setting", description: "What to change, in the user's own words.", required: true),
-                    ToolParameter("value", description: "What to change it to, or on/off for a switch.", required: true),
+                    ToolParameter("setting", description: "The setting key, from the list.",
+                                  required: true,
+                                  allowed: catalogue().map(\.key)),
+                    ToolParameter("value", description: "One of that setting's listed values, "
+                                                     + "or a number, or on/off.", required: true),
                 ]),
-            ToolSpec(
-                name: "list_settings",
-                summary: "What can be changed",
-                description: "The settings that can be changed by voice, and their current "
-                           + "values. Use when the user asks what you can change, or what "
-                           + "the options are for something."),
             ToolSpec(
                 name: "open_settings",
                 summary: "Open Settings",
-                description: "Open the settings window, optionally at one of its tabs: "
-                           + "general, look, screen, access, dev, data. Use when the user "
-                           + "asks to see a setting rather than change it — the wake-word "
-                           + "tuning display is on the access tab.",
+                description: "Open the settings window, optionally at one of its tabs. The "
+                           + "wake-word tuning display is on the access tab.",
                 parameters: [
-                    ToolParameter("tab", description: "general, look, screen, access, dev or data.")
+                    ToolParameter("tab", description: "Which tab to open.",
+                                  allowed: SettingsTab.allCases.map(\.rawValue))
                 ]),
         ]
     }

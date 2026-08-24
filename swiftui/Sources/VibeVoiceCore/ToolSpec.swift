@@ -6,12 +6,25 @@ public struct ToolParameter: Equatable {
     public let type: String          // JSON Schema type: "string", "number", "boolean"
     public let description: String
     public let required: Bool
+    /// The exact values this will accept.
+    ///
+    /// Worth the schema space wherever the list is closed. Without it the model invents
+    /// a plausible value, gets refused, and reads the real list back out of the error —
+    /// which is a wasted round trip that sounds, from the other side, like an assistant
+    /// that does not know its own app. Observed: it tried "casual guy" for a voice and
+    /// "lighter" for a backdrop, both times learning the options only after failing.
+    public let allowed: [String]
 
-    public init(_ name: String, type: String = "string", description: String, required: Bool = false) {
+    public init(_ name: String,
+                type: String = "string",
+                description: String,
+                required: Bool = false,
+                allowed: [String] = []) {
         self.name = name
         self.type = type
         self.description = description
         self.required = required
+        self.allowed = allowed
     }
 }
 
@@ -58,7 +71,9 @@ public struct ToolSpec: Equatable, Identifiable {
     public func realtimeSchema() -> [String: Any] {
         var props: [String: Any] = [:]
         for p in parameters {
-            props[p.name] = ["type": p.type, "description": p.description]
+            var schema: [String: Any] = ["type": p.type, "description": p.description]
+            if !p.allowed.isEmpty { schema["enum"] = p.allowed }
+            props[p.name] = schema
         }
         var described = description
         if case .writes(let confirmation) = effect {
