@@ -177,6 +177,11 @@ struct AppSettings: Codable, Equatable {
     /// while you are doing something else.
     var clapSensitivity: Double = 0.35
 
+    /// Small sounds for the moments with no visual feedback — waking, hanging up,
+    /// trouble. On by default: the app is designed to be used without looking at it, and
+    /// silence in those moments is indistinguishable from a crash.
+    var earcons: Bool = true
+
     /// Commit what each task changed, on the current branch, when it finishes.
     ///
     /// Without this Dev Mode edits the working tree and stops, so a session's work is
@@ -274,6 +279,7 @@ struct AppSettings: Codable, Equatable {
         case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
         case photoRotateSeconds, menuBarEnabled, summonHotkey, devNudgeDismissed
         case connectHotkey, proactive, wakeWord, wakePhrase, clapToWake, clapSensitivity
+        case earcons
         case motionStyle, motionIntensity, motionAssets
         case devAutoCommit, devAutoPush, hudEnabled, hudStyle, cameraBubble
         case cameraSize, cameraCorner, cameraShape, cameraControls, cameraMirrored
@@ -336,6 +342,7 @@ extension AppSettings {
         wakePhrase        = v(.wakePhrase, d.wakePhrase)
         clapToWake        = v(.clapToWake, d.clapToWake)
         clapSensitivity   = v(.clapSensitivity, d.clapSensitivity)
+        earcons           = v(.earcons, d.earcons)
         devNudgeDismissed = v(.devNudgeDismissed, d.devNudgeDismissed)
         devAutoCommit     = v(.devAutoCommit, d.devAutoCommit)
         devAutoPush       = v(.devAutoPush, d.devAutoPush)

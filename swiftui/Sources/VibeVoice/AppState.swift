@@ -352,6 +352,14 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// The small sounds. See `Earcon`.
+    private let earcons = EarconPlayer()
+
+    func sound(_ earcon: Earcon, _ id: String) {
+        guard settings.earcons else { return }
+        earcons.play(earcon, id: id)
+    }
+
     /// Always-listening wake phrase. See `WakeListener`.
     let wake = WakeListener()
 
@@ -377,6 +385,10 @@ final class AppState: ObservableObject {
                 // Already talking is the common case for a false positive, and there is
                 // nothing to do about it — the session is open, they were heard.
                 guard !self.client.isConnected else { return }
+                // Before the connection, not after: the socket takes a second or two, and
+                // the sound is the answer to "did it hear me" — which is a question being
+                // asked right now, not in two seconds.
+                self.sound(.wake, "wake")
                 Task { @MainActor in await self.connect() }
             }
             self.openMicrophone(for: "wake")
@@ -1308,6 +1320,10 @@ final class AppState: ObservableObject {
     }
 
     func disconnect() {
+        // Only when there was something to leave — `disconnect` is also the tidy-up path
+        // for a connection that never opened, and a farewell chime for a session that
+        // never happened is a lie about what just occurred.
+        if client.isConnected { sound(.sleep, "sleep") }
         stopScreenTimer()
         stopResponseWatchdog()
         // One recap of the WHOLE conversation, before the session id stops meaning

@@ -682,6 +682,16 @@ struct SettingsView: View {
                 }
             }
 
+            section("Sounds") {
+                HStack {
+                    Text("Small sounds for waking and hanging up")
+                        .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                    Spacer()
+                    NeatToggle(isOn: binding(\.earcons))
+                }
+                caption("A rising pair of notes when it wakes, the same pair falling when it hangs up, and something unresolved when it cannot. They exist because this app is meant to be used without looking at it, and in those moments silence is indistinguishable from a crash. Synthesised, not sampled — two sine tones with a fade, so there is nothing to load and nothing to license.")
+            }
+
             section("Tuning the wake trigger") {
                 WakeTuningView(state: state)
             }

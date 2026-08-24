@@ -233,8 +233,13 @@ struct ContentView: View {
                 // the app does something when you are not looking at it: one listens
                 // when you have not spoken to it, the other speaks when you have not
                 // asked. Anything that acts on its own says so on the face of the app.
-                if state.settings.wakeWord { listeningPill }
-                if state.settings.proactive { proactivePill }
+                //
+                // Always both, on or off. They were hidden when off at first, which made
+                // them one-way doors: clicking to switch one off removed the only control
+                // that could switch it back on, and the way back was Settings. A switch
+                // that vanishes when you use it is not a switch.
+                listeningPill
+                proactivePill
 
                 if state.devTaskRunning { codingPill }
 
@@ -344,40 +349,60 @@ struct ContentView: View {
             .overlay(Capsule().stroke(Theme.hairline, lineWidth: 1)))
     }
 
-    /// Both of these are toggles, not badges. The point of putting them here is being
-    /// able to turn them off in the moment they turn out to be wrong — mid-call, or
-    /// mid-recording — without going and finding a checkbox.
+    /// Both of these are toggles, not badges — switchable in the moment either turns out
+    /// to be wrong, mid-call or mid-recording, without going to find a checkbox.
     private var listeningPill: some View {
-        Button {
-            state.settings.wakeWord = false
+        let on = state.settings.wakeWord
+        return Button {
+            state.settings.wakeWord.toggle()
             state.applyWakeWord()
         } label: {
-            statusPill("antenna.radiowaves.left.and.right", "HEY FLOW", tint: Theme.accent.opacity(0.55))
+            statusPill("antenna.radiowaves.left.and.right", "HEY FLOW",
+                       tint: Theme.accent.opacity(0.55), on: on)
         }
         .buttonStyle(.plain)
-        .help("Listening for the wake phrase, on-device. Click to stop.")
+        .help(on ? "Listening for the wake phrase, on-device. Click to stop."
+                 : "Not listening for the wake phrase. Click to start.")
+        .accessibilityLabel("Wake phrase")
+        .accessibilityValue(on ? "on" : "off")
     }
 
     private var proactivePill: some View {
-        Button {
-            state.settings.proactive = false
+        let on = state.settings.proactive
+        return Button {
+            state.settings.proactive.toggle()
         } label: {
-            statusPill("bell.fill", "PROACTIVE", tint: Theme.voice.opacity(0.75))
+            statusPill("bell.fill", "PROACTIVE", tint: Theme.voice.opacity(0.75), on: on)
         }
         .buttonStyle(.plain)
-        .help("It will open a session to tell you when a task finishes. Click to stop.")
+        .help(on ? "It will open a session to tell you when a task finishes. Click to stop."
+                 : "It will wait to be asked. Click to let it speak up.")
+        .accessibilityLabel("Proactive updates")
+        .accessibilityValue(on ? "on" : "off")
     }
 
-    private func statusPill(_ symbol: String, _ text: String, tint: Color) -> some View {
+    /// On: filled, with its name. Off: the outline and the icon alone.
+    ///
+    /// Off has to stay legible enough to be found and clicked, and quiet enough that two
+    /// switched-off pills are not two things shouting in a header that already has plenty
+    /// in it. Dropping the word is what buys that — the icon holds the place, the tooltip
+    /// says the rest.
+    private func statusPill(_ symbol: String, _ text: String, tint: Color, on: Bool) -> some View {
         HStack(spacing: 5) {
             Image(systemName: symbol).font(.system(size: 8.5))
-            Text(text)
-                .font(.system(size: 9.5, weight: .bold, design: .rounded)).tracking(0.8)
+            if on {
+                Text(text)
+                    .font(.system(size: 9.5, weight: .bold, design: .rounded)).tracking(0.8)
+            }
         }
-        .foregroundStyle(Theme.onAccent)
-        .padding(.horizontal, 8).padding(.vertical, 4)
-        .background(Capsule().fill(tint))
+        .foregroundStyle(on ? Theme.onAccent : Theme.textFaint)
+        .padding(.horizontal, on ? 8 : 6).padding(.vertical, 4)
+        .background {
+            if on { Capsule().fill(tint) }
+            else { Capsule().strokeBorder(Theme.hairline, lineWidth: 1) }
+        }
         .contentShape(Capsule())
+        .animation(.easeOut(duration: 0.15), value: on)
     }
 
     private var watchingPill: some View {
