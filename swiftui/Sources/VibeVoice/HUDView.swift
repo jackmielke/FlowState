@@ -32,10 +32,10 @@ enum HUDStyle: String, Codable, CaseIterable, Identifiable {
     /// transparent margin the glow can spill into instead of being clipped at the edge.
     /// How much transparent room the glow gets on every side.
     ///
-    /// `glowRadius` reaches about 21 points at full voice, and the old margin was six —
-    /// so the glow was clipped square exactly when the widget was most alive. The margin
-    /// is click-through (see `HUDContainerView`), so paying for it costs nothing but
-    /// pixels nobody can see.
+    /// `glowRadius` is about 13 points at its widest and the shadow reaches past that,
+    /// where the old margin was six — so the glow was clipped square at the corners. The
+    /// margin is click-through (see `HUDContainerView`), so paying for it costs nothing
+    /// but pixels nobody can see.
     static let glowMargin: CGFloat = 26
 
     var size: CGSize {
@@ -44,9 +44,11 @@ enum HUDStyle: String, Codable, CaseIterable, Identifiable {
     }
 
 
-    /// The black surface people actually see. Slightly smaller than it used to be: with
-    /// the perimeter stroke gone there is nothing holding the extra width, and a solid
-    /// black shape reads heavier than a translucent one at the same size.
+    /// The area the widget owns: what it draws on in the text styles, and in the orb
+    /// style what you can click and drag even though nothing is painted there. Slightly
+    /// smaller than it used to be: with the perimeter stroke gone there is nothing
+    /// holding the extra width, and a solid black shape reads heavier than a translucent
+    /// one at the same size.
     var surface: CGSize {
         switch self {
         case .orb:  return CGSize(width: 66,  height: 66)
@@ -54,6 +56,11 @@ enum HUDStyle: String, Codable, CaseIterable, Identifiable {
         case .bar:  return CGSize(width: 344, height: 54)
         }
     }
+
+    /// Whether anything is painted on that area. Only the styles with text need a plate
+    /// to carry it; the orb is legible on its own, and a black disc behind it is a
+    /// perimeter with nothing to do but ring the thing you were looking at.
+    var showsSurface: Bool { self != .orb }
 
     var corner: CGFloat { self == .orb ? 33 : 15 }
 
@@ -66,11 +73,12 @@ enum HUDStyle: String, Codable, CaseIterable, Identifiable {
 /// on a timer. The orb already reacts to real audio, and that is the only motion a thing
 /// living on top of someone's desktop has earned.
 ///
-/// The surface is flat black with no perimeter at all. That is the whole visual idea:
-/// against a desktop the shape is defined by the window's own shadow, so a stroke on top
-/// of it is a second outline saying the same thing. Active state is carried by the orb
-/// and by a soft coloured glow under the surface, never by chrome appearing and
-/// disappearing around the edge.
+/// The surface is flat black with no perimeter at all, and in the orb style there is no
+/// surface either — just the orb, over the desktop. That is the whole visual idea: the
+/// shape is the shape, with nothing ringing it. The window's own shadow is off for the
+/// same reason (see `HUDPanel`). Active state is carried by the orb and, where there is
+/// a plate to light, by a soft coloured glow under it — never by chrome appearing,
+/// pulsing or disappearing around the edge.
 struct HUDView: View {
     @ObservedObject var state: AppState
     @State private var hovering = false
@@ -112,8 +120,10 @@ struct HUDView: View {
         return false
     }
 
-    /// Idle is the one state with no glow — the widget goes completely inert.
-    private var showsGlow: Bool { isActive || isError }
+    /// Idle is the one state with no glow — the widget goes completely inert. Neither is
+    /// there anything to light in the orb style: the glow exists to make the black plate
+    /// look lit from inside, and with no plate it is just a coloured ring in mid-air.
+    private var showsGlow: Bool { (isActive || isError) && style.showsSurface }
 
     /// What the glow is tinted with. Follows the orb so the two never disagree.
     private var glow: Color {
@@ -129,10 +139,13 @@ struct HUDView: View {
         }
     }
 
+    /// Fixed per state rather than per frame. Driving it from the level made the lit
+    /// edge swell and drop back on every syllable, which at this size does not read as
+    /// the surface breathing — it reads as a ring around the widget bouncing. The orb is
+    /// already showing the amplitude; the perimeter does not need to say it again.
     private var glowRadius: CGFloat {
         guard showsGlow else { return 0 }
-        // Breathes with the voice rather than with a timer.
-        return 9 + CGFloat(min(level, 0.35)) * 26 + (hovering ? 3 : 0)
+        return hovering ? 13 : 10
     }
 
     var body: some View {
@@ -212,10 +225,12 @@ struct HUDView: View {
         .padding(.horizontal, style == .orb ? 8 : 13)
         .padding(.vertical, 8)
         .frame(width: style.surface.width, height: style.surface.height)
-        .background(
-            RoundedRectangle(cornerRadius: style.corner, style: .continuous)
-                .fill(Color.black)
-        )
+        .background {
+            if style.showsSurface {
+                RoundedRectangle(cornerRadius: style.corner, style: .continuous)
+                    .fill(Color.black)
+            }
+        }
         // Not a border: the glow sits *under* the black surface and bleeds past it, so it
         // reads as the widget being lit from inside rather than as chrome switching on.
         .shadow(color: glow.opacity(showsGlow ? 0.55 : 0), radius: glowRadius)

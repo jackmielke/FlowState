@@ -59,7 +59,13 @@ final class HUDPanel: NSPanel {
         // appearance; leave this on aqua and every label inside paints near-black on
         // black the moment someone switches the desktop to light mode.
         appearance = NSAppearance(named: .darkAqua)
-        hasShadow = true
+        // No window shadow. AppKit draws it from the panel's alpha shape and only
+        // recomputes it when asked, so on a transparent panel whose contents animate
+        // every frame it stops tracking the widget and stays behind as a black ring
+        // around the whole surface — a perimeter nobody drew, bouncing as the orb
+        // breathes. The widget defines its own edge: a black plate in the text styles,
+        // and the orb itself in the smallest one.
+        hasShadow = false
         isMovableByWindowBackground = true
         hidesOnDeactivate = false
         // Otherwise a borderless panel refuses key events and the buttons inside go dead.
