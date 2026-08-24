@@ -2983,7 +2983,13 @@ final class AppState: ObservableObject {
             try? await Task.sleep(for: .milliseconds(250))
             self.disconnect()
         }
-        return "Going to sleep. Say a short goodbye — the session closes once you stop speaking."
+        // Deliberately nothing worth saying out loud.
+        //
+        // This used to be a sentence explaining what was about to happen, and the model
+        // did the obvious thing with a sentence: it read it back. Two announcements about
+        // going to sleep, either side of the tool call, when what was wanted was "see you
+        // later". A tool result is a fact for the model, not a line for it to deliver.
+        return "ok"
     }
 
     func setRecording(paused: Bool) -> String {

@@ -65,9 +65,12 @@ enum NativeTools {
             summary: "Hang up",
             description: "Close the session and stop listening. Use whenever the user says "
                        + "go to sleep, that's all, we're done, goodbye, or you can go. "
-                       + "Say a short goodbye first — the microphone closes a moment after "
-                       + "you finish speaking, and going silent mid-sentence reads as a "
-                       + "crash. Do not ask them to confirm."),
+                       + "Do not ask them to confirm and do not announce it beforehand — "
+                       + "call this FIRST, then say goodbye in four words or fewer. "
+                       + "\"Okay, see you later.\" \"Night.\" \"Sure thing, bye.\" Nothing "
+                       + "about sleeping, microphones, sessions closing, or what will "
+                       + "happen when they stop talking. They know. Never read the tool's "
+                       + "result out loud."),
 
         ToolSpec(
             name: "memory_status",

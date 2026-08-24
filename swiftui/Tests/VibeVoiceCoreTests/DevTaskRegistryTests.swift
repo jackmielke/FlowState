@@ -214,8 +214,11 @@ final class DevTaskRegistryTests: XCTestCase {
         let live = r.start(label: "live", repo: "~/a")
         let waiting = r.enqueue(label: "waiting", repo: "~/a", request: request())
 
+        // Removed outright rather than filed as cancelled — it never ran. This asserted
+        // the opposite until somebody dismissed a queued task and found a card left
+        // behind in the finished list.
         r.cancel(waiting.id)
-        XCTAssertEqual(r.task(waiting.id)?.status, .cancelled)
+        XCTAssertNil(r.task(waiting.id))
         XCTAssertTrue(r.queued.isEmpty)
 
         r.finish(live.id, ok: true, result: "ok")
@@ -296,5 +299,40 @@ extension DevTaskRegistryTests {
         XCTAssertTrue(r.pauseExplanation.contains("1 waiting"), r.pauseExplanation)
         r.finish(running.id, ok: true, result: "done")
         XCTAssertTrue(r.pauseExplanation.contains("1 task waiting"), r.pauseExplanation)
+    }
+}
+
+extension DevTaskRegistryTests {
+
+    /// Dismissing something that never ran should make it go away. It used to move to
+    /// the finished list as "cancelled", which reads as a task that did something.
+    func testCancellingAQueuedTaskRemovesItEntirely() {
+        let r = DevTaskRegistry()
+        let a = r.start(label: "first", repo: "x")
+        let b = r.enqueue(label: "second", repo: "x", request: request())
+        XCTAssertEqual(r.queued.count, 1)
+
+        XCTAssertTrue(r.cancel(b.id))
+        XCTAssertTrue(r.queued.isEmpty)
+        XCTAssertTrue(r.finished.allSatisfy { $0.id != b.id }, "it should not be filed anywhere")
+        XCTAssertNil(r.task(b.id))
+        XCTAssertNotNil(r.task(a.id), "the running one is untouched")
+    }
+
+    /// A running task did work, so cancelling it keeps a row saying so.
+    func testCancellingARunningTaskKeepsTheRecord() {
+        let r = DevTaskRegistry()
+        let a = r.start(label: "first", repo: "x")
+        XCTAssertFalse(r.cancel(a.id))
+        XCTAssertEqual(r.task(a.id)?.status, .cancelled)
+        XCTAssertTrue(r.finished.contains { $0.id == a.id })
+    }
+
+    func testCancellingSomethingAlreadyFinishedDoesNothing() {
+        let r = DevTaskRegistry()
+        let a = r.start(label: "first", repo: "x")
+        r.finish(a.id, ok: true, result: "done")
+        XCTAssertFalse(r.cancel(a.id))
+        XCTAssertEqual(r.task(a.id)?.status, .finished)
     }
 }

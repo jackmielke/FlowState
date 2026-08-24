@@ -264,11 +264,27 @@ public final class DevTaskRegistry {
 
     /// Stops a running task, or drops a queued one. Both are "I have changed my mind",
     /// and a queue you cannot take something out of is a trap.
-    public func cancel(_ id: String, now: Date = Date()) {
-        guard let i = index(id), !tasks[i].status.isTerminal else { return }
+    /// - Returns: true if the task was removed outright rather than marked cancelled.
+    @discardableResult
+    public func cancel(_ id: String, now: Date = Date()) -> Bool {
+        guard let i = index(id), !tasks[i].status.isTerminal else { return false }
+
+        // A queued task that never started is DELETED, not filed as cancelled.
+        //
+        // Cancelling one used to leave a card behind in the finished list, which is the
+        // opposite of what dismissing something means: it never ran, changed nothing, and
+        // produced no result, so there is nothing to keep a record of. A running task is
+        // different — it did work, possibly to the working tree, and that is worth a row
+        // saying so.
+        if tasks[i].status == .queued {
+            tasks.remove(at: i)
+            return true
+        }
+
         tasks[i].status = .cancelled
         tasks[i].finishedAt = now
         tasks[i].request = nil
+        return false
     }
 
     /// The task a bare follow-up ("make it faster") should resume: the most recent one,
