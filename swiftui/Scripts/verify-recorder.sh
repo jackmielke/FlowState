@@ -236,12 +236,15 @@ final class FakeVideoTrack: RecordingVideoTrack, @unchecked Sendable {
     var cancelled = 0
     var failBegin = false
     var bytesWritten = 0
+    /// Every pause and resume it was told about, in order.
+    var pauses: [Bool] = []
 
     func begin(destination: URL, plan: CapturePlan) throws {
         if failBegin { throw NSError(domain: "test", code: 1) }
         began = (destination, plan)
     }
     func finish(samples: [Int16], sampleRate: Int) throws { finishedWith = samples }
+    func setPaused(_ paused: Bool) { pauses.append(paused) }
     func cancel() { cancelled += 1 }
 }
 
@@ -276,6 +279,58 @@ do {
     case let other:
         check(false, "saved a movie", "got \(other)")
     }
+}
+
+// ------------------------------------------------------------------------ 6a. pausing
+//
+// A pause is a splice: what is fed while paused is dropped, so the file is shorter by
+// exactly the length of the pause rather than containing that much silence. The video
+// writer has to be told, because it is stamping frames against a clock the audio just
+// stopped sharing — see `VideoTrackWriter.setPaused`.
+print("\n6a. a pause takes nothing in, and the file continues where it left off")
+do {
+    let recorder = SessionRecorder()
+    let track = FakeVideoTrack()
+    let url = recorder.start(title: "verify-recorder pause", plan: screenPlan, video: track)
+
+    for i in 0..<25 { recorder.appendMic(chunk(480, phase: i * 480)) }      // 0.5s
+    check(recorder.setPaused(true) == .paused(at: 0.5), "pauses where the samples stop",
+          String(format: "%.2fs", recorder.duration))
+    check(track.pauses == [true], "and the video writer is told")
+
+    // Everything below is fed while paused and must land nowhere.
+    for i in 0..<50 { recorder.appendMic(chunk(480, phase: i * 480)) }
+    recorder.appendAssistant(chunk(4_800, amplitude: 4_000))
+    recorder.appendSystemAudio(Array(repeating: 6_000, count: 4_800), at: 0.6)
+
+    check(recorder.setPaused(true) == .unchanged(paused: true), "pausing twice is not an error")
+    check(recorder.setPaused(false) == .resumed(at: 0.5), "resumes at the same second")
+    check(track.pauses == [true, false], "and the writer is told that too")
+
+    for i in 0..<25 { recorder.appendMic(chunk(480, phase: i * 480)) }      // another 0.5s
+
+    switch recorder.stop() {
+    case .saved(let saved, let seconds):
+        check(abs(seconds - 1.0) < 0.001, "one second in the file, not two",
+              String(format: "%.3fs", seconds))
+        check(track.finishedWith?.count == 24_000, "the mixdown skipped the pause",
+              "\(track.finishedWith?.count ?? -1) samples")
+        cleanup(saved)
+    case let other:
+        check(false, "saved", "got \(other)")
+    }
+}
+
+print("\n6a-ii. pausing something that is not recording changes nothing")
+do {
+    let recorder = SessionRecorder()
+    check(recorder.setPaused(true) == .notRecording, "says so")
+    check(recorder.isPaused == false, "and does not go paused")
+    // And a take started afterwards is not born paused.
+    _ = recorder.start(title: "verify-recorder pause-then-start")
+    check(recorder.isPaused == false, "a new take starts running")
+    recorder.appendMic(chunk(480))
+    _ = recorder.stop()
 }
 
 print("\n6b. a video plan with no writer refuses to start rather than recording nothing")

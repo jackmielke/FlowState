@@ -401,13 +401,17 @@ final class AppState: ObservableObject {
         GlobalHotkey.shared.registerRecord(HotkeyCombo.named(settings.recordHotkey)) { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
+                // Through the same door as the spoken route, so the key and the sentence
+                // are subject to the same rules and land in the same log. The key is
+                // still a toggle — it is one key and there are two states — but which
+                // action that toggle means is `VoiceCommand`'s to name.
                 if self.isRecording {
-                    _ = self.stopRecording()
+                    self.runVoiceCommand(.stopRecording, from: .hotkey)
                     self.sound(.sleep, "sleep")
                 } else {
                     // The sound is the only confirmation there is: the window is not in
                     // front, which is the entire reason this key exists.
-                    _ = self.startRecording()
+                    self.runVoiceCommand(.startRecording, from: .hotkey)
                     if self.isRecording { self.sound(.heard, "heard") }
                 }
             }
@@ -504,6 +508,14 @@ final class AppState: ObservableObject {
             self.wake.phrase = self.settings.wakePhrase == "heyFlowState" ? .heyFlowState : .heyFlow
             self.wake.clapEnabled = self.settings.clapToWake
             self.wake.clapSensitivity = Float(self.settings.clapSensitivity)
+            // The recogniser that is about to run for the wake phrase listens for the
+            // recording commands as well. It costs nothing extra — same audio, same
+            // task, six more phrases — and it is the only route that works with no
+            // session open, which is most of the time a recording is running.
+            self.wake.commandsEnabled = self.settings.voiceCommands
+            self.wake.onCommand = { [weak self] command in
+                self?.runVoiceCommand(command, from: .speech)
+            }
             self.wake.onWake = { [weak self] in
                 guard let self else { return }
                 // Already talking is the common case for a false positive, and there is
@@ -628,6 +640,8 @@ final class AppState: ObservableObject {
                 say("listener running", self.wake.isRunning)
                 say("listener problem", self.wake.problem ?? "none")
                 say("clap enabled", self.wake.clapEnabled)
+                say("setting voiceCommands", self.settings.voiceCommands)
+                say("commands armed", self.wake.commandsEnabled)
                 say("snoozed", self.wake.isSnoozed)
                 say("BUFFERS FED", self.wake.buffersFed)
                 say("room level", self.wake.roomLevel)
@@ -702,6 +716,7 @@ final class AppState: ObservableObject {
     let tools = ToolRegistry(specs: NativeTools.specs
                                   + NativeTools.taskControlSpecs
                                   + NativeTools.memorySpecs
+                                  + NativeTools.recordingSpecs
                                   + SettingsTools.specs)
 
     /// Pause or resume the queue. Announced in the transcript, because a queue that
@@ -985,6 +1000,180 @@ final class AppState: ObservableObject {
     @discardableResult
     func stopRecording() -> String {
         finishRecording()
+    }
+
+    /// True while a take is running but taking nothing in. See `SessionRecorder.setPaused`.
+    var isRecordingPaused: Bool { recorder.isPaused }
+
+    /// Hold the take without ending it, or continue it.
+    ///
+    /// The microphone is deliberately left open across a pause. It is held for the
+    /// recording (see `micHolders`), and releasing it here would stop the wake listener's
+    /// audio as well — so "pause recording" would take the ears off the one command that
+    /// can un-pause it, which is the same trap `go_to_sleep` fell into. Nothing paused
+    /// reaches the file either way; the recorder drops it.
+    @discardableResult
+    func setRecordingPaused(_ paused: Bool) -> String {
+        let said: String
+        switch recorder.setPaused(paused) {
+        case .notRecording:
+            said = "Nothing is being recorded."
+        case .unchanged(let already):
+            said = already ? "It's already paused." : "The recording is already running."
+        case .paused(let at):
+            said = "Paused at \(Self.clock(at)). Say resume recording to carry on."
+            note("Recording paused at \(Self.clock(at)) — nothing is being captured until it resumes.")
+        case .resumed(let at):
+            said = "Recording again, from \(Self.clock(at))."
+            note("Recording resumed at \(Self.clock(at)).")
+        }
+        objectWillChange.send()
+        return said
+    }
+
+    // MARK: - The camera bubble, out loud
+
+    /// Why the camera cannot be used, or nil.
+    ///
+    /// `.notAsked` is deliberately not a refusal: it is a question that has not been put
+    /// yet, and `showFace` puts it.
+    var cameraRefusal: String? {
+        let permission = CameraCapture.permission()
+        if permission == .denied || permission == .restricted { return permission.bannerText }
+        guard permission == .notAsked || CameraCapture.device(id: settings.cameraDeviceID) != nil else {
+            return "No camera is connected, so there's nothing to show."
+        }
+        return nil
+    }
+
+    /// Put the user's face on screen — the same bubble the recording composites, so
+    /// saying "show my face" mid-take puts it in the file as well as on the display.
+    @discardableResult
+    func showFace() -> String {
+        if CameraCapture.permission() == .notAsked {
+            // The one place a voice command is allowed to raise a system dialog: the user
+            // just asked for the camera, so a camera prompt is the answer to their
+            // question rather than an interruption of it.
+            Task { @MainActor in
+                self.cameraPermission = await CameraCapture.ensureAccess()
+                self.cameras = CameraCapture.options()
+                guard self.cameraPermission.canCapture else {
+                    self.banner = self.cameraPermission.bannerText
+                    self.objectWillChange.send()
+                    return
+                }
+                self.settings.cameraBubble = true
+                self.applyCameraBubble()
+            }
+            return "Asking for camera access."
+        }
+        settings.cameraBubble = true
+        applyCameraBubble()
+        note("Camera bubble on.")
+        return "Your camera's on screen."
+    }
+
+    @discardableResult
+    func hideFace() -> String {
+        settings.cameraBubble = false
+        applyCameraBubble()
+        note("Camera bubble off.")
+        // A take that is running keeps running — this only takes the face out of it.
+        return isRecording ? "Camera hidden. Still recording." : "Camera hidden."
+    }
+
+    // MARK: - Voice commands
+
+    private static let commandLog = Logger(subsystem: "com.jackmielke.vibevoice",
+                                           category: "voice-command")
+
+    /// What the gate is deciding against, right now.
+    ///
+    /// - Parameter source: only ever consulted for the master switch. Turning the spoken
+    ///   commands off must not disable the record button, and a `commandsEnabled` that
+    ///   did not know where the command came from would do exactly that.
+    func voiceCommandContext(for source: VoiceCommandSource = .speech) -> VoiceCommandContext {
+        VoiceCommandContext(commandsEnabled: !source.isSpoken || settings.voiceCommands,
+                            recordingEnabled: AudioEngine.micPermitted,
+                            recordingBlocked: permissionRefusal(for: settings.captureMode),
+                            isRecording: recorder.isRecording,
+                            isPaused: recorder.isPaused,
+                            cameraBlocked: cameraRefusal,
+                            isFaceVisible: settings.cameraBubble)
+    }
+
+    /// The single door every spoken command comes through — the model's tool call and the
+    /// on-device listener alike.
+    ///
+    /// One door because the interesting part is not the doing, it is the *deciding*, and
+    /// two copies of that decision would drift within a week: the model would be allowed
+    /// to start a recording that the spoken route refuses, and nobody would find out
+    /// until a demo. So both routes gather the same context, ask the same gate, and leave
+    /// the same line in the log:
+    ///
+    ///     [voice-command] stop_recording via speech — performed: Saved 2:14 as …
+    ///
+    /// - Parameter source: where it came from. It decides two things and nothing else:
+    ///   whether the `voiceCommands` switch applies (it does not to a button or a key),
+    ///   and what the log line says it was — because an action nobody can trace back to
+    ///   what triggered it is an action the user cannot argue with.
+    @discardableResult
+    func runVoiceCommand(_ requested: VoiceCommand, from source: VoiceCommandSource) -> String {
+        let context = voiceCommandContext(for: source)
+        let command = requested.resolved(in: context)
+        if command != requested {
+            Self.commandLog.notice("""
+                \(requested.toolName, privacy: .public) via \(source.rawValue, privacy: .public) \
+                → \(command.toolName, privacy: .public)
+                """)
+        }
+
+        let decision = VoiceCommandGate.decide(requested, in: context)
+        guard decision.isPerform else {
+            let why = decision.spoken ?? "Not now."
+            log(command: command, source: source, decision: decision, result: why)
+            // A blocked command is a thing the user has to fix — a permission, a switch —
+            // so it gets the banner. A redundant one is not: saying "stop recording"
+            // twice is not a problem to be reported, and a red bar for it would be the
+            // app scolding somebody for repeating themselves.
+            if case .blocked = decision { banner = why }
+            objectWillChange.send()
+            return why
+        }
+
+        let result: String
+        switch command {
+        case .startRecording:  result = startRecording()
+        case .stopRecording:   result = stopRecording()
+        case .pauseRecording:  result = setRecordingPaused(true)
+        case .resumeRecording: result = setRecordingPaused(false)
+        case .showFace:        result = showFace()
+        case .hideFace:        result = hideFace()
+        }
+        log(command: command, source: source, decision: decision, result: result)
+        return result
+    }
+
+    /// Two lines per command, always: one for Console (`log stream --predicate
+    /// 'category == "voice-command"'`) and one for the terminal a dev build is running
+    /// in. Both say the same thing, including the ones that did nothing — "ignored" is
+    /// the entry somebody debugging this actually needs, and it is the one a log that
+    /// only recorded successes would be missing.
+    private func log(command: VoiceCommand,
+                     source: VoiceCommandSource,
+                     decision: VoiceCommandDecision,
+                     result: String) {
+        Self.commandLog.notice("""
+            \(command.toolName, privacy: .public) via \(source.rawValue, privacy: .public) — \
+            \(decision.logToken, privacy: .public): \(result, privacy: .public)
+            """)
+        FileHandle.standardError.write(Data(
+            "[voice-command] \(command.toolName) via \(source.rawValue) — \(decision.logToken): \(result)\n".utf8))
+        // In the transcript too, but only for the spoken route: a tool call already
+        // leaves its own "⚒ Stop recording: …" line, and two entries for one sentence
+        // reads as it having happened twice.
+        guard source == .speech else { return }
+        note("\(command.summary) — \(result)")
     }
 
     /// The one place a recording ends, whoever ends it — the button, the voice tool, or
@@ -1303,6 +1492,8 @@ final class AppState: ObservableObject {
         // What the user has agreed to keep. Read once here, and re-applied whenever
         // Settings changes it — see `applyPrivacySettings()`.
         conversation.privacy = settings.privacy
+        // And how many of them, and whether they are written at all without being asked.
+        conversation.retention = settings.retention
         summaries = SummaryService(store: conversation, policy: settings.summaries)
         summaries.onSummary = { [weak self] summary, delivery in
             self?.handleSummary(summary, delivery)
@@ -1417,6 +1608,17 @@ final class AppState: ObservableObject {
         // So: ask first (harmless, and correct if this Mac ever does prompt), then
         // make a genuine attempt so the row exists when the user goes looking for it.
         Task { @MainActor in
+            // A rendering run asks for nothing.
+            //
+            // `snapshot-ui.sh` launches the STAGING bundle in the source tree, which is a
+            // different path and therefore a different app to macOS — so every run put a
+            // screen-recording prompt on screen for an app the user has never heard of,
+            // sitting alongside the one they granted. A mode that renders images and
+            // quits has no business asking for the screen at all.
+            guard SettingsSnapshot.requested == nil else {
+                self.cameras = CameraCapture.options()
+                return
+            }
             var s = await ScreenCapture.ensureAccess(reason: "launch")
             if s != .granted {
                 s = await ScreenCapture.probe(reason: "launch-register")
@@ -1937,14 +2139,22 @@ final class AppState: ObservableObject {
                     result = self.goToSleep()
                 case "memory_status":
                     result = self.conversation.spokenStatus
-                case "pause_recording":
-                    result = self.setRecording(paused: true)
-                case "resume_recording":
-                    result = self.setRecording(paused: false)
+                case "stop_transcript":
+                    result = self.setTranscriptKeeping(paused: true)
+                case "resume_transcript":
+                    result = self.setTranscriptKeeping(paused: false)
                 case "forget_conversation":
                     result = self.forgetThisConversation()
                 default:
-                    result = await NativeTools.run(name, args: args)
+                    // The recorder's transport and the camera go through the same gate
+                    // the spoken route uses — a model that decides to stop a recording
+                    // nobody is making is told so in the same words, and the refusal is
+                    // logged the same way.
+                    if let command = VoiceCommand(toolName: name) {
+                        result = self.runVoiceCommand(command, from: .model)
+                    } else {
+                        result = await NativeTools.run(name, args: args)
+                    }
                 }
                 self.transcript.append(TranscriptItem(
                     speaker: .system, text: "⚒ \(spec.summary): \(result.prefix(160))"))
@@ -2519,9 +2729,13 @@ final class AppState: ObservableObject {
     func newConversation() {
         let wasLive = connection == .live || connection == .connecting
         if wasLive { disconnect() }
+        let left = conversation.currentSessionID
         conversation.startNewSession()
         summaries.begin(session: conversation.currentSessionID)
         resolveAllPending(reason: "the conversation was closed", announce: false)
+        TranscriptLog.event(.cleared, session: left,
+                            "\(TranscriptLog.lines(transcript.count)) off screen — the "
+                            + "conversation itself is saved and reopenable")
         transcript.removeAll()
         assistantItemID = nil
         latestSummary = nil
@@ -2729,13 +2943,21 @@ final class AppState: ObservableObject {
     /// Which conversation to be in on launch. See `AppSettings.resumeLastSession` for
     /// what the two answers mean and why the default is the one it is.
     private func restoreSessionOnLaunch() {
-        if settings.resumeLastSession, let last = conversation.mostRecentSession {
+        // A pinned conversation is reopened whether or not "pick up where I left off" is
+        // on: pinning is the more specific instruction, and it was given about this
+        // conversation rather than about launches in general.
+        let last = conversation.mostRecentSession
+        if settings.resumeLastSession || last?.pinned == true, let last {
             let load = conversation.openSession(last.id)
             if let archive = load.archive {
                 rebuildTranscript(from: archive)
                 latestSummary = archive.summaries.last
                 let kept = archive.entries.filter(\.isConversational).count
-                note("Picking up \(conversation.currentTitle) · \(kept) line\(kept == 1 ? "" : "s") restored.")
+                TranscriptLog.event(.restored, session: last.id,
+                                    "launch · \(TranscriptLog.lines(archive.entries.count)) on screen"
+                                    + (last.pinned ? " · pinned" : ""))
+                note("Picking up \(conversation.currentTitle) · \(kept) line\(kept == 1 ? "" : "s") restored."
+                     + (last.pinned ? " Pinned, so it is what opens." : ""))
             } else {
                 // A transcript that would not open on launch is the worst moment to give
                 // up on: there is nothing on screen for the user to fall back to.
@@ -2902,9 +3124,117 @@ final class AppState: ObservableObject {
     /// moment it takes effect — including retention, which deletes on the way down.
     func applyPrivacySettings() {
         conversation.privacy = settings.privacy
+        conversation.retention = settings.retention
         summaries.policy = settings.summaries
         conversation.purgeExpiredFiles()
         objectWillChange.send()
+    }
+
+    // MARK: - Keeping a transcript in front of you
+
+    /// Whether the conversation on screen is locked.
+    var transcriptIsPinned: Bool { conversation.currentIsPinned }
+
+    /// Locks or unlocks the conversation on screen.
+    ///
+    /// A lock is a standing instruction about one conversation: retention leaves it
+    /// alone, the keep-last limit does not count it, launch reopens it, and — in
+    /// manual-save mode — it is written to disk immediately rather than waiting to be
+    /// saved. It does not defend against the user: Delete still deletes.
+    @discardableResult
+    func toggleTranscriptPin() -> Bool {
+        let id = currentSessionID
+        let nowPinned = conversation.setPinned(!conversation.isPinned(id), session: id)
+        note(nowPinned
+             ? "Transcript pinned. It stays saved, it is skipped by the retention limits, "
+               + "and \(kAssistantDisplayName) opens it next time."
+             : "Transcript unpinned. It is kept like any other conversation now.")
+        objectWillChange.send()
+        return nowPinned
+    }
+
+    /// Hides or shows the transcript column. Nothing is recorded, deleted or paused —
+    /// see `AppSettings.transcriptHidden`.
+    @discardableResult
+    func toggleTranscriptHidden() -> Bool {
+        settings.transcriptHidden.toggle()
+        let hidden = settings.transcriptHidden
+        TranscriptLog.event(hidden ? .hidden : .shown, session: currentSessionID,
+                            hidden
+                            ? "\(TranscriptLog.lines(transcript.count)) hidden from view — nothing was deleted"
+                            : "\(TranscriptLog.lines(transcript.count)) back on screen")
+        objectWillChange.send()
+        return hidden
+    }
+
+    /// Writes the conversation on screen to disk now, whatever the retention mode says.
+    /// The button behind "Only what I save", and the repair for a write that failed.
+    @discardableResult
+    func saveTranscriptNow() -> String {
+        let id = currentSessionID
+        guard settings.privacy.persistToDisk else {
+            let said = "Nothing was saved — \"Save to disk\" is off in Memory & privacy."
+            note(said)
+            return said
+        }
+        guard let count = conversation.save(session: id) else {
+            let said = "Could not write the transcript" +
+                (conversation.lastWriteError.map { " — " + $0 } ?? ".")
+            note(said)
+            return said
+        }
+        let said = count == 0
+            ? "Nothing said yet — there is nothing to save."
+            : "Saved \(TranscriptLog.lines(count)) to \(conversation.transcriptURL(for: id).lastPathComponent)."
+        note(said)
+        objectWillChange.send()
+        return said
+    }
+
+    /// Rewrites one line of the transcript, on screen and in the record.
+    ///
+    /// Only lines that came from a person or the assistant can be edited — the app's own
+    /// narration is not a conversation, and letting it be rewritten would make the
+    /// system notes unreliable as evidence of what the app actually did.
+    @discardableResult
+    func editTranscriptLine(_ id: UUID, to text: String) -> Bool {
+        guard let i = transcript.firstIndex(where: { $0.id == id }) else { return false }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, transcript[i].speaker != .system else { return false }
+        guard trimmed != transcript[i].text else { return false }
+
+        // The record first: it applies redaction, and the screen should show what was
+        // actually kept rather than what was typed.
+        if let entryID = transcript[i].entryID,
+           let stored = conversation.edit(entryID: entryID, to: trimmed) {
+            transcript[i].text = stored.text
+        } else {
+            transcript[i].text = trimmed
+            TranscriptLog.event(.edited, session: transcript[i].sessionID,
+                                "on screen only — this line was never recorded")
+        }
+        // An edited placeholder is no longer waiting for anything, and no longer unheard:
+        // the user has just said what it should have said.
+        transcript[i].pending = false
+        transcript[i].unheard = false
+        objectWillChange.send()
+        return true
+    }
+
+    /// Deletes one line, on screen and in the record.
+    @discardableResult
+    func deleteTranscriptLine(_ id: UUID) -> Bool {
+        guard let i = transcript.firstIndex(where: { $0.id == id }) else { return false }
+        let item = transcript[i]
+        if let entryID = item.entryID {
+            conversation.removeEntry(entryID)
+        } else {
+            TranscriptLog.event(.removed, session: item.sessionID,
+                                "screen-only line removed — nothing was on disk")
+        }
+        transcript.remove(at: i)
+        objectWillChange.send()
+        return true
     }
 
     /// Deletes this conversation, on screen and on disk.
@@ -3033,6 +3363,12 @@ final class AppState: ObservableObject {
         case "continuousScreen": settings.continuousScreen = on; syncScreenTimer(); return "Screen watching \(value)."
         case "wakeWord":         settings.wakeWord = on; applyWakeWord();        return "Wake phrase \(value)."
         case "clapToWake":       settings.clapToWake = on; applyWakeWord();      return "Clap to wake \(value)."
+        case "voiceCommands":    settings.voiceCommands = on; applyWakeWord()
+                                 // Said in full because "off" here is easy to misread as
+                                 // "the app stopped listening", which it is not — the
+                                 // wake phrase is a separate switch and is untouched.
+                                 return on ? "Recording commands on — say start recording, pause recording, or show my face."
+                                           : "Recording commands off. The wake phrase still works."
         case "proactive":        settings.proactive = on;                        return "Proactive updates \(value)."
         case "ambientMode":      settings.ambientMode = on;                      return "Ambient mode \(value)."
         case "devMode":          settings.devMode = on;                          return "Dev Mode \(value)."
@@ -3102,7 +3438,11 @@ final class AppState: ObservableObject {
         return "ok"
     }
 
-    func setRecording(paused: Bool) -> String {
+    /// The transcript, not the recorder. See `stop_transcript` in `NativeTools`, and
+    /// `setRecordingPaused` for the other one — the two were both called
+    /// `setRecording(paused:)` and `pause_recording` until the recorder itself became
+    /// sayable, at which point one name for two ideas stopped being merely untidy.
+    func setTranscriptKeeping(paused: Bool) -> String {
         settings.privacy.paused = paused
         applyPrivacySettings()
         return paused

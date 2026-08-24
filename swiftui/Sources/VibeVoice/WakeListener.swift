@@ -19,6 +19,23 @@ final class WakeListener {
 
     /// Called when the phrase is heard. Opening a session is the caller's business.
     var onWake: (() -> Void)?
+
+    /// Called when one of the recording commands is heard — "start recording", "hide my
+    /// face". Doing it, and deciding whether it may be done at all, is the caller's
+    /// business: see `AppState.runVoiceCommand`.
+    ///
+    /// This is the half of the feature that works with nothing switched on. The
+    /// recogniser is already running for the wake phrase, on-device, so listening for six
+    /// more phrases costs nothing extra and — unlike the model's tools — needs no socket,
+    /// no API key and no session. Which is the case that matters: the whole reason to say
+    /// "stop recording" instead of clicking it is that you are in the middle of something
+    /// else, and being in the middle of something else is exactly when there is no
+    /// conversation open.
+    var onCommand: ((VoiceCommand) -> Void)?
+
+    /// Whether to listen for those commands at all. Off means the phrases are ordinary
+    /// words again.
+    var commandsEnabled = false
     /// Diagnostics for Settings — the last thing it thought it heard.
     private(set) var lastHeard: String = ""
     private(set) var isRunning = false
@@ -30,6 +47,7 @@ final class WakeListener {
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var state = WakeListenerState()
+    private var commands = VoiceCommandListener()
     private var restartTimer: Timer?
 
     /// The format the engine hands over: 24 kHz mono PCM16, matching `AudioEngine`.
@@ -98,6 +116,7 @@ final class WakeListener {
     func snooze(seconds: TimeInterval) {
         let until = Date().addingTimeInterval(seconds)
         state.snooze(until: until)
+        commands.snooze(until: until)
         claps.snooze(until: until)
         snoozedUntil = until
     }
@@ -214,12 +233,28 @@ final class WakeListener {
                         // already obvious from the outside.
                         self.notePhrase(.rejected, detail: "\"\(text.suffix(40))\"")
                     }
-                    if result.isFinal { self.state.utteranceEnded() }
+                    // Independent of the wake phrase, deliberately: these are for the
+                    // person who is NOT in a conversation with the app and does not want
+                    // to start one — "hey flow, stop recording" would be two seconds of
+                    // socket setup in front of a one-word action.
+                    if self.commandsEnabled,
+                       let command = self.commands.heard(text, now: Date()) {
+                        self.notePhrase(.woke, detail: "command: \(command.summary)")
+                        self.onCommand?(command)
+                    }
+                    if result.isFinal {
+                        self.state.utteranceEnded()
+                        self.commands.utteranceEnded()
+                    }
                 }
-                if error != nil { self.state.utteranceEnded() }
+                if error != nil {
+                    self.state.utteranceEnded()
+                    self.commands.utteranceEnded()
+                }
             }
         }
         state.utteranceEnded()
+        commands.utteranceEnded()
     }
 
     private func notePhrase(_ kind: WakeTrace.Kind, detail: String) {

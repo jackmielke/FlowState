@@ -708,6 +708,25 @@ struct SettingsView: View {
                 }
             }
 
+            section("Recording commands") {
+                HStack {
+                    Text("Control recording by saying it")
+                        .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                    Spacer()
+                    NeatToggle(isOn: Binding(
+                        get: { state.settings.voiceCommands },
+                        set: { state.settings.voiceCommands = $0; state.applyWakeWord() }))
+                }
+                caption("\(VoiceCommand.allCases.map { "\"\($0.phrases[0])\"" }.joined(separator: ", ")) — heard by the same on-device recogniser as the wake phrase, and acted on without opening a session. Nothing runs unless the phrase is the whole point of the sentence: \"don't stop recording\" is not a stop, \"restart recording\" is not a start, and a command that was said thirty seconds ago has stopped counting as being said now.")
+                if !state.settings.wakeWord {
+                    // Said plainly rather than by disabling the switch. The setting is
+                    // real and it is on; what is missing is the ear, and the honest
+                    // version of that says which switch to look at.
+                    caption("⚠︎ The wake phrase is off, so nothing is listening. These work while it is on — or any time a session is open, where the assistant hears them itself.")
+                }
+                caption("A command is ignored, and says why, whenever it cannot be honoured: recording with the microphone denied, showing your face with the camera denied, stopping something that was never started. Everything either way is written to the log — \(kSystemAppName) records the command, where it came from and what it did, so a recording that stopped can be traced to the sentence that stopped it: `log stream --predicate 'category == \"voice-command\"'`.")
+            }
+
             section("When it is left alone") {
                 HStack {
                     Text("Show the time")
@@ -894,21 +913,38 @@ struct SettingsView: View {
 
             section("Recordings") {
                 HStack {
-                    Text(state.isRecording ? "Recording now" : "Not recording")
+                    Text(state.isRecording
+                         ? (state.isRecordingPaused ? "Paused" : "Recording now")
+                         : "Not recording")
                         .font(.system(size: 12.5)).foregroundStyle(Theme.text)
                     // Seconds actually in the buffer, not seconds since the
                     // button was pressed. The two are the same when it is
-                    // working and tell you a great deal when it is not.
+                    // working and tell you a great deal when it is not — and
+                    // while paused they are deliberately different, because a
+                    // pause takes nothing in and the clock says so by standing
+                    // still.
                     if state.isRecording {
                         Text(String(format: "%d:%02d",
                                     Int(state.recorder.duration) / 60,
                                     Int(state.recorder.duration) % 60))
                             .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(state.recorder.duration > 0 ? Theme.bad : Theme.textFaint)
+                            .foregroundStyle(state.isRecordingPaused ? Theme.accentInk
+                                             : state.recorder.duration > 0 ? Theme.bad : Theme.textFaint)
                     }
                     Spacer()
+                    if state.isRecording {
+                        Button(state.isRecordingPaused ? "Resume" : "Pause") {
+                            state.runVoiceCommand(state.isRecordingPaused ? .resumeRecording : .pauseRecording,
+                                                  from: .ui)
+                        }
+                        .buttonStyle(GhostButtonStyle(tint: Theme.accentInk))
+                        .help(state.isRecordingPaused
+                              ? "Carry on into the same file"
+                              : "Hold the recording — nothing is captured until it resumes, and the file continues where it left off")
+                    }
                     Button(state.isRecording ? "Stop" : "Record") {
-                        _ = state.isRecording ? state.stopRecording() : state.startRecording()
+                        state.runVoiceCommand(state.isRecording ? .stopRecording : .startRecording,
+                                              from: .ui)
                     }
                     .buttonStyle(GhostButtonStyle(tint: state.isRecording ? Theme.badInk : Theme.accentInk))
                     .disabled(!state.isRecording && !state.audio.running)
@@ -1037,6 +1073,8 @@ struct SettingsView: View {
                         .font(.system(size: 11)).foregroundStyle(Theme.textFaint)
                 }
 
+                retentionControls
+
                 if let problem = state.conversation.lastReadError {
                     caption("Last read back: " + problem)
                 }
@@ -1155,6 +1193,78 @@ struct SettingsView: View {
                 Text("Read at runtime. Never stored in the app, never sent anywhere but api.openai.com.")
                     .font(.system(size: 11)).foregroundStyle(Theme.textFaint)
             }
+    }
+
+    /// How much history survives, and the two buttons that override it by hand.
+    ///
+    /// It sits under the conversation switcher rather than in Memory & privacy because
+    /// it is not a privacy control — nothing here changes what is recorded, only how
+    /// many of the recordings are kept. The hours window, which IS a privacy control,
+    /// stays where it was.
+    @ViewBuilder
+    private var retentionControls: some View {
+        let pinnedCount = state.conversation.pinnedIDs.count
+
+        Divider().overlay(Theme.hairline).padding(.vertical, 2)
+
+        VStack(alignment: .leading, spacing: 8) {
+            Text("How many to keep")
+                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+
+            SegmentedPicker(options: TranscriptRetention.Mode.allCases.map {
+                                (value: $0, label: $0.label)
+                            },
+                            selection: Binding(
+                                get: { state.settings.retention.mode },
+                                set: {
+                                    state.settings.retention.mode = $0
+                                    state.applyPrivacySettings()
+                                }),
+                            accessibilityPrefix: "Keep",
+                            font: .system(size: 11.5))
+
+            if state.settings.retention.mode == .keepLast {
+                HStack(spacing: 10) {
+                    Text("Keep the newest")
+                        .font(.system(size: 11.5)).foregroundStyle(Theme.textDim)
+                    Stepper(value: Binding(
+                                get: { state.settings.retention.keepLast },
+                                set: {
+                                    state.settings.retention.keepLast = TranscriptRetention.clamp($0)
+                                    state.applyPrivacySettings()
+                                }),
+                            in: TranscriptRetention.limits) {
+                        Text("\(state.settings.retention.keepLast) conversation"
+                             + (state.settings.retention.keepLast == 1 ? "" : "s"))
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .foregroundStyle(Theme.text)
+                    }
+                    .accessibilityLabel("How many conversations to keep")
+                }
+                caption("The oldest are deleted as new ones arrive. The conversation you "
+                        + "are in and any pinned ones never count against the limit.")
+            }
+
+            caption(state.settings.retention.summaryLine)
+
+            HStack(spacing: 10) {
+                Button(state.transcriptIsPinned ? "Unpin this transcript" : "Pin this transcript") {
+                    state.toggleTranscriptPin()
+                }
+                .buttonStyle(GhostButtonStyle(tint: state.transcriptIsPinned
+                                              ? Theme.accentInk : Theme.voiceInk))
+                Button("Save transcript now") { _ = state.saveTranscriptNow() }
+                    .buttonStyle(GhostButtonStyle(tint: Theme.accentInk))
+                if pinnedCount > 0 {
+                    Text("\(pinnedCount) pinned")
+                        .font(.system(size: 11)).foregroundStyle(Theme.accentInk)
+                }
+            }
+            caption("A pinned conversation is kept whatever these settings say, is skipped "
+                    + "when old ones are trimmed, and is the one that opens on launch. "
+                    + "Deleting still deletes it, and switching \"Save to disk\" off "
+                    + "removes every transcript including pinned ones.")
+        }
     }
 
     private var savedConversationsLine: String {

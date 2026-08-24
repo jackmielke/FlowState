@@ -77,12 +77,34 @@ enum RecordingSmokeTest {
         say("start (\(mode.rawValue)): \(started)")
         guard state.isRecording else { say("FAILED — not recording"); exit(1) }
 
-        try? await Task.sleep(for: .seconds(seconds))
+        // FLOWSTATE_RECORD_TEST_PAUSE=<seconds> holds the take halfway through.
+        //
+        // The only way to check the video half of a pause. A unit test can prove the
+        // recorder drops what it is fed — `verify-recorder.sh` does — but not that
+        // `VideoTrackWriter` shifts its timestamps by the same span, because that needs a
+        // real ScreenCaptureKit stream and a real host clock. The number to look at is
+        // the last line: the file should be as long as the time spent RECORDING, not as
+        // long as the wall clock, and a movie whose length includes the pause is a movie
+        // whose pictures have drifted away from its audio.
+        let held = Double(ProcessInfo.processInfo.environment["FLOWSTATE_RECORD_TEST_PAUSE"] ?? "") ?? 0
+        if held > 0 {
+            try? await Task.sleep(for: .seconds(seconds / 2))
+            say("pause: \(state.runVoiceCommand(.pauseRecording, from: .ui))")
+            try? await Task.sleep(for: .seconds(min(held, 30)))
+            say("resume: \(state.runVoiceCommand(.resumeRecording, from: .ui))")
+            try? await Task.sleep(for: .seconds(seconds / 2))
+        } else {
+            try? await Task.sleep(for: .seconds(seconds))
+        }
 
         let stopped = state.finishRecording(reason: "smoke test")
         say("stop: \(stopped)")
         if let r = state.lastRecording {
             say("file: \(r.url.lastPathComponent) — \(r.bytes) bytes, \(String(format: "%.2f", r.seconds))s")
+            if held > 0 {
+                say(String(format: "paused %.0fs — the file should be ~%.0fs, not ~%.0fs",
+                           held, seconds, seconds + held))
+            }
         } else {
             say("FAILED — no file")
             exit(1)

@@ -79,19 +79,30 @@ enum NativeTools {
                        + "for how long. Use whenever the user asks what you're keeping, "
                        + "whether you're recording, or where the transcript goes."),
 
+        // Named for the TRANSCRIPT, not for "recording".
+        //
+        // These used to be `pause_recording` and `resume_recording`, which was the right
+        // name right up until the recorder itself became sayable — and then there were
+        // two things called pause_recording, one of which writes a file and one of which
+        // decides what is kept about somebody. A model choosing between them by name
+        // would get it wrong eventually, and the wrong way round is the bad way round:
+        // "don't write this down" silently stopping a screen recording instead, while the
+        // transcript kept going.
         ToolSpec(
-            name: "pause_recording",
-            summary: "Stop recording",
+            name: "stop_transcript",
+            summary: "Off the record",
             description: "Stop keeping any record of this conversation, immediately. Use "
-                       + "the moment the user says don't record this, stop recording, or "
-                       + "keep this off the record. Never ask them to confirm — do it, "
-                       + "then say it's done."),
+                       + "the moment the user says don't record this, don't write this "
+                       + "down, or keep this off the record. This is about the transcript, "
+                       + "not about a file being recorded — to stop a recording, call "
+                       + "stop_recording. Never ask them to confirm — do it, then say "
+                       + "it's done."),
 
         ToolSpec(
-            name: "resume_recording",
-            summary: "Start recording again",
+            name: "resume_transcript",
+            summary: "Back on the record",
             description: "Start keeping a record of the conversation again after it was "
-                       + "paused.",
+                       + "stopped.",
             // Starting to keep somebody's words again is not a thing to do on a
             // misheard sentence.
             effect: .writes(confirmation: "Want me to start keeping a record again?")),
@@ -104,6 +115,25 @@ enum NativeTools {
                        + "this, delete this, or wipe that.",
             effect: .writes(confirmation: "Delete everything from this conversation?")),
     ]
+
+    /// The recorder's transport and the camera bubble, sayable.
+    ///
+    /// Built from `VoiceCommand` rather than written out here, so the tool the model
+    /// calls and the phrase the on-device listener matches cannot describe two different
+    /// actions — one enum, one description, both routes. Answered by `AppState`, which
+    /// owns the recorder.
+    ///
+    /// All read-only in `ToolSpec`'s sense — no `.writes` confirmation — and that is not
+    /// an oversight. "Start recording" is not a request to be double-checked; it is a
+    /// request that is *already late* by the time it is confirmed, and every one of these
+    /// is trivially undoable by saying the opposite word. The protection against a
+    /// misheard sentence lives in `VoiceCommandGate`, where it can refuse without
+    /// spending a turn asking.
+    static let recordingSpecs: [ToolSpec] = VoiceCommand.allCases.map { command in
+        ToolSpec(name: command.toolName,
+                 summary: command.summary,
+                 description: command.modelDescription)
+    }
 
     static let specs: [ToolSpec] = [
         ToolSpec(

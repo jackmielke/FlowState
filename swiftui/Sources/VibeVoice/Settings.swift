@@ -178,6 +178,16 @@ struct AppSettings: Codable, Equatable {
     /// constantly, including as the name of another app.
     var wakePhrase: String = "heyFlow"
 
+    /// Answer the recording commands — "start recording", "pause recording", "show my
+    /// face" — without a session, whenever the wake listener is running.
+    ///
+    /// On by default, but it can only ever do anything while `wakeWord` is on: this rides
+    /// on that recogniser rather than opening a second one, so an app that is not
+    /// listening is not listening for these either. That is the honest arrangement — one
+    /// switch decides whether the microphone is open all day, and it is the one that
+    /// already says so.
+    var voiceCommands: Bool = true
+
     /// Two claps also wake it. Independent of the phrase, and more reliable across a
     /// room: a clap does not have to be understood, only heard.
     var clapToWake: Bool = true
@@ -294,15 +304,30 @@ struct AppSettings: Codable, Equatable {
 
     /// What to open on launch.
     ///
-    /// OFF — the default — means every launch starts a new conversation, and the last
-    /// one is one click away in the switcher with its history intact. That is the
-    /// honest default for a voice assistant: you sit down and start talking, and what
-    /// you say now is not silently appended to a conversation from Tuesday. Nothing is
-    /// lost either way; this only decides which conversation is in front of you.
+    /// ON — the default — reopens the conversation you were last in, with its history.
     ///
-    /// ON reopens the most recent non-empty conversation instead, for people who treat
-    /// it as one long running thread.
-    var resumeLastSession: Bool = false
+    /// It was OFF for a while, on the argument that what you say now should not be
+    /// silently appended to a conversation from Tuesday. The argument lost to what it
+    /// looked like: a transcript that is on screen one minute and gone after a relaunch
+    /// reads as a transcript that was thrown away, whatever the switcher says. Starting
+    /// fresh is still one click, and it is a click, which is the right way round.
+    ///
+    /// A pinned conversation is reopened whatever this says — see
+    /// `SessionCatalog.sessionToResume`.
+    var resumeLastSession: Bool = true
+
+    /// How many conversations are kept, and whether they are written without being
+    /// asked. See `TranscriptRetention`; the hours half is `privacy.retentionHours`.
+    var retention: TranscriptRetention = TranscriptRetention()
+
+    /// The transcript column is hidden.
+    ///
+    /// Hiding is not deleting and not pausing: every line is still in memory, still on
+    /// disk, still being recorded. This is for the moment somebody shares their screen,
+    /// and the way back is the same button. Persisted, because a screen share outlives a
+    /// relaunch — and because a hidden transcript that quietly came back would be worse
+    /// than one that stayed hidden.
+    var transcriptHidden: Bool = false
 
     enum CodingKeys: String, CodingKey {
         case voice, model, systemPrompt, speed, continuousScreen, screenInterval
@@ -312,11 +337,12 @@ struct AppSettings: Codable, Equatable {
         case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
         case photoRotateSeconds, menuBarEnabled, summonHotkey, devNudgeDismissed
         case connectHotkey, recordHotkey, hushHotkey, hushSeconds, proactive, wakeWord, wakePhrase, clapToWake, clapSensitivity
+        case voiceCommands
         case earcons, captions, ambientClock
         case motionStyle, motionIntensity, motionAssets
         case devAutoCommit, devAutoPush, hudEnabled, hudStyle, cameraBubble
         case cameraSize, cameraCorner, cameraShape, cameraControls, cameraMirrored
-        case privacy, summaries, resumeLastSession
+        case privacy, summaries, resumeLastSession, retention, transcriptHidden
         case captureMode, capturePerformance, cameraDeviceID
     }
 }
@@ -377,6 +403,7 @@ extension AppSettings {
         wakeWord          = v(.wakeWord, d.wakeWord)
         wakePhrase        = v(.wakePhrase, d.wakePhrase)
         clapToWake        = v(.clapToWake, d.clapToWake)
+        voiceCommands     = v(.voiceCommands, d.voiceCommands)
         clapSensitivity   = v(.clapSensitivity, d.clapSensitivity)
         earcons           = v(.earcons, d.earcons)
         captions          = v(.captions, d.captions)
@@ -396,6 +423,8 @@ extension AppSettings {
         privacy           = v(.privacy, d.privacy)
         summaries         = v(.summaries, d.summaries)
         resumeLastSession = v(.resumeLastSession, d.resumeLastSession)
+        retention         = v(.retention, d.retention)
+        transcriptHidden  = v(.transcriptHidden, d.transcriptHidden)
         captureMode       = v(.captureMode, d.captureMode)
         capturePerformance = v(.capturePerformance, d.capturePerformance)
         cameraDeviceID    = v(.cameraDeviceID, d.cameraDeviceID)

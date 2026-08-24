@@ -108,7 +108,16 @@ check(size > 10_000, "the file has real content in it", RecordingFile.size(size)
 
 let asset = AVURLAsset(url: target)
 let duration = try await asset.load(.duration)
-check(abs(CMTimeGetSeconds(duration) - 2.0) < 0.35, "two seconds long",
+// At LEAST two seconds, not exactly two.
+//
+// The frames above are stamped from a clock read after `begin` returned, while the
+// writer's session started inside it — so the movie also contains however long `begin`
+// took, which is a few milliseconds normally and over a second whenever ScreenCaptureKit
+// takes its time being refused by TCC. That gap is a property of this harness, not of the
+// writer, and asserting on it made this check fail about a third of the time for a reason
+// nobody could act on. The mixdown's own length — the two seconds this file exists to
+// carry — is checked exactly, on the audio track, below.
+check(CMTimeGetSeconds(duration) >= 1.95, "at least two seconds long",
       String(format: "%.2fs", CMTimeGetSeconds(duration)))
 
 let video = try await asset.loadTracks(withMediaType: .video)
@@ -198,5 +207,6 @@ swiftc -swift-version 5 -O -I "$WORK" -L "$WORK" -lVibeVoiceCore \
   Sources/VibeVoice/SessionRecorder.swift \
   Sources/VibeVoice/CameraCapture.swift \
   Sources/VibeVoice/VideoCapture.swift \
+  Sources/VibeVoice/SystemAudioTap.swift \
   "$DRIVER" -o "$OUT"
 "$OUT"

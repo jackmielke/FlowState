@@ -84,6 +84,13 @@ final class VideoTrackWriter: NSObject, RecordingVideoTrack, @unchecked Sendable
     private var destination: URL?
     private var sessionStart = CMTime.zero
     private var lastFrameTime: CMTime?
+    /// When the current pause began, on the host clock, or nil while running.
+    private var pausedSince: CMTime?
+    /// How much host-clock time this recording has spent paused, all pauses added up.
+    /// Subtracted from every timestamp after it, which is what makes a pause a splice
+    /// rather than a frozen frame — see `SessionRecorder.setPaused`, which drops the
+    /// audio for the same span so the two tracks stay the same length.
+    private var pausedTotal = CMTime.zero
     private var framesWritten = 0
     private var framesDropped = 0
     private var failed: String?
@@ -141,6 +148,8 @@ final class VideoTrackWriter: NSObject, RecordingVideoTrack, @unchecked Sendable
         failed = nil
         lastFrameTime = nil
         latestCamera = nil
+        pausedSince = nil
+        pausedTotal = .zero
         lock.unlock()
 
         // A leftover file at the same path makes AVAssetWriter refuse to start, and the
@@ -214,6 +223,27 @@ final class VideoTrackWriter: NSObject, RecordingVideoTrack, @unchecked Sendable
             begin \(target.lastPathComponent, privacy: .public) — \
             \(wanted.summary, privacy: .public) @ \(wanted.videoBitRate / 1000, privacy: .public) kbps
             """)
+    }
+
+    /// Stops writing frames, and starts the clock that later timestamps are shifted by.
+    ///
+    /// Nothing is torn down: the capture stream and the camera keep running, their frames
+    /// are dropped in `append`, and the camera light stays on — which is correct, because
+    /// a paused recording is one word away from being a running one, and restarting
+    /// ScreenCaptureKit takes a third of a second the user would spend talking into a
+    /// recording that had not started yet.
+    func setPaused(_ paused: Bool) {
+        let now = CMClockGetTime(CMClockGetHostTimeClock())
+        lock.lock()
+        defer { lock.unlock() }
+        if paused {
+            guard pausedSince == nil else { return }
+            pausedSince = now
+        } else {
+            guard let since = pausedSince else { return }
+            pausedSince = nil
+            pausedTotal = CMTimeAdd(pausedTotal, CMTimeSubtract(now, since))
+        }
     }
 
     func finish(samples: [Int16], sampleRate: Int) throws {
@@ -483,11 +513,20 @@ final class VideoTrackWriter: NSObject, RecordingVideoTrack, @unchecked Sendable
         let start = sessionStart
         let interval = plan.frameRate > 0 ? 1.0 / Double(plan.frameRate) : 0
         let last = lastFrameTime
+        let paused = pausedSince != nil
+        let shift = pausedTotal
         lock.unlock()
+
+        // Paused: the stream is still running and still delivering, and none of it is
+        // going in the file.
+        guard !paused else { return }
 
         // Never before the session started — a buffer captured microseconds before
         // `startSession` would be rejected outright and take the whole track with it.
-        let pts = CMTimeCompare(time, start) < 0 ? start : time
+        // Then shifted back by everything spent paused, so the pictures stay level with
+        // a mixdown that skipped the same span.
+        let shifted = CMTimeSubtract(time, shift)
+        let pts = CMTimeCompare(shifted, start) < 0 ? start : shifted
 
         // The camera can free-run faster than the plan asks for. Ten percent of slack, so
         // ordinary jitter does not throw away every other frame.
@@ -816,9 +855,20 @@ extension VideoTrackWriter: SCStreamOutput, SCStreamDelegate {
             // however long the capture stream took to come up, which is a fifth to a
             // third of a second, every time, for the whole recording.
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            lock.lock(); let origin = sessionStart; lock.unlock()
+            lock.lock()
+            let origin = sessionStart
+            let paused = pausedSince != nil
+            let shift = pausedTotal
+            lock.unlock()
+            // Same shift the pictures get, for the same reason: the recorder drops what
+            // arrives while paused, so an offset measured from the unpaused clock would
+            // land every speaker sample after the first pause too late by the length of
+            // it. The recorder ignores these while paused anyway; not decoding them is
+            // simply cheaper.
+            guard !paused else { return }
             guard origin != .zero, let samples = SystemAudioTap.decode(sampleBuffer) else { return }
-            onSystemAudio?(samples, max(0, CMTimeGetSeconds(CMTimeSubtract(pts, origin))))
+            let offset = CMTimeSubtract(CMTimeSubtract(pts, origin), shift)
+            onSystemAudio?(samples, max(0, CMTimeGetSeconds(offset)))
             return
         }
 

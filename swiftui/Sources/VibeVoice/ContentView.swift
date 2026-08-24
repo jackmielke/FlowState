@@ -37,7 +37,11 @@ struct ContentView: View {
     }
 
     private var recordHelp: String {
-        if state.isRecording { return "Stop recording and save it" }
+        if state.isRecording {
+            return state.isRecordingPaused
+                ? "Stop the paused recording and save what was captured"
+                : "Stop recording and save it"
+        }
         if let problem = state.recordingError { return problem }
         let mode = state.settings.captureMode
         let size = CaptureStorage.rateLabel(for: state.capturePlan(for: mode))
@@ -283,15 +287,43 @@ struct ContentView: View {
                       + " (⌘⇧M)")
                 .accessibilityLabel(MicMute.label(muted: state.isMicMuted))
 
+                // Pause, only while there is something to pause. Left of stop, because
+                // the destructive-ish one should not be where the harmless one was a
+                // moment ago — the row must not shuffle under a pointer already moving
+                // towards it. Sayable too: "pause recording". See `VoiceCommand`.
+                if state.isRecording {
+                    Button {
+                        state.runVoiceCommand(state.isRecordingPaused ? .resumeRecording : .pauseRecording,
+                                              from: .ui)
+                    } label: {
+                        Image(systemName: state.isRecordingPaused ? "play.circle.fill" : "pause.circle")
+                            .foregroundStyle(state.isRecordingPaused ? Theme.accentInk : Theme.textDim)
+                    }
+                    .buttonStyle(IconButtonStyle())
+                    .help(state.isRecordingPaused
+                          ? "Carry on — the file continues where it left off"
+                          : "Pause without ending it. Nothing is captured until you resume.")
+                    .accessibilityLabel(state.isRecordingPaused ? "Resume recording" : "Pause recording")
+                }
+
                 Button {
-                    state.isRecording ? { _ = state.stopRecording() }() : { _ = state.startRecording() }()
+                    // Through the same door as the spoken command and the shortcut, so
+                    // the button is logged like everything else and cannot drift from
+                    // the rules the other two obey.
+                    state.runVoiceCommand(state.isRecording ? .stopRecording : .startRecording,
+                                          from: .ui)
                 } label: {
                     // The glyph names what would be captured, so the mode is visible
                     // without opening the menu next to it — the difference between an
                     // audio note and a screen recording is not something to discover
                     // afterwards, from the file size.
                     Image(systemName: state.isRecording ? "stop.circle.fill" : recordSymbol)
-                        .foregroundStyle(state.isRecording ? Theme.bad : Theme.textDim)
+                        // Dimmer red while paused. Still red — there IS a recording, and
+                        // it still has to be stopped — but not the full-brightness red
+                        // that means pixels are being written this second.
+                        .foregroundStyle(state.isRecording
+                                         ? (state.isRecordingPaused ? Theme.badInk : Theme.bad)
+                                         : Theme.textDim)
                 }
                 .buttonStyle(IconButtonStyle())
                 // Always live. Recording opens the microphone itself when no session
@@ -299,7 +331,9 @@ struct ContentView: View {
                 // has the product the wrong way round.
                 .help(recordHelp)
                 .accessibilityLabel(state.isRecording ? "Stop recording" : "Record")
-                .accessibilityValue(state.settings.captureMode.menuLabel)
+                .accessibilityValue(state.isRecording && state.isRecordingPaused
+                                    ? state.settings.captureMode.menuLabel + ", paused"
+                                    : state.settings.captureMode.menuLabel)
 
                 // What to capture. A menu rather than four buttons: this is one choice
                 // out of four, made rarely, and the header has no room for a segmented
@@ -309,12 +343,21 @@ struct ContentView: View {
                 if state.isRecording {
                     Text(recordingClock)
                         .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                        // Amber while the clock has not moved: red-and-0:00 is the exact
-                        // pair that used to mean "this is silently capturing nothing".
-                        .foregroundStyle(state.recorder.duration > 0 ? Theme.bad : Theme.accentInk)
-                        .help(state.recorder.duration > 0
-                              ? "Seconds captured so far"
-                              : "No audio has reached the recorder yet")
+                        // Amber whenever the clock is not moving — on purpose while
+                        // paused, and by accident when red-and-0:00 means "this is
+                        // silently capturing nothing". Same colour, because both mean
+                        // "nothing is going in"; the tooltip and the accessibility label
+                        // say which, because they are opposite situations to be in.
+                        .foregroundStyle(state.isRecordingPaused ? Theme.accentInk
+                                         : state.recorder.duration > 0 ? Theme.bad : Theme.accentInk)
+                        .help(state.isRecordingPaused
+                              ? "Paused — nothing is being captured. Say resume recording, or press play."
+                              : state.recorder.duration > 0
+                                ? "Seconds captured so far"
+                                : "No audio has reached the recorder yet")
+                        .accessibilityLabel(state.isRecordingPaused
+                                            ? "Paused at \(recordingClock)"
+                                            : "Recorded \(recordingClock)")
 
                     // How big it has got. Only while a video recording is running: a WAV
                     // is 48 kB a second and nobody has ever needed to watch one.
@@ -864,8 +907,15 @@ struct ContentView: View {
             Divider().overlay(Theme.hairline)
 
             ZStack {
-                TranscriptView(items: state.transcript)
-                if state.transcript.count <= 1 {
+                if state.settings.transcriptHidden {
+                    hiddenTranscriptPlaceholder
+                } else {
+                    TranscriptView(items: state.transcript,
+                                   pinned: state.transcriptIsPinned,
+                                   onEdit: { id, text in state.editTranscriptLine(id, to: text) },
+                                   onDelete: { id in state.deleteTranscriptLine(id) })
+                }
+                if state.transcript.count <= 1 && !state.settings.transcriptHidden {
                     VStack(spacing: 7) {
                         Image(systemName: "waveform")
                             .font(.system(size: 19, weight: .light))
@@ -885,6 +935,36 @@ struct ContentView: View {
         }
         .frame(width: 372)
         .background(Theme.sidebar)
+    }
+
+    /// What "hide" leaves behind.
+    ///
+    /// A blank column would be indistinguishable from a transcript that had been wiped,
+    /// which is exactly the fear this feature exists to avoid — so the placeholder says
+    /// how many lines are still there, that recording carried on, and where the way back
+    /// is. Hiding is for screen shares; it is not a privacy control and does not pretend
+    /// to be one.
+    private var hiddenTranscriptPlaceholder: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "eye.slash")
+                .font(.system(size: 19, weight: .light))
+                .foregroundStyle(Theme.textFaint.opacity(0.55))
+            Text("Transcript hidden")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Theme.textFaint)
+            Text("\(state.transcript.count) line\(state.transcript.count == 1 ? "" : "s") are still here"
+                 + (state.settings.privacy.persistToDisk ? " and still being saved." : ".")
+                 + "\nNothing was deleted.")
+                .font(.system(size: 11))
+                .multilineTextAlignment(.center)
+                .foregroundStyle(Theme.textFaint.opacity(0.75))
+            Button("Show transcript") { state.toggleTranscriptHidden() }
+                .buttonStyle(GhostButtonStyle(tint: Theme.accentInk))
+                .padding(.top, 2)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.bottom, 30)
+        .accessibilityElement(children: .contain)
     }
 }
 

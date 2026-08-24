@@ -115,6 +115,37 @@ public struct ConversationEntry: Codable, Equatable, Identifiable, Sendable {
     public var isConversational: Bool { speaker == .user || speaker == .assistant }
 }
 
+/// A correction to a line that is already on disk.
+///
+/// Transcripts are append-only — that is what makes writing one safe while the app is
+/// mid-sentence, and what makes a truncated last line cost one sentence instead of a
+/// conversation. So an edit is not a rewrite of the file: it is another record, appended
+/// after the line it corrects, and applied over the top when the file is read back.
+/// `text == nil` is a deletion, which is the same mechanism saying "and this line is
+/// gone" rather than a second, subtly different one.
+///
+/// The original text is not kept anywhere. An edit is the user changing what the record
+/// says about them, and a "history" of that would defeat the point of offering it.
+public struct TranscriptEdit: Codable, Equatable, Sendable {
+    public var sessionID: String
+    /// The `ConversationEntry.id` being corrected.
+    public var entryID: UUID
+    /// The new text, or nil to delete the line outright.
+    public var text: String?
+    /// When the correction was made — never the timestamp of the line itself, which must
+    /// keep its place in the conversation.
+    public var at: Date
+
+    public init(sessionID: String, entryID: UUID, text: String?, at: Date = Date()) {
+        self.sessionID = sessionID
+        self.entryID = entryID
+        self.text = text
+        self.at = at
+    }
+
+    public var isDeletion: Bool { text == nil }
+}
+
 /// The in-memory record of a conversation, with the privacy policy applied at the door.
 ///
 /// Deliberately a plain class with no actor, no I/O and no clock of its own: every rule
@@ -131,6 +162,10 @@ public final class ConversationLog {
     public let maxEntries: Int
 
     public var privacy: TranscriptPrivacy
+
+    /// Conversations the user has pinned. Retention steps around them — see
+    /// `purgeExpired`, which is the one place a line disappears without being asked to.
+    public var pinnedSessions: Set<String> = []
 
     public init(privacy: TranscriptPrivacy = TranscriptPrivacy(), maxEntries: Int = 500) {
         self.privacy = privacy
@@ -175,6 +210,31 @@ public final class ConversationLog {
         return entry
     }
 
+    /// Rewrites one line's text, in memory.
+    ///
+    /// Redaction runs again — the user may have typed the key back in — but the privacy
+    /// gate does not: refusing an edit because recording is paused would leave the line
+    /// on screen saying something the user has just corrected.
+    ///
+    /// - Returns: the entry as it now stands, or nil when there is no such line.
+    @discardableResult
+    public func edit(entryID: UUID, to text: String) -> ConversationEntry? {
+        guard let i = entries.firstIndex(where: { $0.id == entryID }) else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let (clean, didRedact) = privacy.redact(trimmed)
+        entries[i].text = clean
+        entries[i].redacted = entries[i].redacted || didRedact
+        return entries[i]
+    }
+
+    /// Drops one line. The conversation around it is untouched.
+    @discardableResult
+    public func remove(entryID: UUID) -> ConversationEntry? {
+        guard let i = entries.firstIndex(where: { $0.id == entryID }) else { return nil }
+        return entries.remove(at: i)
+    }
+
     public func append(summary: ConversationSummary) {
         summaries.append(summary)
         if summaries.count > 50 { summaries.removeFirst(summaries.count - 50) }
@@ -200,7 +260,8 @@ public final class ConversationLog {
                         now: Date = Date()) -> Int {
         let known = Set(entries.map(\.id))
         let fresh = incoming.filter {
-            !known.contains($0.id) && !privacy.hasExpired($0.at, now: now)
+            !known.contains($0.id)
+                && (pinnedSessions.contains($0.sessionID) || !privacy.hasExpired($0.at, now: now))
         }
         if !fresh.isEmpty {
             entries.append(contentsOf: fresh)
@@ -212,7 +273,9 @@ public final class ConversationLog {
 
         let knownSummaries = Set(summaries.map(\.id))
         let freshSummaries = incomingSummaries.filter {
-            !knownSummaries.contains($0.id) && !privacy.hasExpired($0.createdAt, now: now)
+            !knownSummaries.contains($0.id)
+                && (pinnedSessions.contains($0.sessionID)
+                    || !privacy.hasExpired($0.createdAt, now: now))
         }
         if !freshSummaries.isEmpty {
             summaries.append(contentsOf: freshSummaries)
@@ -252,12 +315,20 @@ public final class ConversationLog {
     /// Retention is enforced here rather than only at write time so that turning the
     /// window down actually deletes what is already held, instead of merely changing
     /// what happens next.
+    ///
+    /// Pinned conversations are exempt. That is not a hole in the privacy story — it is
+    /// the user having said, per conversation, "keep this one", which is a preference
+    /// like any other and is undone by unpinning or by Delete.
     @discardableResult
     public func purgeExpired(now: Date = Date()) -> Int {
         guard privacy.retentionHours > 0 else { return 0 }
         let before = entries.count
-        entries.removeAll { privacy.hasExpired($0.at, now: now) }
-        summaries.removeAll { privacy.hasExpired($0.createdAt, now: now) }
+        entries.removeAll {
+            !pinnedSessions.contains($0.sessionID) && privacy.hasExpired($0.at, now: now)
+        }
+        summaries.removeAll {
+            !pinnedSessions.contains($0.sessionID) && privacy.hasExpired($0.createdAt, now: now)
+        }
         return before - entries.count
     }
 

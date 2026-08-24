@@ -37,6 +37,18 @@ import VibeVoiceCore
 /// times a second from a real-time thread, or (as it did) never feeding it the mic at all.
 final class SessionRecorder: ObservableObject, @unchecked Sendable {
 
+    /// What a pause or a resume actually did. Same reasoning as `StopOutcome`: a caller
+    /// about to say a sentence out loud needs to know which of these happened, and "it
+    /// returned false" collapses three of them into one.
+    enum PauseOutcome: Equatable {
+        case paused(at: TimeInterval)
+        case resumed(at: TimeInterval)
+        /// Nothing is being recorded, so there is nothing to pause or continue.
+        case notRecording
+        /// Already in that state. Not a failure — somebody said it twice.
+        case unchanged(paused: Bool)
+    }
+
     /// Everything a caller needs to say what happened, instead of guessing from a nil.
     enum StopOutcome: Equatable {
         case saved(url: URL, seconds: TimeInterval)
@@ -49,6 +61,8 @@ final class SessionRecorder: ObservableObject, @unchecked Sendable {
     }
 
     @Published private(set) var isRecording = false
+    /// Recording, but taking nothing in. See `setPaused`.
+    @Published private(set) var isPaused = false
     @Published private(set) var startedAt: Date?
     /// Seconds captured so far, derived from samples rather than the wall clock, so it
     /// reports what is actually in the file.
@@ -161,12 +175,65 @@ final class SessionRecorder: ObservableObject, @unchecked Sendable {
         videoTrack = plan.mode.isVideo ? video : nil
         capturePlan = plan
         isRecordingLocked = true
+        isPausedLocked = false
         lock.unlock()
 
         Self.log.notice("start → \(target.lastPathComponent, privacy: .public) [\(plan.mode.rawValue, privacy: .public)]")
         publish(isRecording: true, startedAt: Date(), duration: 0, error: nil)
         startClock()
         return target
+    }
+
+    /// Stops taking anything in, without ending the take.
+    ///
+    /// A pause is a SPLICE, not a gap. Everything fed while paused is dropped on the
+    /// floor — mic, model, speakers, frames — so what resumes lands immediately after
+    /// what came before it, and a recording paused for ten minutes is ten minutes
+    /// shorter rather than ten minutes of silence in the middle. That is what somebody
+    /// who says "pause recording" means, and it is also the only version that keeps the
+    /// two halves of the file aligned: the mixdown's clock is the mic, so time the mic
+    /// does not contribute is time the video must not contribute either. The video
+    /// writer is told, and shifts its own timestamps by the same amount — see
+    /// `VideoTrackWriter.setPaused`.
+    ///
+    /// Deliberately not implemented as stop-and-start-a-second-file. One recording is one
+    /// file; "pause" that quietly produced three files in the Recordings folder would be
+    /// a worse answer than refusing to pause at all.
+    @discardableResult
+    func setPaused(_ paused: Bool) -> PauseOutcome {
+        lock.lock()
+        guard isRecordingLocked else {
+            lock.unlock()
+            Self.log.notice("\(paused ? "pause" : "resume", privacy: .public) ignored — not recording")
+            return .notRecording
+        }
+        guard paused != isPausedLocked else {
+            lock.unlock()
+            return .unchanged(paused: paused)
+        }
+        isPausedLocked = paused
+        let seconds = Double(samples.count) / Double(Self.sampleRate)
+        let video = videoTrack
+        lock.unlock()
+
+        // Outside the lock: this reaches into ScreenCaptureKit's clock, and the audio
+        // thread must never wait on that.
+        video?.setPaused(paused)
+
+        Self.log.notice("""
+            \(paused ? "paused" : "resumed", privacy: .public) at \
+            \(seconds, format: .fixed(precision: 2))s
+            """)
+        FileHandle.standardError.write(Data(
+            "[recorder] \(paused ? "paused" : "resumed") at \(String(format: "%.2f", seconds))s\n".utf8))
+
+        let apply = { [weak self] in
+            guard let self else { return }
+            self.isPaused = paused
+        }
+        if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
+
+        return paused ? .paused(at: seconds) : .resumed(at: seconds)
     }
 
     /// Finishes and writes the file.
@@ -184,6 +251,7 @@ final class SessionRecorder: ObservableObject, @unchecked Sendable {
             return .notRecording
         }
         isRecordingLocked = false
+        isPausedLocked = false
         let captured = samples
         let target = url
         let mic = micChunks
@@ -283,7 +351,7 @@ final class SessionRecorder: ObservableObject, @unchecked Sendable {
         guard !incoming.isEmpty else { return }
         lock.lock()
         defer { lock.unlock() }
-        guard isRecordingLocked else { return }
+        guard isRecordingLocked, !isPausedLocked else { return }
         write(incoming, at: cursor)
         cursor += incoming.count
         micChunks += 1
@@ -305,7 +373,7 @@ final class SessionRecorder: ObservableObject, @unchecked Sendable {
         guard !samples.isEmpty else { return }
         lock.lock()
         defer { lock.unlock() }
-        guard isRecordingLocked else { return }
+        guard isRecordingLocked, !isPausedLocked else { return }
         if !hasSystemAudio {
             hasSystemAudio = true
             Self.log.notice("speakers joined \(seconds, format: .fixed(precision: 3))s into the recording")
@@ -332,7 +400,7 @@ final class SessionRecorder: ObservableObject, @unchecked Sendable {
         guard !incoming.isEmpty else { return }
         lock.lock()
         defer { lock.unlock() }
-        guard isRecordingLocked else { return }
+        guard isRecordingLocked, !isPausedLocked else { return }
         // The speakers are already being recorded; this stream would be a second, longer
         // copy of the same voice.
         guard !hasSystemAudio else { return }
@@ -360,6 +428,9 @@ final class SessionRecorder: ObservableObject, @unchecked Sendable {
     /// The authoritative flag, read and written under the lock. `isRecording` is its
     /// main-thread mirror and is what the views bind to.
     private var isRecordingLocked = false
+    /// The pause flag, on the same side of the lock as `isRecordingLocked` and for the
+    /// same reason: it is read from the audio thread on every buffer.
+    private var isPausedLocked = false
 
     private func startClock() {
         stopClock()
@@ -385,6 +456,10 @@ final class SessionRecorder: ObservableObject, @unchecked Sendable {
         let apply = { [weak self] in
             guard let self else { return }
             self.isRecording = isRecording
+            // Nothing is ever published as paused: a pause is announced by `setPaused`,
+            // and every other transition — start, stop, failure — ends with the take
+            // running or gone.
+            self.isPaused = false
             self.startedAt = startedAt
             self.duration = duration
             self.lastError = error
@@ -528,6 +603,16 @@ protocol RecordingVideoTrack: AnyObject {
     /// until the recording stops. Streaming it would put the earlier, unmixed version in
     /// the file.
     func finish(samples: [Int16], sampleRate: Int) throws
+
+    /// Stop and restart the pictures without ending the file.
+    ///
+    /// Required rather than optional, and deliberately so. `SessionRecorder` drops every
+    /// sample fed to it while paused, which shortens the mixdown by exactly the length of
+    /// the pause — so a writer that quietly ignored this would keep stamping frames
+    /// against a clock the audio no longer shares, and the file would drift further out
+    /// of sync with every pause. A no-op default would make that the failure mode of any
+    /// writer somebody forgets to update.
+    func setPaused(_ paused: Bool)
 
     /// Tear down without producing a file. Must be safe to call after a failed `begin`,
     /// and must leave no capture running — a camera light that stays on after stop is the

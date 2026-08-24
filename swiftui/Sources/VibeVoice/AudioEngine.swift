@@ -81,6 +81,20 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
 
     // MARK: - Permissions
 
+    /// Whether this Mac will let the app record at all, asked without prompting.
+    ///
+    /// `requestMicAccess` cannot answer this question: it shows a dialog the first time,
+    /// and a voice command must never make a permission sheet appear out of nowhere for
+    /// something the user said to somebody else in the room.
+    static var micPermitted: Bool {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .denied, .restricted: return false
+        // `.notDetermined` counts as permitted: the ask happens when the engine starts,
+        // which is a moment the user has just asked for.
+        default: return true
+        }
+    }
+
     static func requestMicAccess() async -> Bool {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized: return true

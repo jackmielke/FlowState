@@ -15,6 +15,8 @@ struct SessionBar: View {
 
     private var titles: [String: String] { state.sessionTitles }
 
+    private var pinned: Bool { state.transcriptIsPinned }
+
     private var groups: [(title: String, sessions: [SessionMeta])] {
         SessionCatalog.groupedByAge(state.sessions)
     }
@@ -71,6 +73,38 @@ struct SessionBar: View {
                 .foregroundStyle(Theme.textFaint.opacity(0.7))
                 .help("Lines on screen in this conversation")
 
+            // The lock, and the only thing on this bar whose appearance changes with
+            // state: filled and tinted when pinned, outlined and quiet when not. A pin
+            // that looked the same either way would be a control you have to click to
+            // find out what it did.
+            Button { state.toggleTranscriptPin() } label: {
+                Image(systemName: pinned ? "pin.fill" : "pin")
+                    .font(.system(size: 11))
+                    .rotationEffect(.degrees(45))
+                    .foregroundStyle(pinned ? Theme.accentInk : Theme.textDim)
+            }
+            .buttonStyle(IconButtonStyle())
+            .help(pinned
+                  ? "Pinned — this transcript is kept whatever the retention settings say, "
+                    + "and it is what opens next launch. Click to unpin."
+                  : "Pin this transcript: keep it visible, keep it saved, and skip it when "
+                    + "old conversations are trimmed.")
+            .accessibilityLabel(pinned ? "Unpin transcript" : "Pin transcript")
+            .accessibilityValue(pinned ? "Pinned" : "Not pinned")
+
+            // Hiding is a screen-sharing control, not a privacy one — nothing stops
+            // being recorded — so it says so on hover rather than implying a mute.
+            Button { state.toggleTranscriptHidden() } label: {
+                Image(systemName: state.settings.transcriptHidden ? "eye.slash" : "eye")
+                    .font(.system(size: 11))
+                    .foregroundStyle(state.settings.transcriptHidden ? Theme.accentInk : Theme.textDim)
+            }
+            .buttonStyle(IconButtonStyle())
+            .help(state.settings.transcriptHidden
+                  ? "Show the transcript again. Nothing was deleted while it was hidden."
+                  : "Hide the transcript from view. It keeps recording and nothing is deleted.")
+            .accessibilityLabel(state.settings.transcriptHidden ? "Show transcript" : "Hide transcript")
+
             Button { state.newConversation() } label: {
                 Image(systemName: "square.and.pencil").font(.system(size: 11))
             }
@@ -109,6 +143,21 @@ struct SessionBar: View {
         Button("Reload from disk") { state.refreshTranscript() }
             .keyboardShortcut("r", modifiers: .command)
 
+        Button(pinned ? "Unpin transcript" : "Pin transcript") { state.toggleTranscriptPin() }
+            .keyboardShortcut("p", modifiers: [.command, .shift])
+
+        Button(state.settings.transcriptHidden ? "Show transcript" : "Hide transcript") {
+            state.toggleTranscriptHidden()
+        }
+        .keyboardShortcut("h", modifiers: [.command, .shift])
+
+        // The button behind "Only what I save", and the way to force a write when one
+        // failed. Harmless in every other mode: it merges rather than duplicating.
+        Button("Save transcript now") { _ = state.saveTranscriptNow() }
+            .keyboardShortcut("s", modifiers: .command)
+
+        Divider()
+
         Button("Rename…") {
             draftTitle = state.conversation.currentMeta?.titleIsCustom == true
                 ? state.currentSessionTitle : ""
@@ -143,6 +192,7 @@ struct SessionBar: View {
         // is the only way back to the whole of it.
         var help = state.currentSessionTitle + " — everything said in this conversation "
                  + "is saved under this name and comes back after a restart."
+        if pinned { help += " Pinned, so nothing automatic will remove it." }
         if saved > 1 { help += " \(saved) conversations saved." }
         return help
     }

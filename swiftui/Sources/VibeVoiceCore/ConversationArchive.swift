@@ -26,13 +26,18 @@ public enum ConversationArchive {
         /// that has genuinely broken is visible in Settings instead of silently halving
         /// everybody's history.
         public var skippedLines: Int
+        /// How many corrections were folded in on the way. Reported so "the file has 40
+        /// lines and the screen shows 38" has an answer that is not "a bug".
+        public var editCount: Int
 
         public init(entries: [ConversationEntry] = [],
                     summaries: [ConversationSummary] = [],
-                    skippedLines: Int = 0) {
+                    skippedLines: Int = 0,
+                    editCount: Int = 0) {
             self.entries = entries
             self.summaries = summaries
             self.skippedLines = skippedLines
+            self.editCount = editCount
         }
 
         public var isEmpty: Bool { entries.isEmpty && summaries.isEmpty }
@@ -64,6 +69,12 @@ public enum ConversationArchive {
         line(tag: "summary", encoding: summary)
     }
 
+    /// A correction, appended after the line it corrects. Deletions get their own tag so
+    /// a file can be read by eye and the two cannot be confused.
+    public static func line(for edit: TranscriptEdit) -> Data? {
+        line(tag: edit.isDeletion ? "delete" : "edit", encoding: edit)
+    }
+
     /// Encodes one record with its `kind` alongside the fields themselves, rather than
     /// nested under a wrapper.
     ///
@@ -87,6 +98,7 @@ public enum ConversationArchive {
     /// forgiveness.
     public static func parse(_ data: Data) -> Archive {
         var out = Archive()
+        var edits: [TranscriptEdit] = []
         let dec = decoder()
 
         for raw in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
@@ -111,15 +123,51 @@ public enum ConversationArchive {
                 } else {
                     out.skippedLines += 1
                 }
+            case "edit", "delete":
+                if let e = try? dec.decode(TranscriptEdit.self, from: line) {
+                    edits.append(e)
+                } else {
+                    out.skippedLines += 1
+                }
             default:
                 // A record kind a later version writes. Not damage — just not ours.
                 out.skippedLines += 1
             }
         }
 
+        out.entries = apply(edits, to: out.entries)
+        out.editCount = edits.count
         out.entries.sort { $0.at < $1.at }
         out.summaries.sort { $0.createdAt < $1.createdAt }
         return out
+    }
+
+    /// Folds corrections over the lines they correct.
+    ///
+    /// In file order, so a line edited twice ends up saying what it was last edited to,
+    /// and an edit to a line that was later deleted loses to the deletion. An edit
+    /// naming a line that is not in this file is dropped rather than resurrecting an
+    /// entry from nothing — it means the transcript was trimmed underneath it.
+    static func apply(_ edits: [TranscriptEdit], to entries: [ConversationEntry]) -> [ConversationEntry] {
+        guard !edits.isEmpty else { return entries }
+        var text: [UUID: String] = [:]
+        var deleted = Set<UUID>()
+        for edit in edits {
+            if let t = edit.text {
+                text[edit.entryID] = t
+                deleted.remove(edit.entryID)
+            } else {
+                deleted.insert(edit.entryID)
+                text[edit.entryID] = nil
+            }
+        }
+        return entries.compactMap { entry in
+            guard !deleted.contains(entry.id) else { return nil }
+            guard let replacement = text[entry.id] else { return entry }
+            var edited = entry
+            edited.text = replacement
+            return edited
+        }
     }
 
     // MARK: - Rebuilding the index

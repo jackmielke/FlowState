@@ -1,14 +1,39 @@
 import SwiftUI
 import VibeVoiceCore
 
+/// The conversation, as a column you can read, correct and delete from.
+///
+/// Two things it deliberately is not: ephemeral, and read-only. Every line stays here
+/// for the whole conversation and comes back after a relaunch — nothing in this view
+/// removes anything, and the only paths that do are the ones the user pressed. And a
+/// line that was misheard can be rewritten in place rather than argued with: voice
+/// transcription gets names, jargon and accents wrong, and a record you cannot correct
+/// is a record that slowly stops matching what was said.
+///
+/// Edits go through `AppState.editTranscriptLine`, which puts the correction in the
+/// durable record too — see `TranscriptEdit`. System notes are not editable: they are
+/// the app's own account of what it did, and a rewritable one would be worthless.
 struct TranscriptView: View {
     var items: [TranscriptItem]
+    /// Drawn on the column itself, not just in the header, so the state is visible while
+    /// reading rather than only while looking at the controls.
+    var pinned: Bool = false
+    var onEdit: (UUID, String) -> Void = { _, _ in }
+    var onDelete: (UUID) -> Void = { _ in }
+
+    /// The line being rewritten, if any. Held here rather than per row so that opening
+    /// a second editor closes the first — two half-finished corrections is a way to lose
+    /// one of them.
+    @State private var editingID: UUID?
+    @State private var draft = ""
+    @FocusState private var editorFocused: Bool
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     Color.clear.frame(height: 2)
+                    if pinned { pinnedBadge }
                     ForEach(items) { item in
                         row(item).id(item.id)
                     }
@@ -18,6 +43,9 @@ struct TranscriptView: View {
                 .padding(.vertical, 10)
             }
             .onChange(of: items.count) { _, _ in
+                // Never while a correction is open: scrolling the editor out from under
+                // somebody mid-sentence is how a half-typed fix gets abandoned.
+                guard editingID == nil else { return }
                 withAnimation(.easeOut(duration: 0.28)) { proxy.scrollTo("BOTTOM", anchor: .bottom) }
             }
             // Following the LAST line's text was only right while every line was appended
@@ -26,7 +54,79 @@ struct TranscriptView: View {
             // reply that is still streaming — and the view stopped following mid-sentence.
             // What it actually needs to follow is however much text exists in total.
             .onChange(of: writtenLength) { _, _ in
+                guard editingID == nil else { return }
                 withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo("BOTTOM", anchor: .bottom) }
+            }
+        }
+    }
+
+    /// Says the state and what it buys, in the column it applies to. "Pinned" alone
+    /// would be a word next to an icon; the second half is the reason somebody pinned it.
+    private var pinnedBadge: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "pin.fill")
+                .font(.system(size: 8.5))
+                .rotationEffect(.degrees(45))
+            Text("PINNED")
+                .font(.system(size: 9, weight: .bold, design: .rounded))
+                .tracking(1.0)
+            Text("kept until you unpin it")
+                .font(.system(size: 9.5, design: .rounded))
+                .foregroundStyle(Theme.accentInk.opacity(0.75))
+        }
+        .foregroundStyle(Theme.accentInk)
+        .padding(.horizontal, 8).padding(.vertical, 3.5)
+        .background(Capsule().fill(Theme.accent.opacity(0.14))
+            .overlay(Capsule().stroke(Theme.accent.opacity(0.3), lineWidth: 1)))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Transcript pinned — kept until you unpin it")
+    }
+
+    private func beginEditing(_ item: TranscriptItem) {
+        guard item.speaker != .system else { return }
+        editingID = item.id
+        draft = item.text
+        editorFocused = true
+    }
+
+    private func commitEdit() {
+        guard let id = editingID else { return }
+        onEdit(id, draft)
+        editingID = nil
+        draft = ""
+    }
+
+    private func cancelEdit() {
+        editingID = nil
+        draft = ""
+    }
+
+    /// The editor a line turns into. Deliberately the same width and position as the
+    /// text it replaces, so correcting a line does not move the conversation around it.
+    private func editor(for item: TranscriptItem) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TextEditor(text: $draft)
+                .font(.system(size: 13, design: .rounded))
+                .foregroundStyle(Theme.text)
+                .scrollContentBackground(.hidden)
+                .focused($editorFocused)
+                .frame(minHeight: 46, maxHeight: 160)
+                .padding(6)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Theme.fill)
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Theme.accent.opacity(0.45), lineWidth: 1)))
+                .accessibilityLabel("Edit this line")
+
+            HStack(spacing: 8) {
+                Button("Save") { commitEdit() }
+                    .buttonStyle(GhostButtonStyle(tint: Theme.accentInk))
+                    .keyboardShortcut(.return, modifiers: .command)
+                Button("Cancel") { cancelEdit() }
+                    .buttonStyle(GhostButtonStyle())
+                    .keyboardShortcut(.escape, modifiers: [])
+                Text("⌘↩ saves · esc cancels")
+                    .font(.system(size: 9.5)).foregroundStyle(Theme.textFaint)
             }
         }
     }
@@ -91,7 +191,9 @@ struct TranscriptView: View {
                 if let img = item.image {
                     Thumbnail(image: img, title: item.text, captured: item.at)
                 }
-                if item.pending && item.text.isEmpty {
+                if editingID == item.id {
+                    editor(for: item)
+                } else if item.pending && item.text.isEmpty {
                     // Not a spinner and not a guess at what they said — just the shape of
                     // a line that is coming, so the turn holds its place in the order.
                     Text("transcribing…")
@@ -117,6 +219,21 @@ struct TranscriptView: View {
                 }
             }
             .padding(.leading, 2)
+            // Nothing here is destructive by accident: a double-click opens an editor,
+            // and deleting is behind the right-click menu with the word "Delete" on it.
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) { beginEditing(item) }
+            .contextMenu {
+                Button("Edit line") { beginEditing(item) }
+                Button("Copy") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(item.text, forType: .string)
+                }
+                Divider()
+                Button("Delete line", role: .destructive) { onDelete(item.id) }
+            }
+            .help("Double-click to correct this line. It stays here — and in the saved "
+                  + "transcript — until you delete it.")
         }
     }
 }

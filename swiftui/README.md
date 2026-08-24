@@ -112,9 +112,20 @@ which is where the audio tap runs. Last run:
 4. the audio thread can feed it while the main thread stops it    ok
 5. two loud voices at once clip instead of wrapping               ok
 6. a video recording hands the finished mixdown to the writer     ok
+6a. a pause takes nothing in, and the file continues              ok
 6d. every ending that is not a saved file tears the capture down  ok
 PASS
 ```
+
+**Pausing** is a splice, not a gap. `setPaused(true)` drops everything fed to the recorder
+until it is resumed — mic, model, speakers, frames — so a take paused for ten minutes is
+ten minutes shorter rather than ten minutes of silence, and it is still one file. The
+video writer is told and shifts its own timestamps by the same span, which is why
+`RecordingVideoTrack.setPaused` is a requirement rather than an optional courtesy: a
+writer that ignored it would keep stamping frames against a clock the audio no longer
+shares, and the movie would drift further out of sync with every pause. The camera stays
+open across a pause — the light stays on, honestly — because resuming is one word away and
+ScreenCaptureKit takes a third of a second to come back up.
 
 When one finishes, the app keeps the final output path and shows a result panel rather
 than a line of transcript that names a file and then scrolls away. The card carries a
@@ -137,6 +148,59 @@ Settings, and to `os_log` under subsystem `com.jackmielke.vibevoice`, category
 
 ```bash
 log stream --predicate 'subsystem == "com.jackmielke.vibevoice" AND category == "recorder"'
+```
+
+## Saying it instead of clicking it
+
+The recording transport and the camera bubble are voice commands:
+
+| Say | Tool | What it does |
+| --- | --- | --- |
+| "start recording" | `start_recording` | Begins a take in the current capture mode |
+| "stop recording" | `stop_recording` | Ends it and writes the file |
+| "pause recording" | `pause_recording` | Holds it — same file, nothing captured |
+| "resume recording" | `resume_recording` | Carries on where it left off |
+| "show my face" | `show_face` | Puts the camera bubble on screen, and in the take |
+| "hide my face" | `hide_face` | Takes it off screen |
+
+One vocabulary, two routes, in `VoiceCommand` (`VibeVoiceCore`, so it is tested):
+
+* **With a session open**, the model calls them as tools. The descriptions it reads come
+  from the same enum.
+* **With no session open**, the on-device recogniser already running for the wake phrase
+  matches the phrases directly — no socket, no API key, nothing leaving the Mac. This is
+  the case that matters: the reason to say "stop recording" instead of clicking it is that
+  you are in the middle of something else, and that is exactly when no conversation is
+  open. It rides on the wake phrase's recogniser, so it needs **Wake phrase on** (Settings
+  › Access › Wake phrase) and its own switch, Settings › Access › Recording commands.
+
+The button in the header and the ⌘⇧R shortcut go through the same door, so all four routes
+obey one set of rules and land in one log.
+
+**What it will not do.** Every command passes `VoiceCommandGate`, which does nothing and
+says why rather than doing something surprising:
+
+* Phrases only count when they are the point of the sentence — "don't stop recording" is
+  not a stop, "restart recording" is not a start, and anything said more than sixty
+  characters ago has stopped counting as being said now (the same tail rule the wake
+  phrase learned the hard way).
+* A denied microphone blocks all four transport commands; a denied camera blocks
+  "show my face" but never "hide my face" — a revoked permission must not trap a face on
+  screen.
+* Stopping is never blocked by a permission: a take that is already running has to be
+  stoppable whatever has changed since it started.
+* Saying something twice is not an error. "Already recording", "it's already paused",
+  "nothing is being recorded" — each is reported, and nothing happens.
+* "Start recording" over a *paused* take resumes it rather than refusing or starting a
+  second file.
+
+**Everything is logged**, including the commands that did nothing, because "ignored" is
+the line somebody debugging this actually needs:
+
+```bash
+log stream --predicate 'subsystem == "com.jackmielke.vibevoice" AND category == "voice-command"'
+[voice-command] stop_recording via speech — performed: Saved 2:14 as 2026-08-24 14.02 — Standup.mov
+[voice-command] show_face via model — ignored (blocked): Camera is off for FlowState — turn it on in …
 ```
 
 ## Recording the screen and the camera
@@ -248,7 +312,18 @@ PASS
 
 Not covered by it: that ScreenCaptureKit hands over frames, that the camera opens, and
 what a long recording does to a warm laptop. Those need a real Mac, real permissions and a
-real session.
+real session — including the video half of a **pause**, which is why the smoke test can do
+one:
+
+```bash
+FLOWSTATE_RECORD_TEST=6 FLOWSTATE_RECORD_TEST_MODE=screen FLOWSTATE_RECORD_TEST_PAUSE=4 \
+  /Applications/FlowState.app/Contents/MacOS/VibeVoice
+[record-test] file: … .mov — 780772 bytes, 6.21s
+[record-test] paused 4s — the file should be ~6s, not ~10s
+```
+
+Ten seconds of wall clock, six seconds of movie, and both tracks the same length — which
+is the whole claim `VideoTrackWriter.setPaused` makes.
 
 ## Architecture
 

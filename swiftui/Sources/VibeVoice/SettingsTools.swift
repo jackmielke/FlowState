@@ -44,6 +44,8 @@ enum SettingsTools {
                           aliases: ["screen watching", "continuous screen"]),
             SettingChoice(key: "wakeWord", spoken: "the wake phrase", aliases: ["hey flow", "wake word"]),
             SettingChoice(key: "clapToWake", spoken: "clap to wake", aliases: ["clapping", "claps"]),
+            SettingChoice(key: "voiceCommands", spoken: "the recording commands",
+                          aliases: ["voice commands", "spoken commands", "hands free"]),
             SettingChoice(key: "proactive", spoken: "proactive updates",
                           aliases: ["speaking first", "interrupting me"]),
             SettingChoice(key: "ambientMode", spoken: "ambient mode"),

@@ -28,13 +28,27 @@ public struct SessionMeta: Codable, Equatable, Identifiable, Sendable {
     /// transcript be lined up with anything the API reports later.
     public var realtimeIDs: [String]
 
+    /// The user pinned this conversation: keep it, keep it visible, and never let
+    /// anything automatic take it away.
+    ///
+    /// A pin is the one flag here that is neither recoverable from the transcript nor a
+    /// title — it is a standing instruction, and it is honoured in three places:
+    /// retention never deletes a pinned conversation, `TranscriptRetention` never trims
+    /// one, and launch reopens it whatever "pick up where I left off" says. It does not
+    /// protect against the user themselves: Delete still deletes.
+    public var pinned: Bool
+    /// When it was pinned. Shown in the pin's tooltip, so "locked" has a date on it.
+    public var pinnedAt: Date?
+
     public init(id: String,
                 title: String,
                 titleIsCustom: Bool = false,
                 createdAt: Date,
                 updatedAt: Date,
                 entryCount: Int = 0,
-                realtimeIDs: [String] = []) {
+                realtimeIDs: [String] = [],
+                pinned: Bool = false,
+                pinnedAt: Date? = nil) {
         self.id = id
         self.title = title
         self.titleIsCustom = titleIsCustom
@@ -42,6 +56,27 @@ public struct SessionMeta: Codable, Equatable, Identifiable, Sendable {
         self.updatedAt = updatedAt
         self.entryCount = entryCount
         self.realtimeIDs = realtimeIDs
+        self.pinned = pinned
+        self.pinnedAt = pinnedAt
+    }
+
+    /// Hand-rolled so an index written by an older build still decodes.
+    ///
+    /// `sessions.json` is read with `try?` and the whole array is one value: a single
+    /// missing key would throw away every custom title and every pin in the file. The
+    /// synthesised decoder does not fall back to property defaults, so anything added
+    /// after the first release has to be read with `decodeIfPresent`.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        titleIsCustom = try c.decodeIfPresent(Bool.self, forKey: .titleIsCustom) ?? false
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
+        entryCount = try c.decodeIfPresent(Int.self, forKey: .entryCount) ?? 0
+        realtimeIDs = try c.decodeIfPresent([String].self, forKey: .realtimeIDs) ?? []
+        pinned = try c.decodeIfPresent(Bool.self, forKey: .pinned) ?? false
+        pinnedAt = try c.decodeIfPresent(Date.self, forKey: .pinnedAt)
     }
 
     /// Nothing was ever said in it. Such a session is not worth a file, a row in the
@@ -111,6 +146,13 @@ public final class SessionCatalog {
     /// conversation is indistinguishable from starting a new one, minus the clarity.
     public var mostRecentNonEmpty: SessionMeta? { recents.first { !$0.isEmpty } }
 
+    /// What to open on launch. A pinned conversation outranks the merely recent one:
+    /// pinning is the user saying "this is the one I am working in", and it would be a
+    /// strange kind of lock that still put something else in front of them.
+    public var sessionToResume: SessionMeta? {
+        recents.first { $0.pinned && !$0.isEmpty } ?? mostRecentNonEmpty
+    }
+
     public func meta(_ id: String) -> SessionMeta? { byID[id] }
 
     public func contains(_ id: String) -> Bool { byID[id] != nil }
@@ -123,6 +165,26 @@ public final class SessionCatalog {
 
     @discardableResult
     public func remove(_ id: String) -> Bool { byID.removeValue(forKey: id) != nil }
+
+    /// Every conversation the user has asked to keep.
+    public var pinnedIDs: Set<String> {
+        Set(byID.values.filter(\.pinned).map(\.id))
+    }
+
+    public var pinned: [SessionMeta] { recents.filter(\.pinned) }
+
+    /// Pins or unpins a conversation. Returns the row as it now stands, or nil when
+    /// there is no such conversation — which is not a failure: an empty conversation has
+    /// no row until something is said in it, and the caller decides whether to mint one.
+    @discardableResult
+    public func setPinned(_ pinned: Bool, for id: String, now: Date = Date()) -> SessionMeta? {
+        guard var meta = byID[id] else { return nil }
+        guard meta.pinned != pinned else { return meta }
+        meta.pinned = pinned
+        meta.pinnedAt = pinned ? now : nil
+        byID[id] = meta
+        return meta
+    }
 
     public func removeAll() { byID.removeAll() }
 

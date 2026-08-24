@@ -60,6 +60,23 @@ final class ConversationStore: ObservableObject {
     /// anything is actually recorded, since an empty conversation is not written down.
     private var currentRealtimeIDs: [String] = []
 
+    /// How many conversations survive, and whether they are written without being asked.
+    /// The hours half of the same question lives in `privacy.retentionHours`.
+    var retention: TranscriptRetention {
+        get { retentionPolicy }
+        set {
+            let was = retentionPolicy
+            retentionPolicy = newValue
+            guard was != newValue else { return }
+            TranscriptLog.event(.saved, session: nil,
+                                "retention · " + newValue.summaryLine)
+            // A limit that only applied to conversations recorded after it was set would
+            // be a setting that appears to do nothing.
+            trimToRetention()
+        }
+    }
+    private var retentionPolicy = TranscriptRetention()
+
     var privacy: TranscriptPrivacy {
         get { log.privacy }
         set {
@@ -75,9 +92,17 @@ final class ConversationStore: ObservableObject {
             // What is on screen right now is untouched. It is in memory, it was already
             // said, and hiding it would not un-say it.
             if wasPersisting && !newValue.persistToDisk {
+                // Including pinned ones. A pin outranks retention, which is a policy
+                // about age; it does not outrank "stop saving anything", which is the
+                // user asking for nothing on disk at all. Said out loud in the log,
+                // because it is the one place a lock loses.
+                let lockedGoing = catalog.pinnedIDs.count
                 deleteAllOnDisk()
                 catalog.removeAll()
                 publishSessions()
+                TranscriptLog.event(.deleted, session: nil,
+                                    "save-to-disk switched off — every transcript removed"
+                                    + (lockedGoing > 0 ? ", including \(lockedGoing) pinned" : ""))
             }
         }
     }
@@ -89,7 +114,54 @@ final class ConversationStore: ObservableObject {
         log.purgeExpired()
         purgeExpiredFiles()
         reloadCatalog(now: now)
+        syncPins()
     }
+
+    // MARK: - Pinning
+
+    /// Conversations the user has locked.
+    var pinnedIDs: Set<String> { catalog.pinnedIDs }
+
+    func isPinned(_ id: String) -> Bool { catalog.meta(id)?.pinned ?? false }
+
+    var currentIsPinned: Bool { isPinned(currentSessionID) }
+
+    /// Locks or unlocks a conversation.
+    ///
+    /// Pinning one that has never been written — the conversation you are in, before
+    /// anybody has said anything worth keeping — mints its row here rather than waiting,
+    /// because the pin IS the user saying it is worth keeping. The file follows as soon
+    /// as there is a line to put in it, or immediately if there already is one.
+    ///
+    /// - Returns: whether it is now pinned.
+    @discardableResult
+    func setPinned(_ pinned: Bool, session id: String, now: Date = Date()) -> Bool {
+        if catalog.meta(id) == nil {
+            guard pinned else { return false }
+            catalog.upsert(SessionMeta(id: id,
+                                       title: SessionTitle.timeLabel(for: currentSessionStartedAt),
+                                       createdAt: id == currentSessionID ? currentSessionStartedAt : now,
+                                       updatedAt: now))
+        }
+        catalog.setPinned(pinned, for: id, now: now)
+        syncPins()
+        publishSessions()
+        saveIndex()
+        TranscriptLog.event(pinned ? .pinned : .unpinned, session: id,
+                            pinned
+                            ? "locked — retention, the keep-last limit and launch all honour it"
+                            : "unlocked — retention applies to it again")
+        // A pin in manual-save mode is also a promise that it will still be there
+        // tomorrow, and that promise is only kept by a file.
+        if pinned, privacy.persistToDisk, !log.entries(inSession: id).isEmpty {
+            save(session: id)
+        }
+        if !pinned { trimToRetention() }
+        return pinned
+    }
+
+    /// Hands the pin list down to the layer that enforces retention in memory.
+    private func syncPins() { log.pinnedSessions = catalog.pinnedIDs }
 
     // MARK: - Session lifecycle
 
@@ -100,9 +172,16 @@ final class ConversationStore: ObservableObject {
     /// it is in the list, and reopening it picks up exactly where it stopped.
     @discardableResult
     func startNewSession(at: Date = Date()) -> String {
+        let left = currentSessionID
         currentSessionID = SessionID.mint(at: at)
         currentSessionStartedAt = at
         currentRealtimeIDs = []
+        TranscriptLog.event(.saved, session: left,
+                            "left open at \(log.entries(inSession: left).count) line(s) — "
+                            + "now in \(currentSessionID)")
+        // A new conversation is one more conversation, which may put the collection over
+        // the keep-last limit. The one just left is not a candidate: it is the newest.
+        trimToRetention()
         return currentSessionID
     }
 
@@ -145,6 +224,9 @@ final class ConversationStore: ObservableObject {
         }
         entryCount = log.entries.count
         publishSessions()
+        TranscriptLog.event(.restored, session: id,
+                            "\(TranscriptLog.lines(archive.entries.count)) back in memory"
+                            + (isPinned(id) ? " · pinned" : ""))
         return load
     }
 
@@ -201,7 +283,7 @@ final class ConversationStore: ObservableObject {
     /// The conversation to reopen on launch when the user has asked for that. Empty
     /// conversations are skipped — resuming into a blank one is a new one with extra
     /// steps.
-    var mostRecentSession: SessionMeta? { catalog.mostRecentNonEmpty }
+    var mostRecentSession: SessionMeta? { catalog.sessionToResume }
 
     /// Titles as the switcher should show them, with same-titled conversations
     /// disambiguated by when they happened.
@@ -231,7 +313,134 @@ final class ConversationStore: ObservableObject {
         entryCount = log.entries.count
         appendToDisk(entry)
         noteInCatalog(sessionID: sid, at: entry.at, conversational: entry.isConversational)
+        TranscriptLog.event(.appended, session: sid,
+                            "\(entry.speaker.rawValue), \(entry.text.count) chars"
+                            + (entry.redacted ? ", redacted" : "")
+                            + (willPersist(session: sid) ? "" : ", memory only"))
         return entry
+    }
+
+    // MARK: - Editing
+
+    /// Rewrites one line, in memory and on disk.
+    ///
+    /// The file is append-only, so the correction is appended as its own record rather
+    /// than rewriting what is already there — see `TranscriptEdit`. That keeps a write
+    /// during a live conversation as safe as it was, and it means a correction made
+    /// while the disk is busy cannot cost the conversation around it.
+    ///
+    /// - Returns: the entry as it now stands, or nil when there is no such line.
+    @discardableResult
+    func edit(entryID: UUID, to text: String, at: Date = Date()) -> ConversationEntry? {
+        guard let entry = log.edit(entryID: entryID, to: text) else {
+            TranscriptLog.event(.fault, session: currentSessionID,
+                                "edit for a line that is not in the log (\(entryID))")
+            return nil
+        }
+        appendToDisk(TranscriptEdit(sessionID: entry.sessionID,
+                                    entryID: entryID,
+                                    text: entry.text,
+                                    at: at))
+        TranscriptLog.event(.edited, session: entry.sessionID,
+                            "\(entry.text.count) chars"
+                            + (willPersist(session: entry.sessionID) ? "" : ", memory only"))
+        return entry
+    }
+
+    /// Deletes one line, in memory and on disk. Everything around it is untouched.
+    @discardableResult
+    func removeEntry(_ entryID: UUID, at: Date = Date()) -> Bool {
+        guard let entry = log.remove(entryID: entryID) else { return false }
+        entryCount = log.entries.count
+        appendToDisk(TranscriptEdit(sessionID: entry.sessionID,
+                                    entryID: entryID,
+                                    text: nil,
+                                    at: at))
+        TranscriptLog.event(.removed, session: entry.sessionID,
+                            "\(entry.speaker.rawValue) line deleted by hand")
+        return true
+    }
+
+    // MARK: - Saving on purpose
+
+    /// Writes a whole conversation to disk now, whatever the retention mode says.
+    ///
+    /// This is what "Only what I save" is for, and it is also the repair for a file that
+    /// was never written because the disk was full at the wrong moment. It merges what
+    /// is on disk with what is in memory and rewrites the file atomically, so calling it
+    /// twice leaves one copy of everything rather than two.
+    ///
+    /// - Returns: how many lines the file holds afterwards, or nil when nothing could be
+    ///   written — which callers must report rather than swallow.
+    @discardableResult
+    func save(session id: String, now: Date = Date()) -> Int? {
+        guard privacy.persistToDisk else {
+            TranscriptLog.event(.fault, session: id,
+                                "asked to save with \"save to disk\" switched off — refused")
+            return nil
+        }
+        let onDisk = loadArchive(for: id).archive ?? .init()
+
+        var entries = onDisk.entries
+        var seen = Set(entries.map(\.id))
+        for e in log.entries(inSession: id) where !seen.contains(e.id) {
+            entries.append(e)
+            seen.insert(e.id)
+        }
+        entries.sort { $0.at < $1.at }
+
+        var summaries = onDisk.summaries
+        var seenSummaries = Set(summaries.map(\.id))
+        for s in log.summaries(inSession: id) where !seenSummaries.contains(s.id) {
+            summaries.append(s)
+            seenSummaries.insert(s.id)
+        }
+        summaries.sort { $0.createdAt < $1.createdAt }
+
+        guard !entries.isEmpty || !summaries.isEmpty else {
+            TranscriptLog.event(.saved, session: id, "nothing to save yet")
+            return 0
+        }
+
+        var blob = Data()
+        for e in entries { if let line = ConversationArchive.line(for: e) { blob.append(line) } }
+        for s in summaries { if let line = ConversationArchive.line(for: s) { blob.append(line) } }
+
+        let url = transcriptURL(for: id)
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            try blob.write(to: url, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                                   ofItemAtPath: url.path)
+            lastWriteError = nil
+        } catch {
+            lastWriteError = error.localizedDescription
+            TranscriptLog.event(.fault, session: id, "save failed — \(error.localizedDescription)")
+            return nil
+        }
+
+        // A conversation that was only in memory has no row until it is saved.
+        if catalog.meta(id) == nil {
+            catalog.upsert(ConversationArchive.meta(for: id,
+                                                    archive: .init(entries: entries,
+                                                                   summaries: summaries),
+                                                    fallbackDate: currentSessionStartedAt,
+                                                    now: now))
+        }
+        publishSessions()
+        saveIndex()
+        TranscriptLog.event(.saved, session: id,
+                            "\(TranscriptLog.lines(entries.count)), \(blob.count) bytes → "
+                            + url.lastPathComponent)
+        return entries.count
+    }
+
+    /// Whether a line recorded into this conversation right now reaches the disk without
+    /// anybody asking it to. False in `.manualSave` for anything unpinned — which is the
+    /// mode working, not a failure, and is why it is said in the log next to the line.
+    func willPersist(session id: String) -> Bool {
+        privacy.persistToDisk && retentionPolicy.autosaves(pinned: isPinned(id))
     }
 
     func record(_ summary: ConversationSummary) {
@@ -350,11 +559,17 @@ final class ConversationStore: ObservableObject {
                 // keeps showing an error about a file that has since been fine.
                 lastReadError = nil
             }
+            TranscriptLog.event(.loaded, session: sessionID,
+                                "\(TranscriptLog.lines(archive.entries.count)), "
+                                + "\(archive.summaries.count) summar\(archive.summaries.count == 1 ? "y" : "ies")"
+                                + (archive.editCount > 0 ? ", \(archive.editCount) correction(s) folded in" : "")
+                                + (archive.skippedLines > 0 ? ", \(archive.skippedLines) unreadable" : "")
+                                + ", \(data.count) bytes")
             return .loaded(archive)
         } catch {
             let why = "could not read \(url.lastPathComponent): \(error.localizedDescription)"
             lastReadError = why
-            FileHandle.standardError.write(Data("[conversation] \(why)\n".utf8))
+            TranscriptLog.event(.fault, session: sessionID, why)
             return .failed(why)
         }
     }
@@ -392,15 +607,26 @@ final class ConversationStore: ObservableObject {
     }
 
     private func appendToDisk(_ entry: ConversationEntry) {
-        guard privacy.persistToDisk else { return }
+        guard willPersist(session: entry.sessionID) else { return }
         guard let line = ConversationArchive.line(for: entry) else { return }
         write(line, to: transcriptURL(for: entry.sessionID))
     }
 
     private func appendToDisk(_ summary: ConversationSummary) {
-        guard privacy.persistToDisk else { return }
+        guard willPersist(session: summary.sessionID) else { return }
         guard let line = ConversationArchive.line(for: summary) else { return }
         write(line, to: transcriptURL(for: summary.sessionID))
+    }
+
+    /// A correction only needs writing when there is a file for it to correct. In
+    /// manual-save mode there usually is not — the edit lives in memory and goes to disk
+    /// with everything else when the user saves.
+    private func appendToDisk(_ edit: TranscriptEdit) {
+        guard privacy.persistToDisk else { return }
+        let url = transcriptURL(for: edit.sessionID)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard let line = ConversationArchive.line(for: edit) else { return }
+        write(line, to: url)
     }
 
     private func write(_ line: Data, to url: URL) {
@@ -422,7 +648,8 @@ final class ConversationStore: ObservableObject {
             // Never fatal, and never a banner: failing to persist must not interrupt a
             // live conversation. It is surfaced in Settings instead.
             lastWriteError = error.localizedDescription
-            FileHandle.standardError.write(Data("[conversation] write failed: \(error)\n".utf8))
+            TranscriptLog.event(.fault, session: url.deletingPathExtension().lastPathComponent,
+                                "write failed — \(error.localizedDescription)")
         }
     }
 
@@ -493,6 +720,10 @@ final class ConversationStore: ObservableObject {
         // and the whole list is this launch's memory.
         if privacy.persistToDisk {
             for meta in catalog.all where !onDisk.contains(meta.id) && meta.id != currentSessionID {
+                // A pinned row with no file is not a stale row: in manual-save mode a
+                // pin can be minted before anything has been written, and dropping it
+                // here would forget a lock the moment the app restarted.
+                if meta.pinned && meta.isEmpty { continue }
                 catalog.remove(meta.id)
             }
         }
@@ -531,6 +762,9 @@ final class ConversationStore: ObservableObject {
         let dropped = log.forget(session: id)
         try? FileManager.default.removeItem(at: transcriptURL(for: id))
         catalog.remove(id)
+        syncPins()
+        TranscriptLog.event(.deleted, session: id,
+                            "\(TranscriptLog.lines(dropped)) and the file with them")
         entryCount = log.entries.count
         publishSessions()
         saveIndex()
@@ -539,11 +773,15 @@ final class ConversationStore: ObservableObject {
 
     /// The user-facing "forget all of this". Transcripts, summaries and any audio clips.
     func forgetEverything() {
+        let had = sessions.count
         log.forgetEverything()
         entryCount = 0
         catalog.removeAll()
+        syncPins()
         deleteAllOnDisk()
         publishSessions()
+        TranscriptLog.event(.deleted, session: nil,
+                            "delete everything — \(had) conversation\(had == 1 ? "" : "s") removed")
     }
 
     private func deleteAllOnDisk() {
@@ -564,21 +802,53 @@ final class ConversationStore: ObservableObject {
         guard let files = try? fm.contentsOfDirectory(
             at: Self.conversationsDirectory,
             includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        let pinned = catalog.pinnedIDs
         var removed = false
         for url in files {
+            let id = url.deletingPathExtension().lastPathComponent
+            // Pinned conversations do not age out. That is the whole of what a pin
+            // promises, and it is undone by unpinning, by Delete, or by switching
+            // saving off altogether.
+            guard !pinned.contains(id) else { continue }
+            guard id != currentSessionID else { continue }
             let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
                 .contentModificationDate
             if let modified, privacy.hasExpired(modified) {
                 try? fm.removeItem(at: url)
+                TranscriptLog.event(.purged, session: id,
+                                    "older than \(TranscriptPrivacy.humanHours(privacy.retentionHours))")
                 // The row goes with the file, or the switcher offers conversations that
                 // open empty.
-                if catalog.remove(url.deletingPathExtension().lastPathComponent) { removed = true }
+                if catalog.remove(id) { removed = true }
             }
         }
         if removed {
             publishSessions()
             saveIndex()
         }
+    }
+
+    /// Applies the keep-last limit: deletes the oldest conversations until the number
+    /// on disk is back inside it.
+    ///
+    /// Never the pinned ones and never the one on screen — both exclusions live in
+    /// `TranscriptRetention.sessionsToTrim`, where they can be tested without a disk.
+    @discardableResult
+    func trimToRetention() -> Int {
+        guard privacy.persistToDisk else { return 0 }
+        let doomed = retentionPolicy.sessionsToTrim(catalog.recents, current: currentSessionID)
+        guard !doomed.isEmpty else { return 0 }
+        for id in doomed {
+            try? FileManager.default.removeItem(at: transcriptURL(for: id))
+            log.forget(session: id)
+            catalog.remove(id)
+            TranscriptLog.event(.trimmed, session: id,
+                                "past the keep-last-\(retentionPolicy.keepLast) limit")
+        }
+        entryCount = log.entries.count
+        publishSessions()
+        saveIndex()
+        return doomed.count
     }
 
     // MARK: - Reading back

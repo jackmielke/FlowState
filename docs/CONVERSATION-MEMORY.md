@@ -217,9 +217,15 @@ dictated email address), not a claim to catch everything. Over-redacting a voice
 transcript makes it useless, which is its own failure. `port 8080` is left alone.
 
 All of it is reachable by voice, because the moment somebody wants recording to stop is a
-moment they are already talking: `pause_recording`, `resume_recording`,
-`forget_conversation`, `memory_status`, `summarize_conversation`. Pausing needs no
+moment they are already talking: `stop_transcript`, `resume_transcript`,
+`forget_conversation`, `memory_status`, `summarize_conversation`. Stopping needs no
 confirmation; resuming and forgetting do (`ToolSpec.Effect.writes`).
+
+The first two were called `pause_recording` and `resume_recording` until the recorder
+itself became sayable — see `VoiceCommand`, which owns `start_recording`, `stop_recording`,
+`pause_recording` and `resume_recording` now. Those names mean the FILE; these mean the
+TRANSCRIPT. One name for both was a coin toss the model would eventually lose, and losing
+it in the "don't write this down" direction is the expensive way round.
 
 ## On disk
 
@@ -345,7 +351,7 @@ Four seams, each a named type with a comment rather than a TODO:
   time, by name. Searching all of them is the obvious next feature and needs no new
   capture work — `ConversationArchive.parse` is already the whole reading half.
 - **Switching conversations by voice.** Every other memory control is reachable by voice
-  (`pause_recording`, `forget_conversation`, …); "open the one about the release script"
+  (`stop_transcript`, `forget_conversation`, …); "open the one about the release script"
   is not, and would need the title search above to be worth anything.
 - Re-reading the `.md` note files from a previous launch. `SummaryView` shows summaries
   held in memory, which now includes the ones restored with a conversation — but the
