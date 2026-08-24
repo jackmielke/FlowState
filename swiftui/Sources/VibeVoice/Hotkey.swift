@@ -41,10 +41,23 @@ struct HotkeyCombo: Equatable, Identifiable {
     /// 440-point pane is unreadable, and the two keys should not offer each other's
     /// combos anyway — binding both to the same chord registers one and silently loses
     /// the other.
+    static let cmdShiftR = HotkeyCombo(
+        id: "cmdShiftR", label: "⌘⇧R",
+        keyCode: UInt32(kVK_ANSI_R), modifiers: UInt32(cmdKey | shiftKey))
+
+    static let ctrlShiftR = HotkeyCombo(
+        id: "ctrlShiftR", label: "⌃⇧R",
+        keyCode: UInt32(kVK_ANSI_R), modifiers: UInt32(controlKey | shiftKey))
+
+    static let optionShiftR = HotkeyCombo(
+        id: "optionShiftR", label: "⌥⇧R",
+        keyCode: UInt32(kVK_ANSI_R), modifiers: UInt32(optionKey | shiftKey))
+
     static let summonChoices = [cmdShiftSpace, optionSpace, cmdShiftF]
+    static let recordChoices = [cmdShiftR, ctrlShiftR, optionShiftR]
     static let connectChoices = [ctrlShiftF, ctrlShiftSpace, cmdShiftL]
 
-    static let all = summonChoices + connectChoices
+    static let all = summonChoices + connectChoices + recordChoices
 
     static func named(_ id: String) -> HotkeyCombo {
         all.first { $0.id == id } ?? .cmdShiftSpace
@@ -90,6 +103,17 @@ final class GlobalHotkey {
     }
 
     func unregisterConnect() { unbind(id: 3) }
+
+    /// Start or stop recording from anywhere.
+    ///
+    /// The one a screen recorder cannot do without: what you want to record is, by
+    /// definition, not this app's window, so reaching for it means leaving the thing you
+    /// were about to capture.
+    func registerRecord(_ combo: HotkeyCombo, action: @escaping () -> Void) {
+        bind(id: 4, keyCode: combo.keyCode, modifiers: combo.modifiers, action: action)
+    }
+
+    func unregisterRecord() { unbind(id: 4) }
 
     // MARK: -
 

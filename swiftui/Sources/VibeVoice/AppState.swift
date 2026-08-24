@@ -355,6 +355,27 @@ final class AppState: ObservableObject {
         }
     }
 
+    func applyRecordHotkey() {
+        guard !settings.recordHotkey.isEmpty else {
+            GlobalHotkey.shared.unregisterRecord()
+            return
+        }
+        GlobalHotkey.shared.registerRecord(HotkeyCombo.named(settings.recordHotkey)) { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                if self.isRecording {
+                    _ = self.stopRecording()
+                    self.sound(.sleep, "sleep")
+                } else {
+                    // The sound is the only confirmation there is: the window is not in
+                    // front, which is the entire reason this key exists.
+                    _ = self.startRecording()
+                    if self.isRecording { self.sound(.heard, "heard") }
+                }
+            }
+        }
+    }
+
     /// Subtitles over whatever the user is doing. See `CaptionBar`.
     let captions = CaptionController()
 
@@ -1205,6 +1226,7 @@ final class AppState: ObservableObject {
 
         applySummonHotkey()
         applyConnectHotkey()
+        applyRecordHotkey()
         startOutreach()
         applyWakeWord()
         // NOT applyHUD() here. Building the widget's hosting view during init means

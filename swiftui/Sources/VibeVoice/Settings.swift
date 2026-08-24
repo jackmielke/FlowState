@@ -154,6 +154,9 @@ struct AppSettings: Codable, Equatable {
     /// already spent enough of its owner's patience on macOS privacy dialogs.
     var connectHotkey: String = "ctrlShiftF"
 
+    /// Start or stop recording from anywhere. Empty string = off.
+    var recordHotkey: String = "cmdShiftR"
+
     /// Let it start the conversation when something is worth saying — a coding task
     /// finishing. Off by default: an app that opens a microphone and talks to you
     /// unprompted has to be asked for, not discovered.
@@ -188,6 +191,13 @@ struct AppSettings: Codable, Equatable {
     /// — so the transcript inside it is invisible exactly when it matters most: when it
     /// has misheard you and you cannot tell why the answer is strange.
     var captions: Bool = true
+
+    /// Show the time when ambient mode has faded everything else away.
+    ///
+    /// Ambient mode on its own leaves a beautiful empty rectangle, which is a screensaver
+    /// you cannot use for anything. This is the version you can glance at from across a
+    /// room and get something back.
+    var ambientClock: Bool = true
 
     /// Commit what each task changed, on the current branch, when it finishes.
     ///
@@ -285,8 +295,8 @@ struct AppSettings: Codable, Equatable {
         case devNarrate, devNarrateInterval, devNarrateMax, devPermissionMode
         case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
         case photoRotateSeconds, menuBarEnabled, summonHotkey, devNudgeDismissed
-        case connectHotkey, proactive, wakeWord, wakePhrase, clapToWake, clapSensitivity
-        case earcons, captions
+        case connectHotkey, recordHotkey, proactive, wakeWord, wakePhrase, clapToWake, clapSensitivity
+        case earcons, captions, ambientClock
         case motionStyle, motionIntensity, motionAssets
         case devAutoCommit, devAutoPush, hudEnabled, hudStyle, cameraBubble
         case cameraSize, cameraCorner, cameraShape, cameraControls, cameraMirrored
@@ -344,6 +354,7 @@ extension AppSettings {
         menuBarEnabled    = v(.menuBarEnabled, d.menuBarEnabled)
         summonHotkey      = v(.summonHotkey, d.summonHotkey)
         connectHotkey     = v(.connectHotkey, d.connectHotkey)
+        recordHotkey      = v(.recordHotkey, d.recordHotkey)
         proactive         = v(.proactive, d.proactive)
         wakeWord          = v(.wakeWord, d.wakeWord)
         wakePhrase        = v(.wakePhrase, d.wakePhrase)
@@ -351,6 +362,7 @@ extension AppSettings {
         clapSensitivity   = v(.clapSensitivity, d.clapSensitivity)
         earcons           = v(.earcons, d.earcons)
         captions          = v(.captions, d.captions)
+        ambientClock      = v(.ambientClock, d.ambientClock)
         devNudgeDismissed = v(.devNudgeDismissed, d.devNudgeDismissed)
         devAutoCommit     = v(.devAutoCommit, d.devAutoCommit)
         devAutoPush       = v(.devAutoPush, d.devAutoPush)

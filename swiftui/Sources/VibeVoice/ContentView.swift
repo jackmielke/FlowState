@@ -175,6 +175,14 @@ struct ContentView: View {
             // live underneath — this hides the furniture, it does not stop the session.
             .opacity(ambientHidden ? 0 : 1)
             .allowsHitTesting(!ambientHidden)
+            // What the fade leaves behind. See `AmbientClock`.
+            .overlay {
+                if ambientHidden && state.settings.ambientClock {
+                    AmbientClock(state: state)
+                        .allowsHitTesting(false)
+                }
+            }
+            .animation(.easeInOut(duration: 0.9), value: ambientHidden)
             .animation(.easeInOut(duration: 1.1), value: ambientHidden)
 
             if ambientHidden {

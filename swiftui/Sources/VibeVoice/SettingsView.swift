@@ -638,6 +638,19 @@ struct SettingsView: View {
                                     get: { state.settings.connectHotkey },
                                     set: { state.settings.connectHotkey = $0; state.applyConnectHotkey() }),
                                 accessibilityPrefix: "Connect shortcut")
+                HStack {
+                    Text("Start or stop recording")
+                        .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                    Spacer()
+                }
+                SegmentedPicker(options: HotkeyCombo.recordChoices.map { (value: $0.id, label: $0.label) }
+                                        + [(value: "", label: "Off")],
+                                selection: Binding(
+                                    get: { state.settings.recordHotkey },
+                                    set: { state.settings.recordHotkey = $0; state.applyRecordHotkey() }),
+                                accessibilityPrefix: "Record shortcut")
+                caption("The one a screen recorder cannot do without: what you want to record is, by definition, not this window, so reaching for the button means leaving the thing you were about to capture. A short sound confirms it started, since you will not be looking.")
+
                 caption("Control-Shift-F by default. (⌃ is Control, ⇧ is Shift, ⌘ is Command.) Connects from anywhere, and hangs up if a session is already open — without going to find the window first. The point of something always there is that reaching it is not a task. A bare chord like holding ⌃⇧ on its own would need an event tap, and that means an Accessibility prompt, so this asks for a real key instead.")
             }
 
@@ -680,6 +693,16 @@ struct SettingsView: View {
                 if !state.wake.lastHeard.isEmpty {
                     caption("Last heard: \(state.wake.lastHeard)")
                 }
+            }
+
+            section("When it is left alone") {
+                HStack {
+                    Text("Show the time")
+                        .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                    Spacer()
+                    NeatToggle(isOn: binding(\.ambientClock))
+                }
+                caption("Ambient mode fades everything away and leaves the scene, which is restful and slightly pointless — a beautiful empty rectangle. This leaves the time, the date, and a line of what was last talked about, so the window is worth a glance from across a room. Needs Ambient mode and a scenic backdrop.")
             }
 
             section("Captions") {
