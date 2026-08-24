@@ -33,11 +33,16 @@ final class WakeListener {
     private var restartTimer: Timer?
 
     /// The format the engine hands over: 24 kHz mono PCM16, matching `AudioEngine`.
-    /// `nonisolated` because `feed` runs on the audio thread — see there.
-    nonisolated(unsafe) private static let format = AVAudioFormat(commonFormat: .pcmFormatInt16,
-                                              sampleRate: AudioEngine.targetRate,
-                                              channels: 1,
-                                              interleaved: true)
+    /// Built per call rather than held: `feed` runs on the audio thread, and a stored
+    /// property on a main-actor type cannot be read from there. Constructing an
+    /// `AVAudioFormat` is a handful of field copies, against a buffer allocation and a
+    /// memcpy in the same function.
+    private nonisolated static func format() -> AVAudioFormat? {
+        AVAudioFormat(commonFormat: .pcmFormatInt16,
+                      sampleRate: AudioEngine.targetRate,
+                      channels: 1,
+                      interleaved: true)
+    }
 
     static func authorize() async -> SFSpeechRecognizerAuthorizationStatus {
         let current = SFSpeechRecognizer.authorizationStatus()
@@ -83,9 +88,17 @@ final class WakeListener {
         isRunning = false
     }
 
+    /// Two claps, detected from the samples directly — no recogniser involved. See
+    /// `ClapDetector`. Kept here rather than in its own type because it is fed from the
+    /// same tap and answers the same question.
+    private let claps = ClapBox()
+
+    /// Whether the clap wake is armed. Cheap either way; the detector is a few floats.
+    var clapEnabled = false
+
     /// Called from the audio tap with the same buffers the socket receives.
     nonisolated func feed(_ pcm16: Data) {
-        guard let format = Self.format else { return }
+        guard let format = Self.format() else { return }
         let frames = pcm16.count / 2
         guard frames > 0,
               let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames))
@@ -95,7 +108,27 @@ final class WakeListener {
             guard let src = raw.baseAddress, let dst = buffer.int16ChannelData?[0] else { return }
             memcpy(dst, src, frames * 2)
         }
+        if let peak = Self.peak(pcm16), claps.feed(peak: peak) {
+            Task { @MainActor [weak self] in
+                guard let self, self.clapEnabled else { return }
+                self.lastHeard = "(two claps)"
+                self.onWake?()
+            }
+        }
+
         Task { @MainActor [weak self] in self?.request?.append(buffer) }
+    }
+
+    /// Highest absolute sample in the frame, 0...1.
+    private nonisolated static func peak(_ pcm16: Data) -> Float? {
+        let n = pcm16.count / 2
+        guard n > 0 else { return nil }
+        return pcm16.withUnsafeBytes { raw -> Float in
+            let p = raw.bindMemory(to: Int16.self)
+            var m: Int32 = 0
+            for i in 0..<n { m = max(m, Int32(p[i].magnitude)) }
+            return Float(m) / 32_767
+        }
     }
 
     private func beginTask() {
@@ -130,5 +163,28 @@ final class WakeListener {
         task?.cancel()
         request = nil
         task = nil
+    }
+}
+
+
+/// The clap detector, reachable from the audio thread.
+///
+/// `ClapDetector` is a value type with a running estimate of the room in it, so it has to
+/// live somewhere mutable — and that somewhere is written to every 20 ms from the capture
+/// tap. A lock rather than the main actor, for the same reason `UtteranceRecorder` uses
+/// one: hopping queues for a few floats per frame would cost more than the work.
+final class ClapBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var detector = ClapDetector()
+    private let started = Date()
+
+    func feed(peak: Float) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return detector.feed(peak: peak, at: Date().timeIntervalSince(started))
+    }
+
+    func reset() {
+        lock.lock(); defer { lock.unlock() }
+        detector.reset()
     }
 }

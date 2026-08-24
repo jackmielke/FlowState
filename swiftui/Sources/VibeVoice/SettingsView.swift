@@ -667,6 +667,16 @@ struct SettingsView: View {
                                     set: { state.settings.wakePhrase = $0; state.applyWakeWord() }),
                                 accessibilityPrefix: "Wake phrase")
                 caption("Recognition runs on-device — the audio never leaves this Mac, and it works with no network. It does hold the microphone open whenever no session is running, which costs battery. Two words on purpose: \"flow\" on its own is a word you say constantly, including as the name of another app, and it will not wake on that.")
+                HStack {
+                    Text("Two claps also wake it")
+                        .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                    Spacer()
+                    NeatToggle(isOn: Binding(
+                        get: { state.settings.clapToWake },
+                        set: { state.settings.clapToWake = $0; state.applyWakeWord() }))
+                }
+                caption("No recogniser involved — a clap is the sharpest, loudest thing that happens in a quiet room, and that shape is visible in the samples directly. It works across a room where the phrase often does not. Two claps rather than one, roughly a quarter-second apart: one loud noise is a door, a mug, a laptop lid.")
+
                 if !state.wake.lastHeard.isEmpty {
                     caption("Last heard: \(state.wake.lastHeard)")
                 }

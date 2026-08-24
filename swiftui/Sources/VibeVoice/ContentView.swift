@@ -352,7 +352,7 @@ struct ContentView: View {
             state.settings.wakeWord = false
             state.applyWakeWord()
         } label: {
-            statusPill("ear.fill", "HEY FLOW", tint: Theme.accent.opacity(0.55))
+            statusPill("antenna.radiowaves.left.and.right", "HEY FLOW", tint: Theme.accent.opacity(0.55))
         }
         .buttonStyle(.plain)
         .help("Listening for the wake phrase, on-device. Click to stop.")

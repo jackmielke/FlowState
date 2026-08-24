@@ -370,6 +370,7 @@ final class AppState: ObservableObject {
                 return
             }
             self.wake.phrase = self.settings.wakePhrase == "heyFlowState" ? .heyFlowState : .heyFlow
+            self.wake.clapEnabled = self.settings.clapToWake
             self.wake.onWake = { [weak self] in
                 guard let self else { return }
                 // Already talking is the common case for a false positive, and there is
@@ -2655,13 +2656,32 @@ final class AppState: ObservableObject {
     /// anyone would notice.
     func goToSleep() -> String {
         Task { @MainActor in
-            for _ in 0..<40 where self.audio.isPlayingAudio {
+            // Wait for the goodbye to START, then for it to finish.
+            //
+            // The first version only did the second half, and cut the sentence off every
+            // time: a tool result is handed back BEFORE the model says anything about it,
+            // so "while audio is playing" is false at that moment and the loop fell
+            // straight through. Nothing was playing yet — that was the point.
+            for _ in 0..<50 {                       // up to 5s for it to begin
+                if self.audio.isPlayingAudio || self.isResponding { break }
                 try? await Task.sleep(for: .milliseconds(100))
             }
-            try? await Task.sleep(for: .milliseconds(400))
+            // Then let it run out. Two consecutive quiet checks rather than one, because
+            // the queue empties briefly between the audio chunks of a single sentence.
+            var quiet = 0
+            for _ in 0..<300 {                      // up to 30s of goodbye
+                if self.audio.isPlayingAudio || self.isResponding {
+                    quiet = 0
+                } else {
+                    quiet += 1
+                    if quiet >= 4 { break }
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            try? await Task.sleep(for: .milliseconds(250))
             self.disconnect()
         }
-        return "Going to sleep. Say goodbye now — the session closes right after you finish."
+        return "Going to sleep. Say a short goodbye — the session closes once you stop speaking."
     }
 
     func setRecording(paused: Bool) -> String {

@@ -161,6 +161,10 @@ struct AppSettings: Codable, Equatable {
     /// constantly, including as the name of another app.
     var wakePhrase: String = "heyFlow"
 
+    /// Two claps also wake it. Independent of the phrase, and more reliable across a
+    /// room: a clap does not have to be understood, only heard.
+    var clapToWake: Bool = true
+
     /// Commit what each task changed, on the current branch, when it finishes.
     ///
     /// Without this Dev Mode edits the working tree and stops, so a session's work is
@@ -257,7 +261,7 @@ struct AppSettings: Codable, Equatable {
         case devNarrate, devNarrateInterval, devNarrateMax, devPermissionMode
         case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
         case photoRotateSeconds, menuBarEnabled, summonHotkey, devNudgeDismissed
-        case connectHotkey, proactive, wakeWord, wakePhrase
+        case connectHotkey, proactive, wakeWord, wakePhrase, clapToWake
         case motionStyle, motionIntensity, motionAssets
         case devAutoCommit, devAutoPush, hudEnabled, hudStyle, cameraBubble
         case cameraSize, cameraCorner, cameraShape, cameraControls, cameraMirrored
@@ -318,6 +322,7 @@ extension AppSettings {
         proactive         = v(.proactive, d.proactive)
         wakeWord          = v(.wakeWord, d.wakeWord)
         wakePhrase        = v(.wakePhrase, d.wakePhrase)
+        clapToWake        = v(.clapToWake, d.clapToWake)
         devNudgeDismissed = v(.devNudgeDismissed, d.devNudgeDismissed)
         devAutoCommit     = v(.devAutoCommit, d.devAutoCommit)
         devAutoPush       = v(.devAutoPush, d.devAutoPush)
