@@ -113,6 +113,12 @@ final class AppState: ObservableObject {
     func startFollowingActiveDisplay() {
         displayWatcher.onChange = { [weak self] id in self?.activeDisplayChanged(to: id) }
         displayWatcher.start()
+        // The watcher adopts a display on `start()` without reporting it as a change —
+        // correctly, there is nothing to debounce against yet — so the overlays have to
+        // be seeded here. Without this they held nil until the pointer settled on a
+        // *different* screen, which on the common single-display Mac is never: the
+        // captions fell back to `NSScreen.main`, i.e. FlowState's own window.
+        syncOverlayDisplays()
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main) { [weak self] _ in
@@ -122,6 +128,8 @@ final class AppState: ObservableObject {
                     // there is nothing to debounce against.
                     self?.displayWatcher.resync()
                     guard let self else { return }
+                    // The overlays may be sitting on a display that no longer exists.
+                    self.syncOverlayDisplays()
                     Task { await self.refreshDisplays() }
                 }
             }
@@ -135,15 +143,44 @@ final class AppState: ObservableObject {
         // The bubble goes wherever the work is, always — it is a thing on screen, and a
         // camera preview on a screen you are not looking at is not a preview.
         cameraBubble.followDisplay(id)
-        captions.screen = NSScreen.screens.first {
-            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id
-        }
+        syncOverlayDisplays()
 
         // The recording follows only if the user asked for "the active display" rather
         // than pinning one. Pinning a display and having it wander would be worse than
         // not following at all.
         guard isFollowingActiveDisplay, recorder.isRecording else { return }
         activeVideo?.follow(displayID: id)
+    }
+
+    /// Points the two over-everything overlays — the caption strip and the widget — at
+    /// the active screen, or at nothing.
+    ///
+    /// Deliberately independent of `settings.screenDisplayID`. That setting pins which
+    /// display the *model* is shown; these two are things the *user* looks at, and a
+    /// caption pinned to the monitor you are not sitting at is not a caption. So the
+    /// overlays follow the active screen whatever the capture mode is doing — see
+    /// `ActiveScreenOverlay` for the rule, including why an unresolved active screen
+    /// means off rather than a guess.
+    private func syncOverlayDisplays() {
+        let attached = NSScreen.screens.compactMap {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+        }
+        let active = displayWatcher.current ?? ScreenCapture.activeDisplayID()
+        let target = ActiveScreenOverlay.target(enabled: settings.captions,
+                                                active: active, attached: attached)
+        // The widget is not the transcript, so it is not gated on the captions setting —
+        // only on there being a screen to be on at all.
+        let widget = ActiveScreenOverlay.target(enabled: true, active: active, attached: attached)
+        let changed = captions.displayID != target
+        captions.followDisplay(target)
+        hud.followDisplay(widget)
+        // Greppable, and only on a change: this is the one decision that cannot be unit
+        // tested — it needs a second monitor and a hand on the mouse — so it says out
+        // loud where the overlays went and, when they went nowhere, that it was on
+        // purpose. Pairs with the `[display] attention ->` line above it.
+        guard changed else { return }
+        let where_ = target.map(String.init) ?? "off (\(attached.count) displays, active=\(active.map(String.init) ?? "none"))"
+        FileHandle.standardError.write(Data("[display] captions -> \(where_)\n".utf8))
     }
 
     func applyCameraBubble() {
@@ -376,11 +413,31 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Listens for a few seconds and sets the clap dial from what it hears.
+    ///
+    /// Opens the microphone itself if nothing else has: the panel is reachable with no
+    /// session running and the wake phrase switched off, and a calibration that silently
+    /// requires both would be one more thing to have got wrong before it works.
+    func startClapCalibration() {
+        openMicrophone(for: "calibration")
+        wake.beginClapCalibration()
+    }
+
+    func finishClapCalibration() -> ClapCalibration.Result? {
+        let result = wake.endClapCalibration()
+        releaseMicrophone(for: "calibration")
+        return result
+    }
+
     /// Subtitles over whatever the user is doing. See `CaptionBar`.
     let captions = CaptionController()
 
     func applyCaptions() {
         captions.isEnabled = settings.captions
+        // Switching them back on has to re-resolve where they go: the pointer has very
+        // likely moved since they were switched off, and nothing reports a change that
+        // happened while nobody was listening.
+        syncOverlayDisplays()
         objectWillChange.send()
     }
 
@@ -477,6 +534,17 @@ final class AppState: ObservableObject {
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(700))
                 self.captions.isEnabled = true
+                // The test hook turns them on behind the setting's back, so it has to
+                // resolve a screen too — otherwise the caption has nowhere to go.
+                // …and falls back to any attached screen, because a binary launched
+                // straight from the command line has no key window, so `NSScreen.main`
+                // is nil and every other route to a display id returns nothing.
+                let anyScreen = NSScreen.screens.first.flatMap {
+                    ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+                }
+                self.captions.followDisplay(self.displayWatcher.current
+                                            ?? ScreenCapture.activeDisplayID()
+                                            ?? anyScreen)
                 self.captions.say(.assistant, text)
             }
         }
@@ -1111,7 +1179,13 @@ final class AppState: ObservableObject {
             // session is open: once there is one, the words are already going somewhere
             // that understands them, and running a recogniser as well would be paying
             // twice to hear the same sentence.
-            if !muted, !self.client.isConnected, self.settings.wakeWord {
+            // Calibrating overrides the gate entirely. Measuring your clap is something
+            // you do while looking at the panel, which is usually mid-conversation — and
+            // the gate skipped the feed whenever a session was open, so "teach it my
+            // clap" heard silence and reported that the microphone was not working.
+            if self.wake.isCalibrating {
+                self.wake.feed(data)
+            } else if !muted, !self.client.isConnected, self.settings.wakeWord {
                 self.wake.feed(data)
             }
             if route.toMeasurement { self.utterance.ingest(pcm16: data) }

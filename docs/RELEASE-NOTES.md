@@ -5,6 +5,82 @@ goes missing — what it does *not* do yet.
 
 ---
 
+## The overlays follow the active screen
+
+The two things FlowState draws over everybody else's windows — the caption strip and the
+floating widget — now go to the screen you are working on, and stay off when they cannot
+tell which one that is.
+
+### What "follows the active screen" means
+
+The active screen is the display the **pointer** has settled on, not the one holding
+FlowState's window. That distinction is the whole feature: this is a voice assistant, so
+its own window is usually parked on a monitor you are not looking at, and following it
+means putting the subtitles for what you are doing on the screen where you are not doing
+it. A display counts as active only once the pointer has held still on it for half a
+second, so dragging a window across a shared edge does not drag the captions with it —
+that rule is `ActiveDisplayGate`, and it is the same one the camera bubble and a running
+recording already use.
+
+| | Before | Now |
+|---|---|---|
+| Caption strip | Moved on the next line spoken, and only after the pointer had settled on a *different* display at least once. Until then it fell back to `NSScreen.main` — FlowState's own window. | Placed on the active screen from launch, and a caption already on screen moves with you mid-sentence. |
+| Floating widget | Picked a corner of whichever screen the pointer was on when it was switched on, then stayed there forever. | Follows the active screen, keeping the corner you dragged it to — 24 points in from the bottom-right of a laptop display is 24 points in from the bottom-right of a 5K one. |
+
+### Off beats guessing
+
+With more than one display attached and no settled answer for which is active, the caption
+strip **stays off** rather than appearing on one of them. There is no honest fallback: the
+available one, `NSScreen.main`, is the screen holding the key window, which is the wrong
+answer by construction. One display attached is the exception — there is no wrong answer
+there, so an unresolved pointer is not a reason to withhold anything.
+
+The same rule hides an overlay whose display has been unplugged, and re-places it when the
+display list changes.
+
+### What it does not change
+
+- **The captions setting still defaults to on.** "Off unless it can resolve a screen" is a
+  runtime guardrail, not a new default. The switch is in **Settings › Look › Captions**.
+- **Which display the *model* is shown is a separate setting**, and it already followed the
+  active display. `Settings › Screen › Display` pins a monitor for screenshots and for
+  screen recordings; the overlays ignore that pin on purpose. It says which screen the
+  assistant looks at, and these two are things *you* look at — a caption pinned to the
+  monitor you are not sitting at is not a caption.
+- **The widget is not gated on the captions switch.** It is not the transcript; it only
+  needs a screen to be on.
+- **Overlays are still captured by screen recordings.** Nothing excludes the caption strip
+  or the widget from ScreenCaptureKit, so both appear in a `.audioScreen` movie of the
+  display they are on. Turn them off before recording if that matters.
+- **Nothing follows Spaces or full-screen state** beyond what `.canJoinAllSpaces` and
+  `.fullScreenAuxiliary` already did.
+
+### Accessibility
+
+- The caption strip is now readable by VoiceOver: it carries the speaker's name and the
+  line as an accessibility label and value. The panel ignores the mouse, which made it
+  invisible to hit-testing — that was never a reason to make it invisible to a screen
+  reader.
+- Under **Reduce Transparency** the blur behind the strip is dropped for a near-opaque
+  fill and a brighter border. That loses the look and keeps the words, which is the right
+  way round for a strip whose entire job is being legible over content nobody chose.
+
+### Where it lives
+
+| | |
+|---|---|
+| `VibeVoiceCore/ActiveScreenOverlay.swift` | Which screen an overlay belongs on, and where on it |
+| `VibeVoiceCore/ActiveDisplay.swift` | What makes a display active in the first place |
+| `VibeVoice/CaptionBar.swift` | The strip, and its accessibility and Reduce Transparency fallbacks |
+| `VibeVoice/HUDWindow.swift` | The widget, and the corner it keeps |
+| `VibeVoice/AppState.swift` | `syncOverlayDisplays()` — the one place both are pointed |
+
+Tests: `ActiveScreenOverlayTests`, `ActiveDisplayGateTests` (`swift test`). Placement on a
+live second monitor is not unit-testable; `FLOWSTATE_CAPTION_TEST="some text"` puts a
+caption up without a conversation for checking it by eye.
+
+---
+
 ## Screen and camera recording
 
 The record button can now capture pictures as well as sound.

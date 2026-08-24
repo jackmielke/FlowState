@@ -190,6 +190,12 @@ struct AppSettings: Codable, Equatable {
     /// On by default. The app's window is usually not in front — it is a voice assistant
     /// — so the transcript inside it is invisible exactly when it matters most: when it
     /// has misheard you and you cannot tell why the answer is strange.
+    ///
+    /// **Follows the active screen.** On is not the same as visible: the strip appears on
+    /// whichever display the pointer has settled on, and with several attached and no
+    /// settled answer it stays off rather than picking one. That guardrail lives in
+    /// `ActiveScreenOverlay`, not here — this switch is only the user's intent, and there
+    /// is no reason to persist the accident of where a pointer happened to be.
     var captions: Bool = true
 
     /// Show the time when ambient mode has faded everything else away.
@@ -238,8 +244,12 @@ struct AppSettings: Codable, Equatable {
     /// backwards.
     var cameraMirrored: Bool = false
 
-    /// The floating widget: a small always-on-top panel that follows you between apps
-    /// and Spaces, so FlowState is reachable without its window in front.
+    /// The floating widget: a small always-on-top panel that follows you between apps,
+    /// Spaces and displays, so FlowState is reachable without its window in front.
+    ///
+    /// Follows the active screen like the captions do, keeping whichever corner it was
+    /// dragged to. Unlike the captions it is not the transcript, so it is not gated on
+    /// `captions` — only on there being a screen to be on.
     var hudEnabled: Bool = false
     var hudStyle: HUDStyle = .pill
 

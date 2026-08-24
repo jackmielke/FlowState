@@ -105,6 +105,10 @@ final class WakeListener {
     /// Live numbers for the tuning panel.
     var roomLevel: Float { claps.roomLevel }
     var clapThreshold: Float { claps.threshold }
+    /// The loudest thing heard in the last moment. Shown live, because a meter that
+    /// visibly moves when you speak is the difference between "it is not detecting much"
+    /// and knowing the microphone is reaching this code at all.
+    var inputPeak: Float { claps.recentPeak }
 
     func beginClapCalibration() { claps.beginCalibration() }
     func endClapCalibration() -> ClapCalibration.Result? { claps.endCalibration() }
@@ -137,7 +141,9 @@ final class WakeListener {
         // roughly half of all claps, rejected by arithmetic rather than by sound.
         if claps.feed(pcm16) {
             Task { @MainActor [weak self] in
-                guard let self, self.clapEnabled else { return }
+                // Calibrating is measuring, not arming: a pair completed while teaching
+                // it your clap must not also open a session.
+                guard let self, self.clapEnabled, !self.claps.isCalibrating else { return }
                 self.lastHeard = "(two claps)"
                 self.onWake?()
             }
@@ -233,6 +239,10 @@ final class ClapBox: @unchecked Sendable {
     /// order as the thing being measured. Counting samples cannot drift and cannot jitter.
     private var samplesSeen = 0
 
+    /// Decays rather than resetting, so a meter driven by it falls smoothly instead of
+    /// flickering between a peak and zero.
+    private var peakHold: Float = 0
+
     /// 10 ms at 24 kHz. Fine enough to see a clap's attack and its decay as separate
     /// things, coarse enough that a peak is a handful of comparisons.
     private static let subFrame = 240
@@ -252,6 +262,7 @@ final class ClapBox: @unchecked Sendable {
                 var m: Int32 = 0
                 for k in i..<end { m = Swift.max(m, Int32(p[k].magnitude)) }
                 let peak = Float(m) / 32_767
+                peakHold = Swift.max(peak, peakHold * 0.88)
                 let at = Double(samplesSeen + i) / 24_000
                 if recording != nil { recording?.append(.init(at: at, peak: peak)) }
 
@@ -292,6 +303,10 @@ final class ClapBox: @unchecked Sendable {
 
     var roomLevel: Float {
         lock.lock(); defer { lock.unlock() }; return detector.roomLevel
+    }
+
+    var recentPeak: Float {
+        lock.lock(); defer { lock.unlock() }; return peakHold
     }
 
     /// What a clap has to beat right now, for the tuning display.

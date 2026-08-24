@@ -74,7 +74,19 @@ struct WakeTuningView: View {
                 Text("\(db(state.wake.roomLevel)) · a clap needs \(db(state.wake.clapThreshold))")
                     .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.textDim)
             }
+            // Two bars: the room, and what the microphone is hearing right now. The live
+            // one is the answer to "it is not detecting much" — a meter that visibly moves
+            // when you speak proves the audio is reaching this code, and one that does not
+            // move says the problem is upstream of every threshold in this panel.
             meter(state.wake.roomLevel)
+            HStack {
+                Text("Hearing now")
+                    .font(.system(size: 11)).foregroundStyle(Theme.textDim)
+                Spacer()
+                Text(db(state.wake.inputPeak))
+                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.textDim)
+            }
+            meter(state.wake.inputPeak)
 
             HStack {
                 Text("Sensitivity").font(.system(size: 12.5)).foregroundStyle(Theme.text)
@@ -136,7 +148,7 @@ struct WakeTuningView: View {
     /// Records for a few seconds, then sets the dial from what it heard.
     private func start() {
         result = nil
-        state.wake.beginClapCalibration()
+        state.startClapCalibration()
         countdown = listenFor
         Task { @MainActor in
             for remaining in stride(from: listenFor - 1, through: 0, by: -1) {
@@ -144,7 +156,7 @@ struct WakeTuningView: View {
                 countdown = remaining
             }
             countdown = nil
-            guard let r = state.wake.endClapCalibration() else {
+            guard let r = state.finishClapCalibration() else {
                 result = "I heard nothing at all — is the microphone working?"
                 return
             }

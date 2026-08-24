@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import VibeVoiceCore
 
 /// The little always-there widget, like the one Wispr Flow floats on the desktop.
 ///
@@ -87,13 +88,30 @@ final class HUDPanel: NSPanel {
                                y: visible.minY + 24))
     }
 
+    /// Moves to the same corner of another screen, following the work.
+    ///
+    /// The corner, not the default corner: the widget is draggable, so wherever it is
+    /// sitting is somewhere the user put it. Parked 24 points in from the bottom-right it
+    /// arrives 24 points in from the bottom-right, on a display of any size. The
+    /// arithmetic is in `ActiveScreenOverlay`, where it can be tested without owning a
+    /// second monitor.
+    func follow(screen next: NSScreen) {
+        let visible = next.visibleFrame
+        // `NSWindow.screen` is nil for a panel that has not been ordered front yet, which
+        // is the case on the very first placement. Nothing to move *from*, so clamp onto
+        // the target instead of guessing a corner to preserve.
+        guard let current = screen else {
+            return setFrameOrigin(ActiveScreenOverlay.clamped(frame, in: visible))
+        }
+        guard current !== next else { return }
+        setFrameOrigin(ActiveScreenOverlay.moved(frame, from: current.visibleFrame, to: visible))
+    }
+
     /// Keeps the widget on screen after a monitor is unplugged or resolution changes.
     func nudgeBackOnScreen() {
         guard let visible = (screen ?? NSScreen.main)?.visibleFrame else { return }
-        var f = frame
-        f.origin.x = min(max(f.origin.x, visible.minX + 8), visible.maxX - f.width - 8)
-        f.origin.y = min(max(f.origin.y, visible.minY + 8), visible.maxY - f.height - 8)
-        if f.origin != frame.origin { setFrameOrigin(f.origin) }
+        let origin = ActiveScreenOverlay.clamped(frame, in: visible)
+        if origin != frame.origin { setFrameOrigin(origin) }
     }
 }
 
@@ -103,11 +121,34 @@ final class HUDController {
     private var panel: HUDPanel?
     private weak var state: AppState?
 
+    /// The active screen, remembered so a widget switched on later starts in the right
+    /// place instead of wherever the pointer happened to be at that instant.
+    private var displayID: CGDirectDisplayID?
+
     init(state: AppState) { self.state = state }
 
     func apply() {
         guard let state else { return }
         state.settings.hudEnabled ? show() : hide()
+    }
+
+    /// Follows the screen being worked on, the way the captions and the camera bubble do.
+    ///
+    /// An id that no longer matches an attached display is remembered but not acted on:
+    /// the widget stays where it is rather than being flung at a monitor that has been
+    /// unplugged. `nudgeBackOnScreen` already handles that case on its own notification.
+    func followDisplay(_ id: CGDirectDisplayID?) {
+        guard displayID != id else { return }
+        displayID = id
+        guard let panel, let screen = Self.screen(for: id) else { return }
+        panel.follow(screen: screen)
+    }
+
+    private static func screen(for id: CGDirectDisplayID?) -> NSScreen? {
+        guard let id else { return nil }
+        return NSScreen.screens.first {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id
+        }
     }
 
     private func show() {
@@ -124,6 +165,9 @@ final class HUDController {
             container.addSubview(host)
             let p = HUDPanel(content: container, size: style.size)
             p.moveToDefaultCorner()
+            // Switched on while the pointer is elsewhere: land on the active screen
+            // rather than the one the default corner happened to pick.
+            if let screen = Self.screen(for: displayID) { p.follow(screen: screen) }
             panel = p
             // A display change can leave it stranded off-screen.
             NotificationCenter.default.addObserver(

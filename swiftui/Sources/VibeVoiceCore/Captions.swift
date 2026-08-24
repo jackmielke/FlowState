@@ -15,10 +15,14 @@ public struct CaptionState: Equatable, Sendable {
 
     public struct Line: Equatable, Sendable {
         public let speaker: Speaker
+        /// What fits.
         public let text: String
-        public init(speaker: Speaker, text: String) {
+        /// All of it, for the hover.
+        public let full: String
+        public init(speaker: Speaker, text: String, full: String? = nil) {
             self.speaker = speaker
             self.text = text
+            self.full = full ?? text
         }
     }
 
@@ -32,6 +36,9 @@ public struct CaptionState: Equatable, Sendable {
     public var maxCharacters = 180
 
     public private(set) var line: Line?
+    /// Whether the last thing said had to be cut down to fit. The panel uses it to decide
+    /// whether hovering is worth anything.
+    public private(set) var wasTruncated = false
     private var updatedAt: Date?
     private var finished = false
 
@@ -41,7 +48,9 @@ public struct CaptionState: Equatable, Sendable {
     public mutating func say(_ speaker: Speaker, _ text: String, at now: Date, done: Bool = false) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        line = Line(speaker: speaker, text: Self.tail(trimmed, limit: maxCharacters))
+        wasTruncated = trimmed.count > maxCharacters
+        line = Line(speaker: speaker, text: Self.tail(trimmed, limit: maxCharacters),
+                    full: trimmed)
         updatedAt = now
         finished = done
     }
@@ -51,6 +60,7 @@ public struct CaptionState: Equatable, Sendable {
         line = nil
         updatedAt = nil
         finished = false
+        wasTruncated = false
     }
 
     /// Whether the panel should be on screen.

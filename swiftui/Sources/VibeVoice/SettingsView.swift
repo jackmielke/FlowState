@@ -498,7 +498,7 @@ struct SettingsView: View {
                         get: { state.settings.hudEnabled },
                         set: { state.settings.hudEnabled = $0; state.applyHUD() }))
                 }
-                caption("A small panel that floats above other apps and follows you between Spaces and full-screen windows. Drag it anywhere; clicking the orb opens FlowState. It never takes focus, so it cannot interrupt what you are typing.")
+                caption("A small panel that floats above other apps and follows you between Spaces, full-screen windows and displays. Drag it anywhere; it keeps that corner when it follows the active screen, whatever size the next display is. Clicking the orb opens FlowState. It never takes focus, so it cannot interrupt what you are typing.")
 
                 if state.settings.hudEnabled {
                     SegmentedPicker(options: HUDStyle.allCases.map { (value: $0, label: $0.label) },
@@ -714,7 +714,7 @@ struct SettingsView: View {
                         get: { state.settings.captions },
                         set: { state.settings.captions = $0; state.applyCaptions() }))
                 }
-                caption("A small floating strip near the bottom of whichever screen you are working on, showing what you said and what it is saying back. It follows you between displays, never takes a click, and fades a few seconds after the last word. Its real job is the misheard sentence — seeing your own words is what explains an answer to a question you did not ask.")
+                caption("A small floating strip near the bottom of whichever screen you are working on, showing what you said and what it is saying back. It follows the active screen — move to another display and a caption already up moves with you — never takes a click, and fades a few seconds after the last word. With more than one display attached and no idea yet which one you are on, it stays off rather than appearing on the wrong one. Its real job is the misheard sentence: seeing your own words is what explains an answer to a question you did not ask.")
             }
 
             section("Sounds") {

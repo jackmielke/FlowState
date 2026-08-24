@@ -78,3 +78,33 @@ final class CaptionStateTests: XCTestCase {
         XCTAssertEqual(c.line?.speaker, .assistant)
     }
 }
+
+extension CaptionStateTests {
+
+    /// Hovering is only offered when something is actually hidden, so the panel knows
+    /// whether to take the mouse at all.
+    func testTruncationIsReported() {
+        var c = CaptionState()
+        c.say(.assistant, "short", at: t0)
+        XCTAssertFalse(c.wasTruncated)
+
+        c.say(.assistant, String(repeating: "word ", count: 80), at: t0)
+        XCTAssertTrue(c.wasTruncated)
+    }
+
+    /// And the whole thing is kept, so there is something to reveal.
+    func testTheFullTextSurvivesTruncation() {
+        var c = CaptionState()
+        let long = (1...60).map { "word\($0)" }.joined(separator: " ")
+        c.say(.assistant, long, at: t0)
+        XCTAssertEqual(c.line?.full, long)
+        XCTAssertNotEqual(c.line?.text, long)
+    }
+
+    func testTruncationResetsWithTheLine() {
+        var c = CaptionState()
+        c.say(.assistant, String(repeating: "word ", count: 80), at: t0)
+        c.clear()
+        XCTAssertFalse(c.wasTruncated)
+    }
+}
