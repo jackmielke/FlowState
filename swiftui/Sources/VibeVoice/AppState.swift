@@ -549,6 +549,31 @@ final class AppState: ObservableObject {
             }
         }
 
+        // Connects, hangs up, and reports whether the microphone survived — the thing
+        // that decides whether the wake phrase still works after "go to sleep".
+        if ProcessInfo.processInfo.environment["FLOWSTATE_SLEEP_TEST"] == "1" {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(900))
+                self.applyWakeWord()
+                try? await Task.sleep(for: .seconds(3))
+                let before = self.audio.isCapturing
+                await self.connect()
+                try? await Task.sleep(for: .seconds(6))
+                let during = self.audio.isCapturing
+                self.disconnect()
+                try? await Task.sleep(for: .seconds(2))
+                let after = self.audio.isCapturing
+                let line = "[sleep-test] mic before=\(before) during=\(during) "
+                         + "AFTER SLEEP=\(after) holders=\(self.micHolders.sorted())\n"
+                FileHandle.standardError.write(Data(line.utf8))
+                // Also to a file: launched with `open` the app stays alive long enough to
+                // finish, but its stderr goes nowhere anybody can read.
+                try? line.write(to: URL(fileURLWithPath: "/tmp/flowstate-sleep-test.txt"),
+                                atomically: true, encoding: .utf8)
+                exit(after ? 0 : 1)
+            }
+        }
+
         // A way to see the whole path work without waiting for a real task to finish.
         // It goes through `Outreach.raise` like anything else, so the quiet rules apply:
         // set this while the screen is locked and nothing happens until it is unlocked.
@@ -1463,10 +1488,27 @@ final class AppState: ObservableObject {
         // stranded in memory rather than written to disk.
         if recorder.isRecording { finishRecording(reason: "the session ended") }
         client.disconnect()
-        audio.stop()
+
+        // Only if nothing else still wants the microphone.
+        //
+        // Hanging up used to close it unconditionally, which switched the wake phrase and
+        // the clap off until the app was restarted — "go to sleep" made it permanently
+        // deaf, so the one thing that could wake it again had no ears. The wake listener
+        // registers as a holder exactly so this can tell the difference between "the
+        // conversation is over" and "nobody needs the microphone".
+        if micHolders.isEmpty {
+            audio.stop()
+        } else {
+            Self.recordingLog.notice(
+                "keeping the microphone open for \(self.micHolders.sorted().joined(separator: ", "), privacy: .public)")
+        }
         connection = .idle
         sessionID = nil
         closeAssistantTurn()
+        // The tap survives, but the recogniser had been idle throughout the session —
+        // it is only fed while no session is open — so it is re-armed here rather than
+        // waiting up to fifty seconds for its own recycle.
+        if settings.wakeWord { wake.restart() }
         // Nothing more is coming down a socket that is closed, so any line still waiting
         // for its text is waiting forever. Say so now rather than leaving a blinking dot
         // on screen until the app is quit.

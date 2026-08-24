@@ -88,6 +88,18 @@ final class WakeListener {
         isRunning = false
     }
 
+    /// Throws away the current recognition task and starts a fresh one.
+    ///
+    /// A recognition task that has been fed nothing for the length of a conversation is
+    /// not reliably still listening, and waiting for the fifty-second recycle to notice
+    /// means up to fifty seconds where the wake phrase silently does nothing — right
+    /// after hanging up, which is exactly when somebody tries it.
+    func restart() {
+        guard isRunning else { return start() }
+        claps.reset()
+        beginTask()
+    }
+
     /// Two claps, detected from the samples directly — no recogniser involved. See
     /// `ClapDetector`. Kept here rather than in its own type because it is fed from the
     /// same tap and answers the same question.
