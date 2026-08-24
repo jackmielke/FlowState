@@ -167,6 +167,10 @@ enum NativeTools {
             parameters: [ToolParameter("page", description: "Page title, or a Notion page id.", required: true)]),
     ]
 
+    /// Settings, changeable out loud. Answered by `AppState` — they mutate app state,
+    /// which this enum has no access to on purpose.
+    @MainActor static var settingsSpecs: [ToolSpec] { SettingsTools.specs }
+
     static func run(_ name: String, args: [String: Any]) async -> String {
         switch name {
         case "get_context":     return context()

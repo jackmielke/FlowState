@@ -418,6 +418,15 @@ final class AppState: ObservableObject {
         RunLoop.main.add(t, forMode: .common)
         outreachTimer = t
 
+        // Opens Settings on a given tab at launch, for pointing somebody at a control
+        // rather than describing where it is. `open_settings` is the same thing by voice.
+        if let t = ProcessInfo.processInfo.environment["FLOWSTATE_OPEN_SETTINGS"], !t.isEmpty {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(600))
+                _ = self.openSettings(tab: t)
+            }
+        }
+
         // A way to see the whole path work without waiting for a real task to finish.
         // It goes through `Outreach.raise` like anything else, so the quiet rules apply:
         // set this while the screen is locked and nothing happens until it is unlocked.
@@ -478,7 +487,8 @@ final class AppState: ObservableObject {
     /// Tools answered natively, in-process, without Claude Code.
     let tools = ToolRegistry(specs: NativeTools.specs
                                   + NativeTools.taskControlSpecs
-                                  + NativeTools.memorySpecs)
+                                  + NativeTools.memorySpecs
+                                  + SettingsTools.specs)
 
     /// Pause or resume the queue. Announced in the transcript, because a queue that
     /// silently stopped taking work would look like the app had died.
@@ -1660,6 +1670,13 @@ final class AppState: ObservableObject {
                     result = self.setQueuePaused((args["paused"] as? Bool) ?? true)
                 case "summarize_conversation":
                     result = self.summarizeSessionNow(showPanel: false)
+                case "change_setting":
+                    result = self.changeSetting(name: args["setting"] as? String ?? "",
+                                                to: args["value"] as? String ?? "")
+                case "list_settings":
+                    result = self.listSettings()
+                case "open_settings":
+                    result = self.openSettings(tab: args["tab"] as? String)
                 case "go_to_sleep":
                     result = self.goToSleep()
                 case "memory_status":
@@ -2648,6 +2665,105 @@ final class AppState: ObservableObject {
 
     /// The voice-reachable privacy switch. Pausing takes effect on the next line
     /// recorded, which is the next thing either of us says.
+    /// Applies a spoken settings change. See `SettingsTools` for what is reachable and
+    /// `SettingCommand` for how the words are matched.
+    func changeSetting(name: String, to spoken: String) -> String {
+        switch SettingCommand.resolve(setting: name, value: spoken,
+                                      catalogue: SettingsTools.catalogue(settings)) {
+        case .failed(let why):
+            return why.spoken
+        case .ok(let choice, let value):
+            let said = apply(choice.key, value)
+            objectWillChange.send()
+            return said
+        }
+    }
+
+    /// One switch statement rather than key paths and reflection: every one of these has
+    /// something to do afterwards — repaint, re-register a hotkey, open a microphone —
+    /// and a generic setter would still need this list to know which.
+    private func apply(_ key: String, _ value: String) -> String {
+        let on = value == "on"
+        switch key {
+        case "voice":
+            settings.voice = value
+            return "Voice is \(value)." + (client.isConnected ? " You'll hear it on the next reply." : "")
+        case "backdrop":
+            if let b = Backdrop.allCases.first(where: { $0.label.lowercased() == value }) {
+                settings.backdrop = b
+                applyEffectiveAppearance()
+            }
+            return "Backdrop is \(value)."
+        case "motionStyle":
+            if let m = MotionStyle.allCases.first(where: { $0.label.lowercased() == value }) {
+                settings.motionStyle = m
+                // Choosing a moving background and not seeing one is the obvious trap.
+                if settings.backdrop != .motion {
+                    settings.backdrop = .motion
+                    applyEffectiveAppearance()
+                    return "Moving background is \(value), and I switched the backdrop to it."
+                }
+            }
+            return "Moving background is \(value)."
+        case "appearance":
+            settings.appearance = AppearanceMode.allCases.first { $0.label.lowercased() == value } ?? .system
+            applyEffectiveAppearance()
+            return "Appearance is \(value)."
+        case "captureMode":
+            if let m = CaptureMode.allCases.first(where: { $0.label.lowercased() == value }) {
+                settings.captureMode = m
+            }
+            return "Recordings will capture \(value)."
+        case "cameraSize":
+            if let z = CameraSize.allCases.first(where: { $0.label.lowercased() == value }) {
+                setCameraSize(z)
+            }
+            return "Camera is \(value)."
+        case "cameraShape":
+            if let sh = CameraShape.allCases.first(where: { $0.label.lowercased() == value }) {
+                setCameraShape(sh)
+            }
+            return "Camera is a \(value)."
+        case "qualityMode":
+            setQualityMode(value == "budget" ? .budget : .quality)
+            return "\(value.capitalized) mode."
+        case "hudEnabled":       settings.hudEnabled = on; applyHUD();          return widgetSaid(on)
+        case "cameraBubble":     settings.cameraBubble = on; applyCameraBubble(); return "Camera bubble \(value)."
+        case "continuousScreen": settings.continuousScreen = on; syncScreenTimer(); return "Screen watching \(value)."
+        case "wakeWord":         settings.wakeWord = on; applyWakeWord();        return "Wake phrase \(value)."
+        case "clapToWake":       settings.clapToWake = on; applyWakeWord();      return "Clap to wake \(value)."
+        case "proactive":        settings.proactive = on;                        return "Proactive updates \(value)."
+        case "ambientMode":      settings.ambientMode = on;                      return "Ambient mode \(value)."
+        case "devMode":          settings.devMode = on;                          return "Dev Mode \(value)."
+        case "devNarrate":       settings.devNarrate = on;                       return "Narration \(value)."
+        case "menuBarEnabled":   settings.menuBarEnabled = on;                   return "Menu bar icon \(value)."
+        default:                 return "I couldn't change that one."
+        }
+    }
+
+    private func widgetSaid(_ on: Bool) -> String {
+        on ? "Floating widget on." : "Floating widget off."
+    }
+
+    func listSettings() -> String {
+        let lines = SettingsTools.catalogue(settings).map { c -> String in
+            c.values.isEmpty ? c.spoken : "\(c.spoken) — \(c.values.joined(separator: ", "))"
+        }
+        return "I can change these by voice: " + lines.joined(separator: "; ") + "."
+    }
+
+    func openSettings(tab: String?) -> String {
+        if let raw = tab?.lowercased(),
+           let t = SettingsTab.allCases.first(where: { $0.rawValue.lowercased() == raw
+                                                     || $0.label.lowercased() == raw }) {
+            // The pane keeps its tab in AppStorage, so this is where it lives.
+            UserDefaults.standard.set(t.rawValue, forKey: "settings.tab")
+        }
+        showSettings = true
+        objectWillChange.send()
+        return tab.map { "Settings, on the \($0) tab." } ?? "Settings is open."
+    }
+
     /// "You can go to sleep." Hangs up, after letting the goodbye finish.
     ///
     /// The delay is the whole difference between this feeling like an answer and feeling
