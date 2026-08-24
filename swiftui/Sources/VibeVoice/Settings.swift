@@ -164,6 +164,10 @@ struct AppSettings: Codable, Equatable {
     /// Two claps also wake it. Independent of the phrase, and more reliable across a
     /// room: a clap does not have to be understood, only heard.
     var clapToWake: Bool = true
+    /// 0...1, higher is easier to trigger. Defaults low: a wake trigger that fires by
+    /// accident is worse than one that needs a second try, because the accident happens
+    /// while you are doing something else.
+    var clapSensitivity: Double = 0.35
 
     /// Commit what each task changed, on the current branch, when it finishes.
     ///
@@ -261,7 +265,7 @@ struct AppSettings: Codable, Equatable {
         case devNarrate, devNarrateInterval, devNarrateMax, devPermissionMode
         case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
         case photoRotateSeconds, menuBarEnabled, summonHotkey, devNudgeDismissed
-        case connectHotkey, proactive, wakeWord, wakePhrase, clapToWake
+        case connectHotkey, proactive, wakeWord, wakePhrase, clapToWake, clapSensitivity
         case motionStyle, motionIntensity, motionAssets
         case devAutoCommit, devAutoPush, hudEnabled, hudStyle, cameraBubble
         case cameraSize, cameraCorner, cameraShape, cameraControls, cameraMirrored
@@ -323,6 +327,7 @@ extension AppSettings {
         wakeWord          = v(.wakeWord, d.wakeWord)
         wakePhrase        = v(.wakePhrase, d.wakePhrase)
         clapToWake        = v(.clapToWake, d.clapToWake)
+        clapSensitivity   = v(.clapSensitivity, d.clapSensitivity)
         devNudgeDismissed = v(.devNudgeDismissed, d.devNudgeDismissed)
         devAutoCommit     = v(.devAutoCommit, d.devAutoCommit)
         devAutoPush       = v(.devAutoPush, d.devAutoPush)

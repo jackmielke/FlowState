@@ -682,6 +682,10 @@ struct SettingsView: View {
                 }
             }
 
+            section("Tuning the wake trigger") {
+                WakeTuningView(state: state)
+            }
+
             section("Tools") {
                 ForEach(state.tools.specs) { spec in
                     HStack(alignment: .top) {

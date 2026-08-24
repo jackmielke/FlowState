@@ -96,6 +96,21 @@ final class WakeListener {
     /// Whether the clap wake is armed. Cheap either way; the detector is a few floats.
     var clapEnabled = false
 
+    /// 0...1. Higher triggers more easily. See `ClapDetector.sensitivity`.
+    var clapSensitivity: Float {
+        get { claps.sensitivity }
+        set { claps.sensitivity = newValue }
+    }
+
+    /// Live numbers for the tuning panel.
+    var roomLevel: Float { claps.roomLevel }
+    var trace: [WakeTrace] { claps.trace }
+    func clearTrace() { claps.clearTrace() }
+
+    /// Everything the phrase and the claps did, whether or not it woke anything. Kept so
+    /// a false trigger can be looked at afterwards rather than remembered.
+    private(set) var phraseTrace: [WakeTrace] = []
+
     /// Called from the audio tap with the same buffers the socket receives.
     nonisolated func feed(_ pcm16: Data) {
         guard let format = Self.format() else { return }
@@ -108,7 +123,7 @@ final class WakeListener {
             guard let src = raw.baseAddress, let dst = buffer.int16ChannelData?[0] else { return }
             memcpy(dst, src, frames * 2)
         }
-        if let peak = Self.peak(pcm16), claps.feed(peak: peak) {
+        if let peak = Self.peak(pcm16), claps.feed(peak: peak, at: Date()) {
             Task { @MainActor [weak self] in
                 guard let self, self.clapEnabled else { return }
                 self.lastHeard = "(two claps)"
@@ -148,6 +163,7 @@ final class WakeListener {
                     let text = result.bestTranscription.formattedString
                     self.lastHeard = text
                     if self.state.heard(text, phrase: self.phrase, now: Date()) {
+                        self.notePhrase(.woke, detail: text)
                         self.onWake?()
                     }
                     if result.isFinal { self.state.utteranceEnded() }
@@ -157,6 +173,13 @@ final class WakeListener {
         }
         state.utteranceEnded()
     }
+
+    private func notePhrase(_ kind: WakeTrace.Kind, detail: String) {
+        phraseTrace.insert(WakeTrace(at: Date(), kind: kind, peak: 0, detail: detail), at: 0)
+        if phraseTrace.count > 20 { phraseTrace.removeLast() }
+    }
+
+    func clearPhraseTrace() { phraseTrace.removeAll() }
 
     private func endTask() {
         request?.endAudio()
@@ -169,22 +192,72 @@ final class WakeListener {
 
 /// The clap detector, reachable from the audio thread.
 ///
-/// `ClapDetector` is a value type with a running estimate of the room in it, so it has to
+/// `ClapDetector` is a value type holding a running estimate of the room, so it has to
 /// live somewhere mutable — and that somewhere is written to every 20 ms from the capture
 /// tap. A lock rather than the main actor, for the same reason `UtteranceRecorder` uses
-/// one: hopping queues for a few floats per frame would cost more than the work.
+/// one: hopping queues for a few floats a frame would cost more than the work.
 final class ClapBox: @unchecked Sendable {
     private let lock = NSLock()
     private var detector = ClapDetector()
     private let started = Date()
 
-    func feed(peak: Float) -> Bool {
+    /// The last few decisions, newest first, for the tuning panel. Bounded — this is a
+    /// diagnostic, not a log, and it is written to from the audio thread.
+    private var recent: [WakeTrace] = []
+
+    var sensitivity: Float {
+        get { lock.lock(); defer { lock.unlock() }; return detector.sensitivity }
+        set { lock.lock(); detector.sensitivity = newValue; lock.unlock() }
+    }
+
+    var roomLevel: Float {
+        lock.lock(); defer { lock.unlock() }; return detector.roomLevel
+    }
+
+    var trace: [WakeTrace] {
+        lock.lock(); defer { lock.unlock() }; return recent
+    }
+
+    func clearTrace() {
+        lock.lock(); recent.removeAll(); lock.unlock()
+    }
+
+    /// - Returns: true when the pair completed.
+    func feed(peak: Float, at now: Date) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        return detector.feed(peak: peak, at: Date().timeIntervalSince(started))
+        let event = detector.feed(peak: peak, at: now.timeIntervalSince(started))
+        switch event {
+        case .nothing:
+            return false
+        case .armed(let p):
+            note(WakeTrace(at: now, kind: .armed, peak: p, detail: "first of a pair — waiting for the second"))
+            return false
+        case .rejected(let why, let p):
+            note(WakeTrace(at: now, kind: .rejected, peak: p, detail: why))
+            return false
+        case .wake(let p):
+            note(WakeTrace(at: now, kind: .woke, peak: p, detail: "two claps"))
+            return true
+        }
+    }
+
+    private func note(_ t: WakeTrace) {
+        recent.insert(t, at: 0)
+        if recent.count > 40 { recent.removeLast() }
     }
 
     func reset() {
         lock.lock(); defer { lock.unlock() }
         detector.reset()
     }
+}
+
+/// One line in the tuning panel.
+struct WakeTrace: Identifiable, Sendable {
+    enum Kind: Sendable { case armed, rejected, woke }
+    let id = UUID()
+    let at: Date
+    let kind: Kind
+    let peak: Float
+    let detail: String
 }

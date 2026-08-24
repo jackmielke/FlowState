@@ -371,6 +371,7 @@ final class AppState: ObservableObject {
             }
             self.wake.phrase = self.settings.wakePhrase == "heyFlowState" ? .heyFlowState : .heyFlow
             self.wake.clapEnabled = self.settings.clapToWake
+            self.wake.clapSensitivity = Float(self.settings.clapSensitivity)
             self.wake.onWake = { [weak self] in
                 guard let self else { return }
                 // Already talking is the common case for a false positive, and there is
