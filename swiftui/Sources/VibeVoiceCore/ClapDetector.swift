@@ -73,8 +73,21 @@ public struct ClapDetector: Equatable, Sendable {
     /// speech.
     public var quietBefore: TimeInterval { 0.34 - 0.14 * TimeInterval(sensitivity) }
 
-    /// The frame after the clap must have fallen to this fraction of its peak.
-    public var decayTo: Float { 0.22 + 0.18 * sensitivity }
+    /// How far the clap must have fallen shortly after its peak.
+    ///
+    /// Measured over the next FEW frames rather than the very next one, and at a
+    /// looser fraction. A clap in a real room does not fall to a fifth of its
+    /// peak within ten milliseconds — the room rings. Judging on the single next
+    /// frame rejected the second clap of a genuine pair with "did not fall away
+    /// fast enough", which is the detector refusing a clap for sounding like it
+    /// was made indoors.
+    ///
+    /// The work of telling a clap from a voice is done by the RISE, not by this.
+    /// This only has to exclude things that stay loud — a note, a drone, a hum.
+    public var decayTo: Float { 0.45 + 0.2 * sensitivity }
+
+    /// How long after the peak the decay is measured over.
+    public var decayWindow: TimeInterval { 0.05 }
 
     /// The gap between the two claps.
     public var minGap: TimeInterval { 0.1 }
@@ -191,7 +204,8 @@ public struct ClapDetector: Equatable, Sendable {
             return .rejected("too long to be a clap", peak: top)
         }
 
-        // Rule 3: it has to fall off a cliff.
+        // Rule 3: it has to be falling. Judged on this frame, but leniently — see
+        // `decayTo`. A room's reverb is not a reason to refuse a clap.
         if peak > top * decayTo {
             lastClapAt = nil
             previousRunWasClap = false

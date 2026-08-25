@@ -654,6 +654,18 @@ final class AppState: ObservableObject {
                 say("recent peak", self.wake.inputPeak)
                 say("clap threshold", self.wake.clapThreshold)
                 say("last heard", self.wake.lastHeard.isEmpty ? "(nothing)" : self.wake.lastHeard)
+                out += "  --- what it made of every sound ---\n"
+                for t in (self.wake.trace + self.wake.phraseTrace)
+                            .sorted(by: { $0.at > $1.at }).prefix(12) {
+                    let kind: String
+                    switch t.kind {
+                    case .woke: kind = "WOKE"
+                    case .armed: kind = "armed"
+                    case .rejected: kind = "no"
+                    }
+                    let db = t.peak > 0 ? String(format: " %.0f dB", 20 * log10(t.peak)) : ""
+                    out += "  \(kind.padding(toLength: 6, withPad: " ", startingAt: 0))\(t.detail)\(db)\n"
+                }
                 try? out.write(to: URL(fileURLWithPath: "/tmp/flowstate-wake-diag.txt"),
                                atomically: true, encoding: .utf8)
                 FileHandle.standardError.write(Data(("[wake-diag]\n" + out).utf8))
