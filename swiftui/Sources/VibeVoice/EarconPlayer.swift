@@ -38,8 +38,29 @@ final class EarconPlayer {
             started = true
         }
         guard engine.isRunning else { return }
-        node.scheduleBuffer(buffer, completionHandler: nil)
+        node.scheduleBuffer(buffer) { [weak self] in
+            // Let go of the audio device once the sound has finished.
+            //
+            // This engine used to start on the first chime and stay running for the
+            // rest of the session — a second AVAudioEngine holding the same output
+            // device as the capture engine, which has voice processing on it during
+            // a conversation. Two engines contending for one device is what the
+            // crackling is. The chime is a fifth of a second; there is no reason to
+            // hold the hardware for the hour afterwards.
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(400))
+                self?.releaseIfIdle()
+            }
+        }
         if !node.isPlaying { node.play() }
+    }
+
+    /// Shuts down once nothing is queued. Called a moment after each sound.
+    private func releaseIfIdle() {
+        guard started, !node.isPlaying else { return }
+        node.stop()
+        engine.stop()
+        started = false
     }
 
     private func make(_ earcon: Earcon, format: AVAudioFormat) -> AVAudioPCMBuffer? {

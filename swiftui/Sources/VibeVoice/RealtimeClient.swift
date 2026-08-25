@@ -127,12 +127,18 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
         ]
         // Native tools answer in milliseconds; Dev Mode's dispatcher is appended only
         // when Dev Mode is on.
-        let tools = nativeTools + (s.devMode ? Self.devTools : [])
+        let tools = Self.sessionTools(s, nativeTools: nativeTools)
         if !tools.isEmpty {
             session["tools"] = tools
             session["tool_choice"] = "auto"
         }
         send(json: ["type": "session.update", "session": session])
+    }
+
+    /// Everything the model is told it can call. Exposed so a diagnostic can print
+    /// the real list rather than the native registry, which omits Dev Mode.
+    static func sessionTools(_ s: AppSettings, nativeTools: [[String: Any]]) -> [[String: Any]] {
+        nativeTools + (s.devMode ? Self.devTools : [])
     }
 
     // MARK: - Dev Mode tools
@@ -141,6 +147,13 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
         """
         DEV MODE is on. You can change code on this Mac by calling dispatch_to_claude_code.
         The working repo is \(repo).
+
+        NEVER say you are unable to do this. You have the tool; it works; use it. If
+        somebody asks you to tell Claude Code something, to edit the app, to fix a bug,
+        to build a feature, or to look at the code — that is a dispatch, whatever words
+        they used. Do not ask whether they want you to, do not explain that you are an
+        assistant without file access, and do not suggest they do it themselves. Call
+        the tool and say you are on it.
 
         Claude Code cannot hear this conversation, so `task` must be a complete,
         self-contained instruction — resolve "that", "it" and "the thing we just did"

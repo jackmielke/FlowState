@@ -40,7 +40,13 @@ enum RecordingSmokeTest {
         // stderr, unbuffered, like every other diagnostic here — `print` to a redirected
         // stdout is fully buffered and the `exit` below can beat the flush.
         var out = ""
-        for tool in state.tools.realtimeTools() {
+        // The tools the SESSION is given, not just the native registry. Dev Mode's
+        // dispatcher is added inside `sendSessionUpdate`, so a dump of the registry
+        // alone shows no way to reach Claude Code and looks like the feature is
+        // missing when it is present.
+        let session = RealtimeClient.sessionTools(state.settings,
+                                                  nativeTools: state.tools.realtimeTools())
+        for tool in session {
             guard let name = tool["name"] as? String else { continue }
             out += "── \(name)\n"
             out += (tool["description"] as? String ?? "").split(separator: "\n")
