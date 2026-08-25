@@ -26,6 +26,19 @@ if pgrep -x "$APP_BINARY" >/dev/null; then
   pgrep -x "$APP_BINARY" | while read -r pid; do
     echo "    stopping pid $pid ($(ps -o comm= -p "$pid"))"
   done
+  # Ask first, kill second.
+  #
+  # `pkill` sends SIGTERM and a Cocoa app does not turn that into a normal quit, so
+  # for months every rebuild killed the app with its voice-processing audio unit
+  # still attached to the shared output device — orphaning it inside coreaudiod.
+  # Enough of those and EVERY app on the Mac crackles, which is a strange thing to
+  # trace back to a build script. The app now tears down on SIGTERM too, but a real
+  # quit is still the polite path and runs the same cleanup with no race.
+  osascript -e 'tell application "FlowState" to quit' >/dev/null 2>&1 || true
+  for _ in 1 2 3 4 5 6 7 8; do
+    pgrep -x "$APP_BINARY" >/dev/null || break
+    sleep 0.25
+  done
   pkill -x "$APP_BINARY" || true
   sleep 1
 else

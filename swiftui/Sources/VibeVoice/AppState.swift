@@ -502,6 +502,19 @@ final class AppState: ObservableObject {
     /// Always-listening wake phrase. See `WakeListener`.
     let wake = WakeListener()
 
+    private var sigtermSource: DispatchSourceSignal?
+
+    /// Hand the audio device back, cleanly.
+    ///
+    /// Voice processing is an audio unit attached to the shared output device. Killed
+    /// without stopping the engine, it is left behind — and its effects are system
+    /// wide, which is why the symptom is Spotify crackling rather than anything in
+    /// this app.
+    func releaseAudioHardware() {
+        guard audio.isCapturing else { return }
+        audio.stop()
+    }
+
     /// Where microphone chunks are handled. Serial, and never the audio thread.
     private static let micQueue = DispatchQueue(label: "com.jackmielke.vibevoice.mic",
                                                 qos: .userInitiated)
@@ -1567,10 +1580,31 @@ final class AppState: ObservableObject {
             forName: NSApplication.willTerminateNotification,
             object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    guard let self, self.recorder.isRecording else { return }
-                    self.finishRecording(reason: "the app quit")
+                    guard let self else { return }
+                    if self.recorder.isRecording {
+                        self.finishRecording(reason: "the app quit")
+                    }
+                    self.releaseAudioHardware()
                 }
             }
+
+        // And on SIGTERM, which is how this app is actually killed.
+        //
+        // `pkill` — which relaunch.sh uses on every rebuild — sends SIGTERM, and a
+        // Cocoa app never turns that into `willTerminate`. So every relaunch left the
+        // voice-processing unit live and orphaned inside coreaudiod. Enough of those
+        // and every sound on the Mac crackles, in every app, until the daemon is
+        // restarted. That is the recurring bug, and this is where it comes from.
+        let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        term.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                self?.releaseAudioHardware()
+                exit(0)
+            }
+        }
+        term.resume()
+        sigtermSource = term
+        signal(SIGTERM, SIG_IGN)      // the dispatch source handles it instead
 
         // Which conversation we are in, before anything can be recorded into the wrong
         // one. The store already minted a fresh session id in its own init, so the
