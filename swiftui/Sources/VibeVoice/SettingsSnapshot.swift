@@ -56,6 +56,8 @@ enum SettingsSnapshot {
             }
             write(motionSheet(state: state, scheme: scheme),
                   to: dir.appendingPathComponent("motion-styles-\(name(scheme)).png"))
+            write(transcriptSheet(state: state, scheme: scheme),
+                  to: dir.appendingPathComponent("transcript-states-\(name(scheme)).png"))
             for style in MotionStyle.allCases {
                 write(gallery(style: style, scheme: scheme),
                       to: dir.appendingPathComponent("motion-picker-\(style.rawValue)-\(name(scheme)).png"))
@@ -144,6 +146,75 @@ enum SettingsSnapshot {
         .padding(22)
         .background(Theme.bg)
         .environment(\.colorScheme, scheme)
+    }
+
+    /// The transcript column in the states that are otherwise only reachable by talking
+    /// to the app for a while: live, pinned, hidden.
+    ///
+    /// Worth a picture rather than a test because each one is a claim made in pixels —
+    /// that a pinned transcript LOOKS locked, and that a hidden one does not look like a
+    /// transcript that has been thrown away.
+    private static func transcriptSheet(state: AppState, scheme: ColorScheme) -> some View {
+        let now = Date()
+        let said: [TranscriptItem] = [
+            TranscriptItem(speaker: .user,
+                           text: "keep this transcript around — I want to come back to it tomorrow",
+                           at: now.addingTimeInterval(-240)),
+            TranscriptItem(speaker: .assistant,
+                           text: "Pinned. It stays saved, retention skips it, and it is what opens next time.",
+                           at: now.addingTimeInterval(-232)),
+            TranscriptItem(speaker: .system,
+                           text: "✎ summary: pinned the conversation about transcript retention.",
+                           at: now.addingTimeInterval(-200)),
+            TranscriptItem(speaker: .user,
+                           text: "and fix the line where it heard \"jak\"",
+                           at: now.addingTimeInterval(-40)),
+        ]
+
+        return HStack(alignment: .top, spacing: 16) {
+            column("Live", TranscriptView(items: said, flattened: true))
+            column("Pinned", TranscriptView(items: said, pinned: true, flattened: true))
+            column("Hidden", hiddenColumn(lines: said.count))
+        }
+        .padding(22)
+        .background(Theme.bg)
+        .environment(\.colorScheme, scheme)
+    }
+
+    private static func column<V: View>(_ title: String, _ content: V) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 10.5, weight: .bold)).tracking(1.0)
+                .foregroundStyle(Theme.textFaint)
+            content
+                .frame(width: 300, height: 260, alignment: .top)
+                .background(Theme.sidebar)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Theme.hairline, lineWidth: 1))
+        }
+    }
+
+    /// The hidden state, drawn from the same words `TranscriptColumn` uses. Not the view
+    /// itself, which needs a live `AppState` whose settings this run must not rewrite.
+    private static func hiddenColumn(lines: Int) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: "eye.slash")
+                .font(.system(size: 19, weight: .light))
+                .foregroundStyle(Theme.textFaint.opacity(0.55))
+            Text("Transcript hidden")
+                .font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.textFaint)
+            Text("\(lines) lines still here, still being saved.\nNothing was deleted.")
+                .font(.system(size: 11))
+                .multilineTextAlignment(.center)
+                .foregroundStyle(Theme.textFaint.opacity(0.75))
+            Text("Show transcript")
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(Theme.accentInk)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(Capsule().fill(Theme.fill))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Rendering

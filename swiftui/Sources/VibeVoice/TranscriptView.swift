@@ -20,6 +20,14 @@ struct TranscriptView: View {
     var pinned: Bool = false
     var onEdit: (UUID, String) -> Void = { _, _ in }
     var onDelete: (UUID) -> Void = { _ in }
+    /// Draws the conversation without the scroll view around it.
+    ///
+    /// Only `SettingsSnapshot` passes this, for the same reason `SettingsView` has it:
+    /// `ImageRenderer` walks the tree with no window behind it, a `ScrollView` in that
+    /// situation lays its content against an unspecified proposal and renders as an empty
+    /// rectangle, and a snapshot of an empty rectangle is worse than no snapshot. Every
+    /// row is built up front too — a `LazyVStack` never builds anything offscreen.
+    var flattened: Bool = false
 
     /// The line being rewritten, if any. Held here rather than per row so that opening
     /// a second editor closes the first — two half-finished corrections is a way to lose
@@ -29,18 +37,22 @@ struct TranscriptView: View {
     @FocusState private var editorFocused: Bool
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 16) {
-                    Color.clear.frame(height: 2)
-                    if pinned { pinnedBadge }
-                    ForEach(items) { item in
-                        row(item).id(item.id)
-                    }
-                    Color.clear.frame(height: 8).id("BOTTOM")
-                }
+        if flattened {
+            VStack(alignment: .leading, spacing: 16) { rowStack }
                 .padding(.horizontal, 18)
                 .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            scrolling
+        }
+    }
+
+    private var scrolling: some View {
+        ScrollViewReader { proxy in
+            ScrollView(.vertical, showsIndicators: false) {
+                rows
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 10)
             }
             .onChange(of: items.count) { _, _ in
                 // Never while a correction is open: scrolling the editor out from under
@@ -58,6 +70,20 @@ struct TranscriptView: View {
                 withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo("BOTTOM", anchor: .bottom) }
             }
         }
+    }
+
+    private var rows: some View {
+        LazyVStack(alignment: .leading, spacing: 16) { rowStack }
+    }
+
+    @ViewBuilder
+    private var rowStack: some View {
+        Color.clear.frame(height: 2)
+        if pinned { pinnedBadge }
+        ForEach(items) { item in
+            row(item).id(item.id)
+        }
+        Color.clear.frame(height: 8).id("BOTTOM")
     }
 
     /// Says the state and what it buys, in the column it applies to. "Pinned" alone

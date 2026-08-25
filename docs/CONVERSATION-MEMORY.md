@@ -66,8 +66,10 @@ that touches the world lives in the app target.** `ResponseCoordinator` is the p
 | `ConversationEntry` | One line: who, what, **when**, **which session**, where the text came from, what the audio looked like. |
 | `UtteranceAudio` | The shape of an utterance — duration, sample rate, byte count, peak and RMS. Never samples. |
 | `TranscriptPrivacy` | What may be recorded, what gets rewritten, how long it lives. |
+| `TranscriptRetention` | How MANY conversations live, and whether they are written without being asked. |
+| `TranscriptEdit` | A correction to a line already on disk — or, with no text, a deletion of one. |
 | `ConversationLog` | The bounded in-memory record. Every write goes through privacy here, and nowhere else. |
-| `SessionMeta` / `SessionCatalog` | The list of saved conversations: what each is called, when it was last touched, how many turns it holds, which realtime sessions it ran under. |
+| `SessionMeta` / `SessionCatalog` | The list of saved conversations: what each is called, when it was last touched, how many turns it holds, which realtime sessions it ran under, and whether it is **pinned**. |
 | `SessionTitle` | What a conversation is called, from what was said in it — or from the clock, when nothing was. |
 | `SessionID` | Minting a conversation id that is safe to use as a file name. |
 | `ConversationArchive` | The JSONL format, in both directions, plus rebuilding the session list from the files alone. |
@@ -83,6 +85,7 @@ that touches the world lives in the app target.** `ResponseCoordinator` is the p
 | `UtteranceRecorder` | Metering on the audio thread. Lock-based, like `LevelBox` beside it. |
 | `UserTranscriber` | The transcription seam. `RealtimeAPITranscriber` (live) / `LocalTranscriber` (placeholder). |
 | `AudioClipRecorder` | Where audio *would* be written. Currently refuses, on purpose. |
+| `TranscriptLog` | Every lifecycle event on the console, in one format. `log stream --predicate 'category == "transcript"'`. |
 | `SummaryService` | Runs the job, calls the summariser, delivers the result. |
 | `NoteSink` | `MarkdownNoteSink` (real) / `NotionNoteSink` (placeholder). |
 
@@ -115,16 +118,20 @@ still be lined up with anything the API reports later.
 
 | | |
 |---|---|
-| **Launching** | A new conversation. The previous one is saved, named, and one click away in the switcher. |
-| **Launching, with "Pick up where I left off" on** | The most recent conversation with something in it, restored with its history. |
+| **Launching** | The conversation you were last in, restored with its history — "Pick up where I left off" is **on** by default. |
+| **Launching, with it off** | A new conversation. The previous one is saved, named, and one click away in the switcher. |
+| **Launching, with a conversation pinned** | The pinned one, whatever that setting says. |
 | **⌘N / New conversation** | A new one. Nothing is deleted. If a socket is open it is closed first — see below. |
 | **Picking one from the switcher** | That conversation's transcript is read off disk and put back on screen. |
 | **Connecting, disconnecting, reconnecting** | All the same conversation. Only the realtime id changes, and that is recorded, not acted on. |
 | **Quitting** | Nothing to do. Every line was already written when it was said. |
 
-New-every-launch is the default because what you say now should not be silently appended
-to a conversation from Tuesday. Nothing is lost either way — the setting only decides
-which conversation is in front of you when FlowState opens.
+New-every-launch was the default for a while, on the argument that what you say now
+should not be silently appended to a conversation from Tuesday. It lost to what it looked
+like: a transcript that is on screen one minute and gone after a relaunch reads as a
+transcript that was thrown away, whatever the switcher says. Starting fresh is still one
+click — and it is a click, which is the right way round. Nothing is lost either way; the
+setting only decides which conversation is in front of you when FlowState opens.
 
 **Switching closes an open socket, deliberately.** The realtime model carries the previous
 conversation in its own context; keeping the socket open across a switch would produce a
@@ -191,6 +198,100 @@ everything while paused. The one thing privacy still governs on the way back in 
 retention: a transcript past its window does not come back to life because somebody
 clicked on it.
 
+## Keeping a transcript
+
+A transcript is only worth having if it is still there later. Four controls decide that,
+and they are deliberately four rather than one, because they answer different questions.
+
+| Control | Where | What it does | What it does **not** do |
+|---|---|---|---|
+| **Pin** (⌘⇧P, or the pin in the transcript header) | Per conversation, in `SessionMeta.pinned` | Keeps it: retention skips it, the keep-last limit does not count it, launch reopens it, and in "Only what I save" it is written immediately. | Protect it from Delete, or from switching `persistToDisk` off. |
+| **Hide** (⌘⇧H, the eye) | App-wide, `AppSettings.transcriptHidden` | Takes the column off screen for a screen share. | Stop recording, stop saving, or delete anything. |
+| **Retention mode** | Settings › Conversations | *Keep everything* / *Keep last N* / *Only what I save*. | Change what is captured — that is `TranscriptPrivacy`. |
+| **Retention hours** | Settings › Memory & privacy | Deletes anything older than the window, including what is already there. | Touch pinned conversations. |
+
+### Pinning
+
+A pin is a standing instruction about one conversation, and it is honoured in four
+places — `ConversationLog.purgeExpired`, `ConversationStore.purgeExpiredFiles`,
+`TranscriptRetention.sessionsToTrim` and `SessionCatalog.sessionToResume`. It is stored
+in the index, which is the one thing in `sessions.json` that is not recoverable from the
+transcripts, so `SessionMeta` decodes with `decodeIfPresent` throughout: an index written
+by an older build has no `pinned` key, and the whole array is read with `try?`, so a
+strict decoder would trade every custom title in the file for one absent boolean.
+
+The state is visible in two places at once — a filled, tinted pin in the header and a
+PINNED badge at the top of the column — because a lock you have to click to identify is
+not a lock.
+
+**Where a pin loses:** turning *Save to disk* off deletes every transcript, pinned ones
+included. That is the user asking for nothing on disk at all, which is a bigger statement
+than "keep this one". It is said out loud in the console log and in the Settings caption
+rather than discovered afterwards.
+
+### Retention modes
+
+`TranscriptRetention` counts **conversations**, not lines. A transcript is the thing a
+user names, reopens and deletes; trimming the conversation somebody is reading down to
+its last N lines would silently rewrite it under them.
+
+- **Keep everything** — written as it happens, kept until the hours window or the user
+  removes it.
+- **Keep last N** — the newest N survive. Pinned conversations are exempt *and* do not
+  use up a place. The conversation on screen is never trimmed.
+- **Only what I save** — nothing reaches disk until *Save transcript now* (⌘S) or a pin.
+  Saving merges what is in memory with whatever is already in the file and rewrites it
+  atomically, so saving twice leaves one copy of everything.
+
+### Editing a line
+
+Voice transcription gets names, jargon and accents wrong, and a record you cannot correct
+is one that slowly stops matching what was said. Double-click any user or assistant line
+to rewrite it; right-click for *Edit* / *Copy* / *Delete line*. System notes are not
+editable — they are the app's own account of what it did, and a rewritable one would be
+worthless as evidence.
+
+Corrections do **not** rewrite the file. A `TranscriptEdit` is appended after the line it
+corrects and folded over the top on the way back in (`ConversationArchive.apply`), which
+keeps writing safe during a live conversation and keeps the cost of a truncated last line
+at one sentence. Later edits beat earlier ones, deletion beats an earlier edit, and an
+edit naming a line that is not in the file is dropped rather than resurrecting an entry
+from nothing. An edited line keeps its original timestamp, so correcting something an
+hour later does not move it to an hour later.
+
+The text before the edit is not kept anywhere. An edit is the user changing what the
+record says about them, and a history of that would defeat the point of offering it.
+
+### Lifecycle on the console
+
+Every one of these events goes through `TranscriptLog`, in one format, to both `os.Logger`
+(category `transcript`) and stderr:
+
+```
+[transcript] appended · chat-20260824-101500-a1b2 · user, 42 chars, memory only
+[transcript] saved · chat-20260824-101500-a1b2 · 6 lines, 1.4 kB → chat-….jsonl
+[transcript] loaded · chat-20260824-101500-a1b2 · 34 lines, 1 summary, 2 corrections folded in
+[transcript] pinned · chat-20260824-101500-a1b2 · locked — retention will skip it
+[transcript] hidden · chat-20260824-101500-a1b2 · 34 lines hidden from view — nothing was deleted
+[transcript] trimmed · chat-20260821-090000-77c1 · past the keep-last-20 limit
+```
+
+`appended … memory only` is the one worth knowing about: it is how "Only what I save"
+looks while it is working, and it is the difference between a conversation that is being
+kept and one that is merely on screen.
+
+### Proving it
+
+`Scripts/verify-transcript.sh` compiles the real `ConversationStore` on its own — it
+imports Foundation, Combine and VibeVoiceCore and nothing else — over a temporary
+`VIBEVOICE_HOME`, then writes, throws the store away, builds a new one over the same
+folder and asks what it remembers. Seven groups: written to disk at 0600, read back after
+a "restart", corrected and deleted per line, pinned across a restart and past its
+retention window, trimmed by keep-last, held out of disk by manual-save, and finally
+deleted for real. It is the only place the promise "your conversation is still here
+after a restart" can actually be checked, because it is the only place there are two
+launches.
+
 ## Privacy
 
 Defaults, and why they are not "record nothing":
@@ -203,7 +304,8 @@ Defaults, and why they are not "record nothing":
 | `captureAudioMetadata` | on | Duration and level answer the questions actually asked of a voice log ("was the mic even on?") without keeping a recording of a room. |
 | `keepAudioClips` | **off** | The only switch here that would put real audio on disk. Not implemented, and refuses at the call site rather than being a TODO. |
 | `persistToDisk` | on | Turning it off also deletes what is already there — otherwise it is a lie. |
-| `retentionHours` | 168 (a week) | Enforced on every purge, not only at write time, so turning it down deletes. |
+| `retentionHours` | 168 (a week) | Enforced on every purge, not only at write time, so turning it down deletes. Pinned conversations are exempt. |
+| `retention.mode` | Keep everything | Counting and manual-save live in `TranscriptRetention`, not here: they decide how many recordings are kept, not what is recorded. |
 | `redactSensitiveText` | on | An API key read aloud should not end up in a plain-text file. |
 | `paused` | off | The mute switch. Overrides everything else. |
 
@@ -234,6 +336,7 @@ it in the "don't write this down" direction is the expensive way round.
   settings.json                      everything in AppSettings
   sessions.json                      the session index, 0600 — a cache, never the truth
   conversations/<sessionID>.jsonl    one JSON object per line, 0600
+                                     kinds: entry, summary, edit, delete
   notes/<yyyy-MM-dd>.md              summaries, appended
   audio/                             would hold clips. Nothing writes here today.
 ```
@@ -359,3 +462,10 @@ Four seams, each a named type with a comment rather than a TODO:
 - Summaries across sessions. `SummaryJob` is per-session by design; a daily digest would
   read the JSONL rather than extend it.
 - Exporting a conversation as anything but the JSONL it already is.
+- **Compacting a transcript.** Corrections accumulate as extra records; a file edited a
+  hundred times is a hundred lines longer than the conversation in it. Nothing rewrites
+  the file to fold them down, because the only safe moment to do that is one nobody is
+  writing in, and "Save transcript now" already produces a clean file when it matters.
+- **Undo.** A deleted line is gone from the record as well as the screen; the text before
+  an edit is not kept. Both are deliberate — see above — and both mean the confirmation
+  is the only safety there is.

@@ -604,14 +604,20 @@ final class AppState: ObservableObject {
                 self.applyWakeWord()
                 try? await Task.sleep(for: .seconds(3))
                 let before = self.audio.isCapturing
+                self.vpIdleBefore = self.audio.voiceProcessing
                 await self.connect()
                 try? await Task.sleep(for: .seconds(6))
                 let during = self.audio.isCapturing
+                self.vpDuring = self.audio.voiceProcessing
                 self.disconnect()
                 try? await Task.sleep(for: .seconds(2))
                 let after = self.audio.isCapturing
                 let line = "[sleep-test] mic before=\(before) during=\(during) "
                          + "AFTER SLEEP=\(after) holders=\(self.micHolders.sorted())\n"
+                         + "[sleep-test] voice processing: idle=\(self.vpIdleBefore) "
+                         + "in-session=\(self.vpDuring) after=\(self.audio.voiceProcessing)\n"
+                         + "[sleep-test] audio error: \(self.audio.lastError ?? "none")\n"
+
                 FileHandle.standardError.write(Data(line.utf8))
                 // Also to a file: launched with `open` the app stays alive long enough to
                 // finish, but its stderr goes nowhere anybody can read.
@@ -865,13 +871,19 @@ final class AppState: ObservableObject {
     /// the wake word is still listening, would silently turn the wake word off; a flag
     /// per feature would mean every new one has to remember every old one.
     private var micHolders: Set<String> = []
+    /// Only for the sleep test — see `FLOWSTATE_SLEEP_TEST`.
+    private var vpIdleBefore = false
+    private var vpDuring = false
 
     /// - Returns: nil on success, or why it could not be opened.
     @discardableResult
     private func openMicrophone(for holder: String) -> String? {
         micHolders.insert(holder)
         guard !audio.isCapturing else { return nil }
-        do { try audio.start() }
+        // No voice processing: nothing is speaking, so there is no echo to cancel, and
+        // leaving it on would put every sound this Mac makes through a voice processor
+        // for as long as the wake word is listening. See `AudioEngine.start`.
+        do { try audio.start(voiceProcessing: false) }
         catch {
             micHolders.remove(holder)
             return "Audio: \(error.localizedDescription)"
@@ -1670,7 +1682,14 @@ final class AppState: ObservableObject {
             note("Ephemeral mint failed (\(error.localizedDescription)) — using standard key.")
         }
 
-        do { try audio.start() }
+        // A conversation needs echo cancellation, and it can only be switched on before
+        // the engine starts. If the wake word had the microphone open without it, the
+        // engine is stopped and rebuilt rather than left in the wrong mode — the
+        // alternative is an assistant that hears itself and interrupts itself.
+        if audio.isCapturing && !audio.voiceProcessing {
+            audio.stop()
+        }
+        do { try audio.start(voiceProcessing: true) }
         catch { connection = .error("Audio: \(error.localizedDescription)"); return }
         // `start()` builds a new tap; the gate is engine state and survives it, but
         // re-asserting from the setting here is what keeps the two from ever disagreeing
@@ -1768,6 +1787,27 @@ final class AppState: ObservableObject {
         // conversation is over" and "nobody needs the microphone".
         if micHolders.isEmpty {
             audio.stop()
+        } else if audio.voiceProcessing {
+            // Something still wants the microphone, but nothing is speaking any more.
+            // Rebuild it plain, so system audio stops going through the voice processor
+            // the moment the conversation ends rather than at the next launch.
+            audio.stop()
+            Task { @MainActor in
+                // A turn of the run loop between stop and start. The voice-processing
+                // audio unit does not finish tearing down synchronously, and starting on
+                // top of a half-stopped one throws — which, swallowed by `try?`, left the
+                // wake word with no microphone and no complaint.
+                try? await Task.sleep(for: .milliseconds(120))
+                do {
+                    try self.audio.start(voiceProcessing: false)
+                    self.audio.setMuted(self.settings.micMuted)
+                    if self.settings.wakeWord { self.wake.restart() }
+                } catch {
+                    Self.recordingLog.error(
+                        "could not reopen the microphone for the wake word — \(error.localizedDescription, privacy: .public)")
+                    self.banner = "The wake phrase stopped listening — \(error.localizedDescription)"
+                }
+            }
         } else {
             Self.recordingLog.notice(
                 "keeping the microphone open for \(self.micHolders.sorted().joined(separator: ", "), privacy: .public)")

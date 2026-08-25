@@ -34,6 +34,8 @@ enum TranscriptLog {
         case loaded          // read back off disk
         case restored        // put on screen from what was read
         case cleared         // taken off screen without being deleted
+        case switched        // a different conversation is now the open one
+        case policy          // the retention or privacy rules changed
         case deleted         // conversation and file gone
         case purged          // retention removed something
         case trimmed         // the keep-last limit removed something

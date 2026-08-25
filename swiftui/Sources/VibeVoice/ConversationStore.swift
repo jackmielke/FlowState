@@ -68,8 +68,7 @@ final class ConversationStore: ObservableObject {
             let was = retentionPolicy
             retentionPolicy = newValue
             guard was != newValue else { return }
-            TranscriptLog.event(.saved, session: nil,
-                                "retention · " + newValue.summaryLine)
+            TranscriptLog.event(.policy, session: nil, newValue.summaryLine)
             // A limit that only applied to conversations recorded after it was set would
             // be a setting that appears to do nothing.
             trimToRetention()
@@ -176,9 +175,9 @@ final class ConversationStore: ObservableObject {
         currentSessionID = SessionID.mint(at: at)
         currentSessionStartedAt = at
         currentRealtimeIDs = []
-        TranscriptLog.event(.saved, session: left,
-                            "left open at \(log.entries(inSession: left).count) line(s) — "
-                            + "now in \(currentSessionID)")
+        TranscriptLog.event(.switched, session: currentSessionID,
+                            "new conversation · \(left) left saved at "
+                            + TranscriptLog.lines(log.entries(inSession: left).count))
         // A new conversation is one more conversation, which may put the collection over
         // the keep-last limit. The one just left is not a candidate: it is the newest.
         trimToRetention()
@@ -764,7 +763,9 @@ final class ConversationStore: ObservableObject {
         catalog.remove(id)
         syncPins()
         TranscriptLog.event(.deleted, session: id,
-                            "\(TranscriptLog.lines(dropped)) and the file with them")
+                            dropped > 0
+                            ? "\(TranscriptLog.lines(dropped)) and the file with them"
+                            : "file removed — none of it was still in memory")
         entryCount = log.entries.count
         publishSessions()
         saveIndex()

@@ -906,65 +906,10 @@ struct ContentView: View {
 
             Divider().overlay(Theme.hairline)
 
-            ZStack {
-                if state.settings.transcriptHidden {
-                    hiddenTranscriptPlaceholder
-                } else {
-                    TranscriptView(items: state.transcript,
-                                   pinned: state.transcriptIsPinned,
-                                   onEdit: { id, text in state.editTranscriptLine(id, to: text) },
-                                   onDelete: { id in state.deleteTranscriptLine(id) })
-                }
-                if state.transcript.count <= 1 && !state.settings.transcriptHidden {
-                    VStack(spacing: 7) {
-                        Image(systemName: "waveform")
-                            .font(.system(size: 19, weight: .light))
-                            .foregroundStyle(Theme.textFaint.opacity(0.5))
-                        Text("Nothing said yet")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(Theme.textFaint)
-                        Text("Your words and FlowState's replies land here as you\ntalk, and stay here after a restart.")
-                            .font(.system(size: 11))
-                            .multilineTextAlignment(.center)
-                            .foregroundStyle(Theme.textFaint.opacity(0.7))
-                    }
-                    .allowsHitTesting(false)
-                    .padding(.bottom, 40)
-                }
-            }
+            TranscriptColumn(state: state)
         }
         .frame(width: 372)
         .background(Theme.sidebar)
-    }
-
-    /// What "hide" leaves behind.
-    ///
-    /// A blank column would be indistinguishable from a transcript that had been wiped,
-    /// which is exactly the fear this feature exists to avoid — so the placeholder says
-    /// how many lines are still there, that recording carried on, and where the way back
-    /// is. Hiding is for screen shares; it is not a privacy control and does not pretend
-    /// to be one.
-    private var hiddenTranscriptPlaceholder: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "eye.slash")
-                .font(.system(size: 19, weight: .light))
-                .foregroundStyle(Theme.textFaint.opacity(0.55))
-            Text("Transcript hidden")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(Theme.textFaint)
-            Text("\(state.transcript.count) line\(state.transcript.count == 1 ? "" : "s") are still here"
-                 + (state.settings.privacy.persistToDisk ? " and still being saved." : ".")
-                 + "\nNothing was deleted.")
-                .font(.system(size: 11))
-                .multilineTextAlignment(.center)
-                .foregroundStyle(Theme.textFaint.opacity(0.75))
-            Button("Show transcript") { state.toggleTranscriptHidden() }
-                .buttonStyle(GhostButtonStyle(tint: Theme.accentInk))
-                .padding(.top, 2)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(.bottom, 30)
-        .accessibilityElement(children: .contain)
     }
 }
 

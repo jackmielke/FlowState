@@ -1054,7 +1054,8 @@ struct SettingsView: View {
                             .font(.system(size: 12.5)).foregroundStyle(Theme.text)
                         Text(state.settings.resumeLastSession
                              ? "Launching reopens the last conversation, with its history."
-                             : "Launching starts a new conversation. The last one stays in the switcher.")
+                             : "Launching starts a new conversation. The last one stays in "
+                               + "the switcher — and a pinned one is reopened anyway.")
                             .font(.system(size: 10.5)).foregroundStyle(Theme.textFaint)
                     }
                     Spacer()
@@ -1112,7 +1113,8 @@ struct SettingsView: View {
                     state.applyPrivacySettings()
                 }
                 caption("Turning this down deletes what is already past the window, "
-                        + "not just what comes next.")
+                        + "not just what comes next. Pinned conversations are skipped — "
+                        + "they are kept until you unpin or delete them.")
 
                 // The audio opt-in, kept visibly separate from everything above
                 // it: this is the only switch here that would put a recording of

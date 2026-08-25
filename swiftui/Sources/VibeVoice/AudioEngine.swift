@@ -131,8 +131,32 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
 
     // MARK: - Lifecycle
 
-    func start() throws {
-        guard !running else { return }
+    /// Whether the engine currently has voice processing on. See `start(voiceProcessing:)`.
+    private(set) var voiceProcessing = false
+
+    /// - Parameter voiceProcessing: acoustic echo cancellation, on the input AND the
+    ///   output node.
+    ///
+    ///   Only for a live conversation. It exists to stop the assistant hearing itself,
+    ///   and enabling it on the output node routes EVERYTHING this Mac plays through the
+    ///   voice-processing unit — which ducks, resamples and gain-controls it. That was
+    ///   tolerable when the engine only ran during a call. Now that the wake word holds
+    ///   the microphone open all day, it meant every sound on the machine went through a
+    ///   voice processor from login to shutdown, and it crackled.
+    ///
+    ///   Idling without it is better in three ways at once: system audio is left alone,
+    ///   the battery is left alone, and a clap survives — voice processing suppresses
+    ///   impulsive noise while boosting speech, which is exactly why claps were arriving
+    ///   quieter than talking.
+    func start(voiceProcessing wantsVP: Bool = true) throws {
+        // The engine's own state, not the published mirror.
+        //
+        // `running` is set on the next turn of the main queue so SwiftUI sees a change
+        // rather than a write during view evaluation, which makes it stale for exactly
+        // one case: stopping and immediately restarting to change the voice-processing
+        // mode. Guarding on it there meant `start` returned without starting, and a
+        // session opened with no microphone at all.
+        guard !engine.isRunning else { return }
 
         let input = engine.inputNode
 
@@ -153,9 +177,9 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
         // read afterwards or the converter is built against a stale rate.
         var aec = false
         do {
-            try input.setVoiceProcessingEnabled(true)
-            try engine.outputNode.setVoiceProcessingEnabled(true)
-            aec = true
+            try input.setVoiceProcessingEnabled(wantsVP)
+            try engine.outputNode.setVoiceProcessingEnabled(wantsVP)
+            aec = wantsVP
         } catch {
             FileHandle.standardError.write(Data(
                 ("[audio] voice processing unavailable (\(error.localizedDescription)) — "
@@ -196,6 +220,7 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
             self?.levels.out = Self.rms(buf)
         }
 
+        voiceProcessing = aec
         engine.prepare()
         try engine.start()
         player.play()
@@ -224,7 +249,7 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
     var isCapturing: Bool { engine.isRunning }
 
     func stop() {
-        guard running else { return }
+        guard engine.isRunning else { return }
         uiTimer?.invalidate(); uiTimer = nil
         player.stop()
         engine.inputNode.removeTap(onBus: 0)

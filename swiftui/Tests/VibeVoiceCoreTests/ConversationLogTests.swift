@@ -177,4 +177,83 @@ final class ConversationLogTests: XCTestCase {
         let fresh = log.conversation(inSession: "s", after: base)
         XCTAssertEqual(fresh.map(\.text), ["after"])
     }
+
+    // MARK: - Pinned conversations outlive retention
+
+    func test_retentionSkipsAPinnedConversation() {
+        var privacy = TranscriptPrivacy()
+        privacy.retentionHours = 24
+        let log = ConversationLog(privacy: privacy)
+        log.pinnedSessions = ["chat-keep"]
+
+        let then = Date(timeIntervalSince1970: 1_700_000_000)
+        log.append(sessionID: "chat-keep", speaker: .user, text: "worth keeping",
+                   at: then, source: .realtimeAPI)
+        log.append(sessionID: "chat-other", speaker: .user, text: "ordinary",
+                   at: then, source: .realtimeAPI)
+
+        let dropped = log.purgeExpired(now: then.addingTimeInterval(72 * 3600))
+        XCTAssertEqual(dropped, 1)
+        XCTAssertEqual(log.entries.map(\.text), ["worth keeping"])
+    }
+
+    func test_aPinnedConversationComesBackOffDiskEvenPastItsWindow() {
+        var privacy = TranscriptPrivacy()
+        privacy.retentionHours = 1
+        let log = ConversationLog(privacy: privacy)
+        log.pinnedSessions = ["chat-keep"]
+
+        let then = Date(timeIntervalSince1970: 1_700_000_000)
+        let old = ConversationEntry(sessionID: "chat-keep", speaker: .user,
+                                    text: "from last week", at: then, source: .realtimeAPI)
+        XCTAssertEqual(log.restore(entries: [old], now: then.addingTimeInterval(7 * 24 * 3600)), 1)
+    }
+
+    // MARK: - Correcting a line
+
+    func test_editingALineRewritesItInPlace() {
+        let log = ConversationLog()
+        let e = log.append(sessionID: "s", speaker: .user, text: "sen it to jak",
+                           source: .realtimeAPI)!
+        let fixed = log.edit(entryID: e.id, to: "send it to Jack")
+        XCTAssertEqual(fixed?.text, "send it to Jack")
+        XCTAssertEqual(log.entries.count, 1, "an edit is not a second line")
+        XCTAssertEqual(log.entries.first?.at, e.at, "and it does not move in the conversation")
+    }
+
+    func test_anEditIsRedactedLikeAnythingElseWritten() {
+        let log = ConversationLog()
+        let e = log.append(sessionID: "s", speaker: .user, text: "hello",
+                           source: .realtimeAPI)!
+        let fixed = log.edit(entryID: e.id, to: "the key is sk-live-abcdefghijklmno")
+        XCTAssertEqual(fixed?.text.contains("[api-key]"), true)
+        XCTAssertEqual(fixed?.redacted, true)
+    }
+
+    func test_anEditWorksWhileRecordingIsPaused() {
+        var privacy = TranscriptPrivacy()
+        let log = ConversationLog(privacy: privacy)
+        let e = log.append(sessionID: "s", speaker: .user, text: "wrong", source: .realtimeAPI)!
+
+        privacy.paused = true
+        log.privacy = privacy
+        XCTAssertEqual(log.edit(entryID: e.id, to: "right")?.text, "right",
+                       "refusing would leave a line on screen the user has just corrected")
+    }
+
+    func test_anEmptyEditIsRefusedRatherThanBlankingTheLine() {
+        let log = ConversationLog()
+        let e = log.append(sessionID: "s", speaker: .user, text: "something", source: .realtimeAPI)!
+        XCTAssertNil(log.edit(entryID: e.id, to: "   "))
+        XCTAssertEqual(log.entries.first?.text, "something")
+    }
+
+    func test_removingOneLineLeavesTheRest() {
+        let log = ConversationLog()
+        let a = log.append(sessionID: "s", speaker: .user, text: "one", source: .realtimeAPI)!
+        log.append(sessionID: "s", speaker: .assistant, text: "two", source: .assistantStream)
+        XCTAssertEqual(log.remove(entryID: a.id)?.text, "one")
+        XCTAssertEqual(log.entries.map(\.text), ["two"])
+        XCTAssertNil(log.remove(entryID: a.id), "and it is gone for good")
+    }
 }

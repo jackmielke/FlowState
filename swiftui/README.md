@@ -419,6 +419,10 @@ cases are deterministic. `swift test`.
   composited picture-in-picture path (`Scripts/verify-video.sh`).
 - The recording result panel: metadata, spoken labels and where "Open in Finder" lands
   when the file has been moved or deleted (`RecordingFileTests`, 17 cases).
+- Transcript persistence across a restart: written at 0600, read back, corrected and
+  deleted line by line, pinned through a retention purge, trimmed by the keep-last limit,
+  held out of disk by manual-save mode, and finally deleted for real
+  (`Scripts/verify-transcript.sh`, 26 checks over two "launches").
 
 ## Which screen it sees
 
@@ -532,7 +536,8 @@ those decisions.
 ### Looking at it without a screenshot
 
 `Scripts/snapshot-ui.sh [outdir]` renders every tab in both appearances, the moving-backdrop
-picker for each of the nine styles, and a contact sheet of all nine, straight to PNG:
+picker for each of the nine styles, a contact sheet of all nine, and the transcript column
+in the states it is otherwise hard to get it into — live, pinned, hidden — straight to PNG:
 
 ```
 swiftui/Scripts/snapshot-ui.sh /tmp/flowstate-ui

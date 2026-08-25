@@ -185,4 +185,93 @@ final class ConversationArchiveTests: XCTestCase {
         XCTAssertTrue(log.entries.isEmpty)
         XCTAssertTrue(log.summaries.isEmpty)
     }
+
+    // MARK: - Corrections
+
+    func test_anEditRewritesTheLineItNamesAndNothingElse() {
+        let a = entry("send it to jack at gmail")
+        let b = entry("on it", .assistant, offset: 3)
+        let fix = TranscriptEdit(sessionID: "chat-a", entryID: a.id,
+                                 text: "send it to Jack",
+                                 at: t0.addingTimeInterval(60))
+
+        let parsed = ConversationArchive.parse(file([ConversationArchive.line(for: a),
+                                                     ConversationArchive.line(for: b),
+                                                     ConversationArchive.line(for: fix)]))
+        XCTAssertEqual(parsed.entries.map(\.text), ["send it to Jack", "on it"])
+        XCTAssertEqual(parsed.editCount, 1)
+        XCTAssertEqual(parsed.skippedLines, 0, "a correction is not damage")
+    }
+
+    func test_anEditedLineKeepsItsPlaceInTheConversation() {
+        let a = entry("first")
+        let b = entry("second", .assistant, offset: 5)
+        let fix = TranscriptEdit(sessionID: "chat-a", entryID: a.id, text: "first, corrected",
+                                 at: t0.addingTimeInterval(900))
+
+        let parsed = ConversationArchive.parse(file([ConversationArchive.line(for: a),
+                                                     ConversationArchive.line(for: b),
+                                                     ConversationArchive.line(for: fix)]))
+        XCTAssertEqual(parsed.entries.map(\.text), ["first, corrected", "second"],
+                       "correcting a line an hour later must not move it to an hour later")
+        XCTAssertEqual(parsed.entries.first?.at, t0)
+    }
+
+    func test_theLastCorrectionWins() {
+        let a = entry("one")
+        let first = TranscriptEdit(sessionID: "chat-a", entryID: a.id, text: "two", at: t0)
+        let second = TranscriptEdit(sessionID: "chat-a", entryID: a.id, text: "three", at: t0)
+
+        let parsed = ConversationArchive.parse(file([ConversationArchive.line(for: a),
+                                                     ConversationArchive.line(for: first),
+                                                     ConversationArchive.line(for: second)]))
+        XCTAssertEqual(parsed.entries.map(\.text), ["three"])
+    }
+
+    func test_aDeletedLineDoesNotComeBackAndTakesNothingWithIt() {
+        let a = entry("delete this one")
+        let b = entry("keep this one", .assistant, offset: 4)
+        let gone = TranscriptEdit(sessionID: "chat-a", entryID: a.id, text: nil, at: t0)
+
+        let parsed = ConversationArchive.parse(file([ConversationArchive.line(for: a),
+                                                     ConversationArchive.line(for: b),
+                                                     ConversationArchive.line(for: gone)]))
+        XCTAssertEqual(parsed.entries.map(\.text), ["keep this one"])
+        XCTAssertTrue(gone.isDeletion)
+    }
+
+    func test_deletionBeatsAnEarlierEditOfTheSameLine() {
+        let a = entry("secret")
+        let fix = TranscriptEdit(sessionID: "chat-a", entryID: a.id, text: "less secret", at: t0)
+        let gone = TranscriptEdit(sessionID: "chat-a", entryID: a.id, text: nil, at: t0)
+
+        let parsed = ConversationArchive.parse(file([ConversationArchive.line(for: a),
+                                                     ConversationArchive.line(for: fix),
+                                                     ConversationArchive.line(for: gone)]))
+        XCTAssertTrue(parsed.entries.isEmpty, "asking for it to be gone means gone")
+    }
+
+    func test_aCorrectionForALineThatIsNotHereIsIgnoredRatherThanInvented() {
+        let a = entry("still here")
+        let orphan = TranscriptEdit(sessionID: "chat-a", entryID: UUID(),
+                                    text: "resurrect me", at: t0)
+
+        let parsed = ConversationArchive.parse(file([ConversationArchive.line(for: a),
+                                                     ConversationArchive.line(for: orphan)]))
+        XCTAssertEqual(parsed.entries.map(\.text), ["still here"])
+    }
+
+    /// The count the index shows has to agree with the transcript after corrections, or
+    /// the switcher advertises lines that are no longer in the file.
+    func test_deletedLinesDoNotCountTowardsTheSessionsLineCount() {
+        let a = entry("one")
+        let b = entry("two", .assistant, offset: 2)
+        let gone = TranscriptEdit(sessionID: "chat-a", entryID: b.id, text: nil, at: t0)
+
+        let parsed = ConversationArchive.parse(file([ConversationArchive.line(for: a),
+                                                     ConversationArchive.line(for: b),
+                                                     ConversationArchive.line(for: gone)]))
+        let meta = ConversationArchive.meta(for: "chat-a", archive: parsed, fallbackDate: t0)
+        XCTAssertEqual(meta.entryCount, 1)
+    }
 }

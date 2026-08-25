@@ -164,9 +164,13 @@ final class LocalTranscriber: UserTranscriber {
 enum AudioClipRecorder {
 
     /// The directory clips would live in. Created lazily, and only by a real recorder.
+    ///
+    /// Under `ConversationStore.root` rather than reaching for Application Support
+    /// directly, so it moves with `VIBEVOICE_HOME` like everything else FlowState keeps.
+    /// It did not, which meant "delete everything" pointed at the real folder even
+    /// during a test run over a temporary home.
     static var directory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("VibeVoice/audio", isDirectory: true)
+        ConversationStore.root.appendingPathComponent("audio", isDirectory: true)
     }
 
     /// Returns the path a clip was written to, or nil.
