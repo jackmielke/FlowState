@@ -89,11 +89,20 @@ final class WakeListener {
         isRunning = true
         beginTask()
 
-        // Recognition tasks do not run forever; they stop on their own after a minute or
-        // so of audio and simply produce nothing after that. A wake word that quietly
-        // stops working after a minute is worse than one that was never on, so it is
-        // recycled on a timer rather than waiting to notice.
-        let t = Timer(timeInterval: 50, repeats: true) { [weak self] _ in
+        // Recycled every eight seconds, not every fifty.
+        //
+        // A recognition task accumulates ONE transcript for as long as it lives, and
+        // over fifty seconds of a person talking that becomes a paragraph. Captured
+        // from the room while trying to wake it: "Event tomorrow and yeah it would be
+        // really cool to see if the computer thing could help knock out some of these
+        // things…" — three hundred characters, still growing, with the wake phrase
+        // somewhere inside it if at all.
+        //
+        // A wake word is not dictation. It wants short transcripts, so the phrase is
+        // most of what was said rather than a fragment buried in a paragraph. Eight
+        // seconds is long enough to say it and short enough that nothing else piles up
+        // in front of it.
+        let t = Timer(timeInterval: 8, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.beginTask() }
         }
         RunLoop.main.add(t, forMode: .common)
@@ -224,6 +233,10 @@ final class WakeListener {
                     let text = result.bestTranscription.formattedString
                     let changed = text != self.lastHeard
                     self.lastHeard = text
+                    // And cut the task short once it has become a paragraph, rather
+                    // than waiting for the timer. Somebody mid-sentence generates this
+                    // far faster than somebody saying two words.
+                    if text.count > 90 { self.beginTask() }
                     if self.state.heard(text, phrase: self.phrase, now: Date()) {
                         self.notePhrase(.woke, detail: "heard \"\(text.suffix(40))\"")
                         self.onWake?()

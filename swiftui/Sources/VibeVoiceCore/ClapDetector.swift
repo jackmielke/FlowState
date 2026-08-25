@@ -46,11 +46,18 @@ public struct ClapDetector: Equatable, Sendable {
     /// clap this loud" — and a calibration working from a stale copy of the coefficients
     /// recommends a setting that does not do what it says.
     public static let floorAt: (Float, Float) = (0.34, 0.28)
-    /// Bottoms out at 4x rather than 6x for the same reason the floor was lowered: a
-    /// clap only six times the room is a real clap in a room with a fan in it, and the
-    /// top of the dial has to be able to admit one. The other four rules — length,
-    /// quiet-before, decay, matched pair — are what keep that honest.
-    public static let ratioAt: (Float, Float) = (22, 18)
+    /// Eased from (22, 18) after a capture from the actual room: claps arriving at -17
+    /// to -21 dB against a -32 dB background, rejected as "too quiet — needs -13 dB".
+    /// A clap four times the room is a real clap in a room with a fan in it, and the old
+    /// curve put the ratio term above the floor across most of the dial, so turning the
+    /// dial up moved a threshold that was not the binding one.
+    ///
+    /// Rule 0 — it has to have ARRIVED, not arisen — is the rule that actually separates
+    /// a clap from a voice, and it does so on shape rather than loudness. The same
+    /// capture shows it working, rejecting speech at -9 dB as "came up too gradually"
+    /// while it was louder than any of the claps. Loudness is the weaker signal here, so
+    /// it is asked to do less.
+    public static let ratioAt: (Float, Float) = (12, 8)
 
     /// How much louder than the room a frame must be. Speech peaks at roughly 4-6× and
     /// this has to sit clear of that even in a quiet room.
@@ -129,6 +136,18 @@ public struct ClapDetector: Equatable, Sendable {
     private var transientQuietRun: TimeInterval = .greatestFiniteMagnitude
     /// The previous frame's peak, for the attack test.
     private var previousPeak: Float = 0
+    /// The frame before that one.
+    ///
+    /// A clap's onset is not instantaneous at this resolution. Sub-framed to 10ms, a real
+    /// clap's rise straddles two frames, so by the time the transient is declared the
+    /// immediately previous frame is already halfway up the attack — and dividing by a
+    /// half-risen frame makes the loudest, fastest sound in the room look gradual. A
+    /// capture from the room shows exactly that: a clap at -18 dB thrown out as "came up
+    /// too gradually — that is a voice, not a clap".
+    ///
+    /// So the rise is measured from 20ms before rather than 10ms. Speech does not get
+    /// meaningfully faster over that extra frame; a clap does.
+    private var beforePreviousPeak: Float = 0
     /// How abrupt this transient's onset was.
     private var transientRise: Float = 0
     private var lastClapAt: TimeInterval?
@@ -159,6 +178,7 @@ public struct ClapDetector: Equatable, Sendable {
         let loud = peak > threshold
 
         defer {
+            beforePreviousPeak = previousPeak
             previousPeak = peak
             if !loud {
                 background += (peak - background) * 0.05
@@ -177,7 +197,7 @@ public struct ClapDetector: Equatable, Sendable {
                 transientStart = now
                 transientPeak = peak
                 transientQuietRun = lastLoudAt.map { now - $0 } ?? .greatestFiniteMagnitude
-                transientRise = peak / Swift.max(previousPeak, 0.0005)
+                transientRise = peak / Swift.max(Swift.min(previousPeak, beforePreviousPeak), 0.0005)
             } else {
                 transientPeak = max(transientPeak, peak)
             }
@@ -257,6 +277,7 @@ public struct ClapDetector: Equatable, Sendable {
         transientPeak = 0
         transientRise = 0
         previousPeak = 0
+        beforePreviousPeak = 0
         lastClapAt = nil
         previousRunWasClap = false
     }

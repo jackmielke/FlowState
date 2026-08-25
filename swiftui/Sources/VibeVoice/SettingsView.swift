@@ -236,8 +236,17 @@ struct SettingsView: View {
 
 
             section("Voice") {
-                ChipPicker(options: kVoices, selection: binding(\.voice), columns: 5)
-                caption("marin and cedar are the newest and best.")
+                // Not `binding(\.voice)`: the voice cannot be changed on a session that
+                // has already spoken, so picking one while live reconnects. See
+                // `AppState.setVoice`.
+                ChipPicker(options: kVoices,
+                           selection: Binding(get: { state.settings.voice },
+                                              set: { state.setVoice($0) }),
+                           columns: 5)
+                caption("marin and cedar are the newest and best. "
+                        + (state.connection == .live || state.connection == .connecting
+                           ? "Changing it now reconnects, so the new voice starts fresh."
+                           : "It takes effect the moment you connect."))
             }
 
 

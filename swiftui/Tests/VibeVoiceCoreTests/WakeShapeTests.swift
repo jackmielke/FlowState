@@ -56,3 +56,28 @@ final class WakeShapeTests: XCTestCase {
         XCTAssertEqual(WakePhrase.heyFlow.score("   "), 0)
     }
 }
+
+extension WakeShapeTests {
+
+    /// The exact sequence captured from the room: a partial result, then the phrase.
+    /// The recogniser produced "Hey" and then "Hey Flo"; the second scored 1.00 and
+    /// nothing woke up, so the question is whether the state machine consumed it.
+    func testTheSequenceFromTheRoomActuallyFires() {
+        var s = WakeListenerState()
+        let t0 = Date(timeIntervalSinceReferenceDate: 0)
+        XCTAssertFalse(s.heard("Hey", phrase: .heyFlow, now: t0),
+                       "a bare 'Hey' must not wake it")
+        XCTAssertTrue(s.heard("Hey Flo", phrase: .heyFlow, now: t0.addingTimeInterval(0.4)),
+                      "'Hey Flo' scores 1.00 and must wake it")
+    }
+
+    /// And again a moment later, the way somebody repeats themselves when nothing
+    /// happened the first time.
+    func testSayingItAgainAfterTheCooldownFires() {
+        var s = WakeListenerState()
+        let t0 = Date(timeIntervalSinceReferenceDate: 0)
+        XCTAssertTrue(s.heard("Hey Flo", phrase: .heyFlow, now: t0))
+        s.utteranceEnded()
+        XCTAssertTrue(s.heard("Hey Flo", phrase: .heyFlow, now: t0.addingTimeInterval(4)))
+    }
+}

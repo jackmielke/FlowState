@@ -8,8 +8,11 @@ import VibeVoiceCore
 /// transcript scrolling inside it is invisible exactly when it is most wanted: when the
 /// thing has misheard you and you cannot tell whether it is answering the wrong question.
 ///
-/// Sized to its text and re-centred as it grows, so a two-word caption is a small pill
-/// rather than a wide empty bar. It never takes focus or a click.
+/// **One width, always; only the height moves.** The width is a property of the display
+/// it is on, not of the sentence it is showing, so the strip does not breathe in and out
+/// while the assistant is still talking. Extra text makes it taller, and because it is
+/// anchored above the Dock it grows upwards — the words already on screen stay where they
+/// are. The rules are `CaptionLayout`. It never takes focus or a click.
 ///
 /// **It follows the active screen.** It sits above the Dock on whichever display the
 /// pointer has settled on, moves mid-sentence when you do, and — with several displays
@@ -19,7 +22,9 @@ import VibeVoiceCore
 final class CaptionPanel: NSPanel {
 
     init(view: NSView) {
-        super.init(contentRect: NSRect(x: 0, y: 0, width: 520, height: 64),
+        super.init(contentRect: NSRect(x: 0, y: 0,
+                                       width: CaptionLayout.preferredWidth,
+                                       height: CaptionLayout.bottomGap),
                    styleMask: [.borderless, .nonactivatingPanel],
                    backing: .buffered, defer: false)
         level = .screenSaver
@@ -44,6 +49,13 @@ final class CaptionPanel: NSPanel {
     /// put the bar tens of points off centre, because the width AppKit settles on is not
     /// always the width that was asked for.
     ///
+    /// That mismatch is also why the horizontal half of this is now driven by
+    /// `CaptionLayout.width` rather than by the content: the same caption could be
+    /// measured a point or two differently between deltas, and every one of those points
+    /// moved both edges of the strip and every word in it. The width handed in here is a
+    /// constant for the display, so `frame.width` — and therefore the origin — is the
+    /// same on every call. Only `size.height` changes.
+    ///
     /// The screen is required, not optional. It used to fall back to `NSScreen.main`,
     /// which is the screen holding the key window — FlowState's own — so before the
     /// pointer had ever settled anywhere the subtitles for what you are doing appeared on
@@ -51,14 +63,25 @@ final class CaptionPanel: NSPanel {
     /// screen means no caption. See `ActiveScreenOverlay`.
     func place(on screen: NSScreen, size: CGSize) {
         let v = screen.visibleFrame
-        setContentSize(CGSize(width: min(size.width, v.width - 80), height: size.height))
+        setContentSize(size)
         layoutIfNeeded()
-        setFrameOrigin(CGPoint(x: (v.midX - frame.width / 2).rounded(), y: v.minY + 64))
+        setFrameOrigin(CGPoint(x: CaptionLayout.originX(panelWidth: frame.width,
+                                                        visibleMidX: v.midX),
+                               y: v.minY + CaptionLayout.bottomGap))
     }
 }
 
 struct CaptionBarView: View {
     let line: CaptionState.Line
+
+    /// The width of the panel this is being drawn into — `CaptionLayout.width` for the
+    /// display it is on.
+    ///
+    /// Passed in rather than inferred from the text, and it is the whole fix: the card is
+    /// pinned to it, so the text wraps at a width that does not depend on the text. What
+    /// changes between one delta and the next is the number of lines, and nothing else.
+    var width: CGFloat = CaptionLayout.preferredWidth
+
     /// True when the text was cut down to fit. Only then is hovering worth anything, and
     /// only then does the panel take the mouse at all.
     var truncated: Bool = false
@@ -70,6 +93,9 @@ struct CaptionBarView: View {
     /// Expanding on hover changes what SwiftUI draws but not what AppKit sized the window
     /// to, and a window that stays the old size simply clips the text that hovering was
     /// supposed to reveal.
+    ///
+    /// The width in this size is always `width`; only the height is news. The controller
+    /// reads it that way — see `CaptionController.resize`.
     var onResize: (CGSize) -> Void = { _ in }
 
     /// Reduce Transparency, from the system. The blur below is the whole reason this
@@ -105,6 +131,12 @@ struct CaptionBarView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 11)
+        // Fixed across, free down. The card is exactly as wide as the panel it is in, so
+        // a one-word caption and a four-line one occupy the same footprint on screen and
+        // the background never has to be re-measured to match the text. Height is left
+        // entirely to the content: no `height:` here and none in the window either, so a
+        // line that wraps makes the strip taller by exactly one line of it.
+        .frame(width: CaptionLayout.cardWidth(panelWidth: width), alignment: .leading)
         .background {
             // Dark and blurred rather than solid: it lies over arbitrary content, and a
             // flat panel would look pasted on top of a photograph.
@@ -126,7 +158,7 @@ struct CaptionBarView: View {
         // 24 points below the box, and a 10-point margin cropped it into a hard line
         // across the bottom — a shadow with an edge looks worse than no shadow.
         .shadow(color: .black.opacity(0.38), radius: 14, y: 4)
-        .padding(20)
+        .padding(CaptionLayout.shadowMargin)
         .background {
             GeometryReader { geo in
                 Color.clear
@@ -156,6 +188,14 @@ final class CaptionController {
     private var host: NSHostingView<AnyView>?
     private var state = CaptionState()
     private var timer: Timer?
+    /// The last height the panel was actually given, so a measurement that comes back as
+    /// zero — a hosting view asked for its size before it has laid out — leaves the strip
+    /// where it is instead of collapsing it for a frame. See `CaptionLayout.height`.
+    ///
+    /// It starts at one line rather than at nothing for the same reason: the first
+    /// measurement of a brand-new hosting view is the one most likely to come back empty,
+    /// and that is the frame the caption appears in.
+    private var height: CGFloat = CaptionLayout.singleLineHeight
 
     var isEnabled = false {
         didSet { if !isEnabled { hide() } }
@@ -233,7 +273,19 @@ final class CaptionController {
 
     private func refresh() {
         guard let line = state.line else { return hide() }
-        let root = AnyView(CaptionBarView(line: line, truncated: state.wasTruncated,
+        // No active screen — the pointer has not settled on one of several displays, or
+        // the one it had settled on has been unplugged. Say nothing anywhere rather than
+        // saying it on the wrong screen.
+        //
+        // Resolved before the view is built, not after, because the view needs the width:
+        // the display decides how wide the strip is and the strip decides where the text
+        // wraps, in that order.
+        guard let screen else { return hide() }
+        let visible = screen.visibleFrame
+        let width = CaptionLayout.width(visibleWidth: visible.width)
+
+        let root = AnyView(CaptionBarView(line: line, width: width,
+                                          truncated: state.wasTruncated,
                                           onResize: { [weak self] size in
                                               self?.resize(to: size)
                                           }))
@@ -251,25 +303,41 @@ final class CaptionController {
         // clicks over the middle of somebody's screen is a nuisance; one that does so
         // only when it is holding back text they might want is a control.
         panel.ignoresMouseEvents = !state.wasTruncated
-        // No active screen — the pointer has not settled on one of several displays, or
-        // the one it had settled on has been unplugged. Say nothing anywhere rather than
-        // saying it on the wrong screen.
-        guard let screen else { return hide() }
 
-        // Sized to the text rather than fixed: a two-word caption in a 520-point bar is
-        // mostly empty box, and an empty box over somebody's screen is just clutter.
-        let fitted = host.fittingSize
-        panel.place(on: screen, size: CGSize(width: max(220, fitted.width),
-                                             height: max(52, fitted.height)))
+        // Height from the content, width from the display. `fittingSize` is only ever
+        // read for its height now — it is a measurement taken the instant after the root
+        // view was swapped, and it can lag a frame. It used to set the width too, which
+        // is why a caption occasionally landed a few points off centre and then jumped
+        // when the real measurement arrived; a lagging height is invisible by comparison,
+        // and `onResize` corrects it either way.
+        place(panel, on: screen, width: width,
+              height: CaptionLayout.height(measured: host.fittingSize.height,
+                                           fallback: height,
+                                           visibleHeight: visible.height))
         panel.orderFrontRegardless()
     }
 
-    /// The content changed shape — usually a hover expanding it. Re-place rather than
-    /// only resize, so it stays centred as it grows.
+    /// The content changed shape — a line wrapped, a delta arrived, or a hover expanded
+    /// it. Re-place rather than only resize, so it stays centred as it grows.
+    ///
+    /// This fires several times a second while the assistant is talking, so it is also
+    /// where the promise is kept: the width is recomputed from the screen rather than
+    /// taken from `size`, and a call that would not move anything returns without
+    /// touching the window at all.
     private func resize(to size: CGSize) {
         guard let panel, let screen, panel.isVisible else { return }
-        panel.place(on: screen, size: CGSize(width: max(220, size.width),
-                                             height: max(52, size.height)))
+        let visible = screen.visibleFrame
+        let width = CaptionLayout.width(visibleWidth: visible.width)
+        let wanted = CaptionLayout.height(measured: size.height, fallback: height,
+                                          visibleHeight: visible.height)
+        guard wanted != panel.frame.height || width != panel.frame.width else { return }
+        place(panel, on: screen, width: width, height: wanted)
+    }
+
+    private func place(_ panel: CaptionPanel, on screen: NSScreen,
+                       width: CGFloat, height: CGFloat) {
+        self.height = height
+        panel.place(on: screen, size: CGSize(width: width, height: height))
     }
 
     private func hide() {

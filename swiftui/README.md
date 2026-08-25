@@ -423,6 +423,10 @@ cases are deterministic. `swift test`.
   deleted line by line, pinned through a retention purge, trimmed by the keep-last limit,
   held out of disk by manual-save mode, and finally deleted for real
   (`Scripts/verify-transcript.sh`, 26 checks over two "launches").
+- The caption strip's shape: one width per display, held constant across every delta of a
+  sentence being spoken, and a height that grows and shrinks with the wrapped text
+  (`Scripts/verify-caption-size.sh`, measuring the real view; `CaptionLayoutTests` for the
+  arithmetic).
 
 ## Which screen it sees
 

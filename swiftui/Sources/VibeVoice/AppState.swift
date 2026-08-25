@@ -655,6 +655,106 @@ final class AppState: ObservableObject {
             }
         }
 
+        // Listens for a while and writes down every phrase the recogniser produced,
+        // with the score it got. "It didn't work" is not something anybody can act on;
+        // "you said hey flow and it came through as 'a flow' scoring 0.71" is.
+        // A standing record of why the wake word did not fire.
+        //
+        // Every round of "I said Hey Flow and nothing happened" so far has been solved by
+        // capturing what the recogniser ACTUALLY heard, and every one of those captures
+        // cost a timed window that had to be coordinated out loud — start the timer, ask
+        // him to speak, hope he was at the keyboard. Twice the window closed before he
+        // clapped and the file came back empty, which looks identical to a failure.
+        //
+        // So it writes itself down as it goes. Whenever the wake word is on, each new
+        // transcript with its score, and each rejected clap with the level it needed
+        // against the level it got, appends to the log. "It is not working" then has an
+        // answer already sitting on disk, from the moment it did not work, rather than
+        // from a re-enactment afterwards.
+        Task { @MainActor in
+            let dir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Logs/FlowState")
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let url = dir.appendingPathComponent("wake.log")
+            var seenText = Set<String>()
+            var seenTrace = 0
+            let stamp = DateFormatter()
+            stamp.dateFormat = "HH:mm:ss"
+            func append(_ line: String) {
+                let entry = "\(stamp.string(from: Date()))  \(line)\n"
+                guard let d = entry.data(using: .utf8) else { return }
+                if let h = try? FileHandle(forWritingTo: url) {
+                    defer { try? h.close() }
+                    _ = try? h.seekToEnd()
+                    try? h.write(contentsOf: d)
+                } else {
+                    try? d.write(to: url)
+                }
+            }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(500))
+                guard self.settings.wakeWord else { continue }
+                let text = self.wake.lastHeard
+                if !text.isEmpty, !seenText.contains(text) {
+                    seenText.insert(text)
+                    if seenText.count > 400 { seenText.removeAll() }
+                    let phrase = self.settings.wakePhrase == "heyFlowState"
+                        ? WakePhrase.heyFlowState : WakePhrase.heyFlow
+                    let score = phrase.score(text)
+                    // Only the near misses and the hits. A log of every word he says all
+                    // day is a transcript of his life, not a diagnostic, and it would bury
+                    // the one line that matters.
+                    if score > 0.45 {
+                        append(String(format: "heard  %.2f / %.2f  %@",
+                                      score, WakePhrase.threshold, text))
+                    }
+                }
+                let trace = self.wake.trace
+                if trace.count > seenTrace {
+                    for t in trace[seenTrace...] {
+                        append("clap   \(t.detail) at \(String(format: "%.0f dB", 20 * log10(max(t.peak, 0.0001))))")
+                    }
+                    seenTrace = trace.count
+                } else if trace.count < seenTrace {
+                    seenTrace = trace.count
+                }
+            }
+        }
+
+        if let secs = ProcessInfo.processInfo.environment["FLOWSTATE_WAKE_LISTEN"],
+           let seconds = Double(secs), seconds > 0 {
+            Task { @MainActor in
+                self.settings.wakeWord = true
+                self.applyWakeWord()
+                var lines: [String] = []
+                // Record whether the wake actually FIRES, not just whether the words
+                // scored. The score can be perfect and the wake still be swallowed
+                // somewhere between the recogniser and the socket.
+                var fired = 0
+                try? await Task.sleep(for: .milliseconds(300))
+                self.wake.onWake = { fired += 1 }
+                var seen = Set<String>()
+                let deadline = Date().addingTimeInterval(seconds)
+                while Date() < deadline {
+                    try? await Task.sleep(for: .milliseconds(400))
+                    let text = self.wake.lastHeard
+                    guard !text.isEmpty, !seen.contains(text) else { continue }
+                    seen.insert(text)
+                    let phrase = self.settings.wakePhrase == "heyFlowState"
+                        ? WakePhrase.heyFlowState : WakePhrase.heyFlow
+                    lines.append(String(format: "  %.2f  %@", phrase.score(text), text))
+                }
+                for t in self.wake.trace.prefix(20) {
+                    lines.append("  clap: \(t.detail) at \(String(format: "%.0f dB", 20 * log10(max(t.peak, 0.0001))))")
+                }
+                let out = "threshold \(WakePhrase.threshold)  |  onWake fired \(fired) time(s)\n"
+                        + lines.joined(separator: "\n") + "\n"
+                try? out.write(to: URL(fileURLWithPath: "/tmp/flowstate-wake-listen.txt"),
+                               atomically: true, encoding: .utf8)
+                exit(0)
+            }
+        }
+
         // Reports every link in the wake chain after idling for a bit, because "the wake
         // word does not work" has half a dozen possible causes in three files and no way
         // to tell them apart from the outside.
@@ -1826,6 +1926,11 @@ final class AppState: ObservableObject {
     }
 
     func disconnect() {
+        // A hang-up cancels a voice switch that has not reconnected yet. The switch sets
+        // this again immediately after its own call to `disconnect()`, so the only thing
+        // cleared here is somebody else's — a manual disconnect, a dropped socket, a new
+        // conversation — and the user closing the session always wins over it.
+        awaitingVoiceReconnect = false
         // Only when there was something to leave — `disconnect` is also the tidy-up path
         // for a connection that never opened, and a farewell chime for a session that
         // never happened is a lie about what just occurred.
@@ -1906,6 +2011,92 @@ final class AppState: ObservableObject {
     func applySettingsLive() {
         guard case .live = connection else { return }
         client.sendSessionUpdate(settings, nativeTools: tools.realtimeTools())
+    }
+
+    // MARK: - Voice
+
+    /// QA — switching the voice.
+    ///
+    /// Picking a voice while a session is live must NOT require the user to disconnect
+    /// and reconnect by hand, and must not leave anything of the old voice behind: the
+    /// audio still queued for playback is dropped, the socket is closed, and a brand new
+    /// session is opened with the new voice in its `session.update`. Expect: one chime
+    /// down, one chime up, a `Live · session …` line with a NEW session id, and the very
+    /// next reply in the new voice. The transcript on screen is not cleared — it belongs
+    /// to the conversation, not to the socket.
+    ///
+    /// Things worth trying to break it with: switching twice quickly (only the last one
+    /// may survive, and there must never be two sockets), hitting Connect or Disconnect
+    /// during the swap (the user wins — a manual disconnect cancels the pending
+    /// reconnect), and switching while nothing is connected (stores it silently; no
+    /// session is opened just to apply a setting).
+    ///
+    /// One reconnect at a time. Bumped by every voice switch, so a swap that is still
+    /// waiting for the socket to close finds itself superseded and does nothing.
+    private var voiceReconnectGeneration = 0
+    /// True between a voice switch's disconnect and its reconnect. Cleared by ANY other
+    /// path through `disconnect()`, which is what makes a manual hang-up final.
+    private var awaitingVoiceReconnect = false
+
+    /// The one place the voice changes, whoever changed it — the picker or the model.
+    /// - Returns: what to say about it, for the spoken path. The transcript line is
+    ///   filed here either way.
+    @discardableResult
+    func setVoice(_ voice: String) -> String {
+        let live = connection == .live || connection == .connecting
+        let plan = VoiceSwitch.plan(from: settings.voice, to: voice, live: live, known: kVoices)
+        // The canonical spelling, so "Marin" from speech is stored the way the API
+        // spells it rather than the way it was said.
+        let resolved = VoiceSwitch.resolve(voice, known: kVoices) ?? settings.voice
+
+        switch plan {
+        case .unchanged, .unknown:
+            break
+        case .stored, .reconnect:
+            settings.voice = resolved
+        }
+
+        if let line = VoiceSwitch.note(plan, voice: resolved, known: kVoices) { note(line) }
+        objectWillChange.send()
+
+        if VoiceSwitch.needsReconnect(plan) { reconnectForVoice() }
+        return VoiceSwitch.spoken(plan, voice: resolved)
+    }
+
+    /// Take the session down and bring it straight back up in the new voice.
+    ///
+    /// Sequential, not overlapping: the old socket is closed before the new one is
+    /// opened. Two live sessions would both be billed, both hold the microphone, and
+    /// both answer — which is the failure this is arranged to make impossible.
+    private func reconnectForVoice() {
+        voiceReconnectGeneration &+= 1
+        let mine = voiceReconnectGeneration
+
+        // Whatever the old voice was still saying stops now. `disconnect()` closes the
+        // socket, but audio already handed to the engine keeps playing out of it — so
+        // without this the first thing you hear after switching is the end of a sentence
+        // in the voice you just left.
+        audio.flushPlayback()
+        disconnect()
+        // Set AFTER `disconnect()`, which clears it: the flag means "a voice switch owns
+        // the next connect", and the disconnect it performs itself is part of the switch.
+        awaitingVoiceReconnect = true
+
+        Task { @MainActor in
+            // Long enough for the socket to finish going away and — the real constraint —
+            // for `disconnect()`'s own 120 ms audio rebuild to have run, so `connect()`
+            // is not starting an engine on top of one that is half-way through starting.
+            try? await Task.sleep(for: .milliseconds(300))
+            // Superseded by a later switch, or cancelled by anything that closed the
+            // connection in the meantime.
+            guard mine == self.voiceReconnectGeneration, self.awaitingVoiceReconnect else { return }
+            self.awaitingVoiceReconnect = false
+            // Belt and braces against a second session: if a socket is up or on its way
+            // up — the user hit Connect during the swap — there is nothing to reconnect.
+            guard !self.client.isConnected,
+                  self.connection != .live, self.connection != .connecting else { return }
+            await self.connect()
+        }
     }
 
     /// The one place a cost mode is applied, so the header toggle and Settings cannot
@@ -3432,8 +3623,11 @@ final class AppState: ObservableObject {
         let on = value == "on"
         switch key {
         case "voice":
-            settings.voice = value
-            return "Voice is \(value)." + (client.isConnected ? " You'll hear it on the next reply." : "")
+            // NOT a plain assignment, and not a `session.update` either. The output voice
+            // is fixed for the life of a realtime session once the model has spoken, so
+            // the only honest way to change it mid-conversation is a reconnect — which
+            // `setVoice` performs. See `VoiceSwitch`.
+            return setVoice(value)
         case "backdrop":
             if let b = Backdrop.allCases.first(where: { $0.label.lowercased() == value }) {
                 settings.backdrop = b
