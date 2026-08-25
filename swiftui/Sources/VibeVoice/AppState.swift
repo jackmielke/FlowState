@@ -481,15 +481,30 @@ final class AppState: ObservableObject {
     }
 
     /// The small sounds. See `Earcon`.
-    private let earcons = EarconPlayer()
+    ///
+    /// Played through the conversation's own engine — there is no second audio engine
+    /// any more. Two of them holding one output device, one with voice processing on
+    /// it, is a source of crackling and buys nothing: a chime is a fifth of a second.
+    /// Rendered once each and kept, because synthesising on the main thread at the
+    /// moment of playing would be a stutter in the one place it shows.
+    private var earconCache: [String: [Float]] = [:]
 
     func sound(_ earcon: Earcon, _ id: String) {
         guard settings.earcons else { return }
-        earcons.play(earcon, id: id)
+        let samples = earconCache[id] ?? {
+            let rendered = earcon.render(sampleRate: AudioEngine.targetRate)
+            earconCache[id] = rendered
+            return rendered
+        }()
+        audio.playTone(samples)
     }
 
     /// Always-listening wake phrase. See `WakeListener`.
     let wake = WakeListener()
+
+    /// Where microphone chunks are handled. Serial, and never the audio thread.
+    private static let micQueue = DispatchQueue(label: "com.jackmielke.vibevoice.mic",
+                                                qos: .userInitiated)
 
     func applyWakeWord() {
         guard settings.wakeWord else {
@@ -1470,6 +1485,19 @@ final class AppState: ObservableObject {
 
         audio.onMicPCM = { [weak self] data, muted in
             guard let self else { return }
+            // EVERYTHING below runs OFF the render thread.
+            //
+            // This closure is called from the capture tap, whose only job is to keep the
+            // buffer fed on time. What it was doing instead: sub-framing for the clap
+            // detector behind a lock the tuning panel also reads four times a second,
+            // base64-encoding every chunk for the socket, taking the recorder's lock, and
+            // appending to an array that reallocates. Allocation and lock contention on a
+            // render thread is what a crackle IS — the thread misses its deadline waiting
+            // on something of lower priority.
+            //
+            // None of this work is real-time. A serial queue keeps the chunks in order,
+            // which is the only guarantee any of these consumers actually needs.
+            Self.micQueue.async {
             // Three consumers, one rule. `data` is already silence when `muted` is true —
             // the engine substitutes it at the source, so nothing downstream can leak the
             // real audio by forgetting to check the flag. See `MicMute`.
@@ -1506,6 +1534,7 @@ final class AppState: ObservableObject {
             if route.toRecorder { self.recorder.appendMic(data) }
             guard route.toModel else { return }
             self.client.appendAudio(data)
+            }
         }
 
         // The gate the user left closed last time they quit. Applied before anything can

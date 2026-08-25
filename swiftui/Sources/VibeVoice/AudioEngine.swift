@@ -318,6 +318,29 @@ final class AudioEngine: ObservableObject, @unchecked Sendable {
     // MARK: - Playback path
 
     /// Schedule raw PCM16 mono @ 24 kHz coming off the socket.
+    /// Plays a short tone through the SAME engine as everything else.
+    ///
+    /// There used to be a second `AVAudioEngine` for these. It started on the first
+    /// chime and then held the output device for the rest of the session, alongside
+    /// this one — and during a conversation this one has voice processing on it. Two
+    /// engines contending for a single device is what the crackling was.
+    ///
+    /// The tone is float32 mono at the wire rate, which is exactly `playbackFormat`,
+    /// so it can be scheduled on the existing player node with no conversion. It does
+    /// NOT touch `pendingScheduled`: that counter is what "the assistant is still
+    /// speaking" means, and a chime is not the assistant speaking — counting it would
+    /// make barge-in and the go-to-sleep wait treat a beep as a sentence.
+    func playTone(_ samples: [Float]) {
+        guard engine.isRunning, !samples.isEmpty else { return }
+        let frames = AVAudioFrameCount(samples.count)
+        guard let buf = AVAudioPCMBuffer(pcmFormat: playbackFormat, frameCapacity: frames),
+              let dst = buf.floatChannelData?[0] else { return }
+        buf.frameLength = frames
+        samples.withUnsafeBufferPointer { dst.update(from: $0.baseAddress!, count: samples.count) }
+        player.scheduleBuffer(buf, completionHandler: nil)
+        if !player.isPlaying { player.play() }
+    }
+
     func enqueue(pcm16: Data) {
         guard running, pcm16.count >= 2 else { return }
         let frames = AVAudioFrameCount(pcm16.count / 2)
