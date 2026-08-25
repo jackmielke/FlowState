@@ -121,7 +121,20 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
                 "output": [
                     "format": ["type": "audio/pcm", "rate": 24000],
                     "voice": s.voice,
-                    "speed": s.speed
+                    // A DECIMAL, not a Double, and that is the whole fix.
+                    //
+                    // The API rejects any number carrying more than sixteen decimal
+                    // places, and it rejects the WHOLE request — so one bad float takes
+                    // the tools, the instructions and the turn detection with it. The
+                    // symptom was an assistant insisting it had no way to go to sleep,
+                    // which points nowhere near a slider.
+                    //
+                    // Rounding the Double does not fix it: 0.55 is not representable in
+                    // binary, so `(0.55 * 100).rounded() / 100` is still 0.55000000…04
+                    // and JSONSerialization writes all seventeen digits. Only changing
+                    // the TYPE helps — an NSDecimalNumber built from a formatted string
+                    // serialises as exactly the digits it was given.
+                    "speed": NSDecimalNumber(string: String(format: "%.2f", s.speed))
                 ]
             ]
         ]
@@ -132,6 +145,11 @@ final class RealtimeClient: NSObject, @unchecked Sendable {
             session["tools"] = tools
             session["tool_choice"] = "auto"
         }
+        let names = tools.compactMap { $0["name"] as? String }.joined(separator: ",")
+        let line = "[realtime] -> session.update with \(tools.count) tools: \(names)\n"
+        FileHandle.standardError.write(Data(line.utf8))
+        try? line.write(to: URL(fileURLWithPath: "/tmp/flowstate-session-tools.txt"),
+                        atomically: true, encoding: .utf8)
         send(json: ["type": "session.update", "session": session])
     }
 
