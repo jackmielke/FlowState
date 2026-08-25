@@ -15,21 +15,26 @@ import VibeVoiceCore
 struct AmbientClock: View {
     @ObservedObject var state: AppState
 
-    /// Ticks on the minute rather than the second.
+    /// `TimelineView`, not a `Timer`.
     ///
-    /// A seconds display is a thing you watch; a minutes display is a thing you glance
-    /// at. It also means this redraws sixty times less often behind a live shader.
-    @State private var now = Date()
-    private let clock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
-
-    private var time: String {
+    /// A clock in ambient mode is a clock in an app that is, by definition, doing
+    /// nothing — which is precisely the condition macOS App Nap looks for. A repeating
+    /// `Timer` gets throttled or suspended outright, and the display freezes at whatever
+    /// minute it was when the system decided the app was idle. Reported from the room:
+    /// it sat on 12:26 AM.
+    ///
+    /// `TimelineView` schedules its own redraws through SwiftUI rather than through a
+    /// run-loop timer, and `.everyMinute` exists for exactly this — it is aligned to the
+    /// minute boundary and it recovers after the machine sleeps and wakes, which a timer
+    /// started an hour ago does not.
+    private func time(_ now: Date) -> String {
         let f = DateFormatter()
         // The user's own clock, 12- or 24-hour, without seconds.
         f.setLocalizedDateFormatFromTemplate("j:mm")
         return f.string(from: now)
     }
 
-    private var date: String {
+    private func date(_ now: Date) -> String {
         let f = DateFormatter()
         f.setLocalizedDateFormatFromTemplate("EEEE d MMMM")
         return f.string(from: now)
@@ -51,14 +56,20 @@ struct AmbientClock: View {
     }
 
     var body: some View {
+        TimelineView(.everyMinute) { tl in
+            clockFace(at: tl.date)
+        }
+    }
+
+    private func clockFace(at now: Date) -> some View {
         VStack(spacing: 6) {
-            Text(time)
+            Text(time(now))
                 // Thin and huge: at this size a regular weight reads as a dashboard, and
                 // this is meant to read as a room.
                 .font(.system(size: 84, weight: .thin, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(.white.opacity(0.92))
-            Text(date)
+            Text(date(now))
                 .font(.system(size: 14, weight: .medium, design: .rounded))
                 .foregroundStyle(.white.opacity(0.62))
             if let lastTopic {
@@ -74,16 +85,8 @@ struct AmbientClock: View {
         // The scene behind it can be any brightness, and thin white text on a bright sky
         // is unreadable without this.
         .shadow(color: .black.opacity(0.55), radius: 22, y: 2)
-        .onReceive(clock) { t in
-            // Only when the minute actually changes, so the shader behind is not asked to
-            // recomposite once a second for a label that says the same thing.
-            if Calendar.current.component(.minute, from: t)
-                != Calendar.current.component(.minute, from: now) {
-                now = t
-            }
-        }
         .transition(.opacity)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(time), \(date)")
+        .accessibilityLabel("\(time(now)), \(date(now))")
     }
 }
