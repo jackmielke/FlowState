@@ -50,7 +50,7 @@ final class HotkeyGestureTests: XCTestCase {
         var r = recognizer()
         r.keyDown(at: 0)
         XCTAssertNil(r.keyUp(at: 0.08), "first tap must stay pending")
-        XCTAssertEqual(r.keyDown(at: 0.20), .toggleVoiceMode)
+        XCTAssertEqual(r.keyDown(at: 0.20), .startVoiceMode)
     }
 
     /// The whole point of rule 1: the first press of a double press must not have started
@@ -59,7 +59,7 @@ final class HotkeyGestureTests: XCTestCase {
         var r = recognizer()
         XCTAssertNil(r.keyDown(at: 0))
         XCTAssertNil(r.keyUp(at: 0.08))
-        XCTAssertEqual(r.keyDown(at: 0.20), .toggleVoiceMode)
+        XCTAssertEqual(r.keyDown(at: 0.20), .startVoiceMode)
         XCTAssertFalse(r.isDictating, "the mic must never have opened")
     }
 
@@ -78,7 +78,7 @@ final class HotkeyGestureTests: XCTestCase {
         r.keyDown(at: 0)
         XCTAssertEqual(r.tick(at: 0.25), .beginDictation)
         XCTAssertEqual(r.keyUp(at: 1.0), .endDictation)
-        XCTAssertNil(r.keyDown(at: 1.05), "must begin a fresh press, not toggle voice mode")
+        XCTAssertNil(r.keyDown(at: 1.05), "must begin a fresh press, not start voice mode")
         XCTAssertEqual(r.tick(at: 1.30), .beginDictation, "and it can become another hold")
     }
 
@@ -123,6 +123,38 @@ final class HotkeyGestureTests: XCTestCase {
     func test_resetWhenIdleIsSilent() {
         var r = recognizer()
         XCTAssertNil(r.reset())
+    }
+
+    // MARK: - Stopping a running session
+
+    /// Jack's rule: double press to start, press once to stop. While a session is running
+    /// there is nothing to disambiguate, so the tap must act on key-up rather than waiting
+    /// out the double-press window — a hang-up key with 350ms of lag feels broken.
+    func test_singleTapWhileVoiceModeRunningStopsItImmediately() {
+        var r = recognizer()
+        r.isVoiceModeActive = true
+        r.keyDown(at: 0)
+        XCTAssertEqual(r.keyUp(at: 0.08), .stopVoiceMode)
+        XCTAssertNil(r.nextDeadline, "no timer should be left armed")
+    }
+
+    /// The same tap with nothing running must stay silent, or every stray press opens a
+    /// session.
+    func test_singleTapWhileIdleStillDoesNothing() {
+        var r = recognizer()
+        r.isVoiceModeActive = false
+        r.keyDown(at: 0)
+        XCTAssertNil(r.keyUp(at: 0.08))
+        XCTAssertNil(r.tick(at: 0.5))
+    }
+
+    /// Holding still dictates even mid-session — only the tap path changes behaviour.
+    func test_holdStillDictatesWhileVoiceModeRunning() {
+        var r = recognizer()
+        r.isVoiceModeActive = true
+        r.keyDown(at: 0)
+        XCTAssertEqual(r.tick(at: 0.25), .beginDictation)
+        XCTAssertEqual(r.keyUp(at: 1.0), .endDictation)
     }
 
     /// A key-up with no matching key-down happens when the hotkey is rebound mid-press.

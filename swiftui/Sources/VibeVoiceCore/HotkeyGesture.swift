@@ -30,8 +30,10 @@ public enum HotkeyGesture: Equatable, Sendable {
         case beginDictation
         /// The key came up while dictating — close the mic, transcribe, insert.
         case endDictation
-        /// Two quick taps — toggle the full voice-to-voice session.
-        case toggleVoiceMode
+        /// Two quick taps — open the full voice-to-voice session.
+        case startVoiceMode
+        /// A single tap while a session is running — hang up.
+        case stopVoiceMode
         /// A hold was abandoned before anything was captured; undo any UI the begin showed.
         case cancelDictation
     }
@@ -59,6 +61,17 @@ public enum HotkeyGesture: Equatable, Sendable {
 
         /// How long after a tap a second tap still counts as a double press.
         public var doubleTapWindow: TimeInterval
+
+        /// Whether a voice-to-voice session is currently running. The driver keeps this in
+        /// sync with the connection state.
+        ///
+        /// This is what makes a single tap safe to act on. While nothing is running a tap
+        /// is ambiguous — it might be the first half of a double press — so it has to wait
+        /// out the window and then be discarded. While a session *is* running that
+        /// ambiguity disappears, because a double press could only mean "start" and it has
+        /// already started. So a tap can hang up the moment the key comes up, with none of
+        /// the 350ms delay that would make hanging up feel broken.
+        public var isVoiceModeActive: Bool = false
 
         private var phase: Phase = .idle
 
@@ -89,7 +102,7 @@ public enum HotkeyGesture: Equatable, Sendable {
                 // Rule 2 is already satisfied here: we only ever reach this phase from a
                 // tap, never from a hold.
                 phase = .idle
-                return .toggleVoiceMode
+                return .startVoiceMode
 
             case .idle, .awaitingSecondTap:
                 phase = .pressed(since: now)
@@ -109,8 +122,17 @@ public enum HotkeyGesture: Equatable, Sendable {
                 phase = .idle
                 return .endDictation
 
+            case .pressed where isVoiceModeActive:
+                // Nothing to disambiguate: a session is already open, so this tap can only
+                // mean hang up. Acting now rather than after the double-press window is
+                // the difference between a stop key that feels instant and one that feels
+                // stuck.
+                phase = .idle
+                return .stopVoiceMode
+
             case .pressed:
-                // A tap. Do not act yet — it might be the first half of a double press.
+                // A tap with nothing running. Do not act yet — it might be the first half
+                // of a double press.
                 phase = .awaitingSecondTap(firstTapEndedAt: now)
                 return nil
 
