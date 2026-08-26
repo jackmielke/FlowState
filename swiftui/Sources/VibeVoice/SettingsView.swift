@@ -641,7 +641,23 @@ struct SettingsView: View {
                 }
                 caption(AXIsProcessTrusted()
                         ? "\(kAssistantDisplayName) can place text in other apps."
-                        : "Without this, dictation can transcribe but has nowhere to put the result. Grant it in System Settings \u{2192} Privacy & Security \u{2192} Accessibility, then relaunch.")
+                        : "Without this, dictation still transcribes and still puts the words on your clipboard \u{2014} it just cannot type them for you.")
+                if !AXIsProcessTrusted() {
+                    HStack {
+                        Spacer()
+                        // Asking macOS to prompt is the only way to get this app into the
+                        // Accessibility list in the first place; sending someone to System
+                        // Settings before that leaves them hunting for a row that is not
+                        // there yet.
+                        Button("Grant Accessibility\u{2026}") {
+                            let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+                            _ = AXIsProcessTrustedWithOptions(opts as CFDictionary)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+                    caption("macOS only applies the change after a relaunch.")
+                }
             }
 
             section("What it does to your words") {

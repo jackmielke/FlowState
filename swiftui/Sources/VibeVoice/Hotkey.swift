@@ -65,12 +65,36 @@ struct HotkeyCombo: Equatable, Identifiable {
         id: "cmdShiftPeriod", label: "⌘⇧.",
         keyCode: UInt32(kVK_ANSI_Period), modifiers: UInt32(cmdKey | shiftKey))
 
+    /// The wake key. ⌃Q by default.
+    ///
+    /// A bare Control chord rather than one of the ⌘⇧ pairs because this is the key
+    /// somebody hits without looking, mid-sentence, while their other hand is on a
+    /// mouse — and Control is the modifier the left little finger already rests near.
+    ///
+    /// One thing it takes with it: ⌃Q is XON in a terminal, the key that resumes output
+    /// after ⌃S paused it. A Carbon hotkey is registered ahead of every app, so binding
+    /// this steals ⌃Q from Terminal, iTerm, tmux and anything else doing flow control.
+    /// Very few people use ⌃S/⌃Q deliberately, but the ones who do will notice — hence
+    /// the two alternates beside it.
+    static let ctrlQ = HotkeyCombo(
+        id: "ctrlQ", label: "⌃Q",
+        keyCode: UInt32(kVK_ANSI_Q), modifiers: UInt32(controlKey))
+
+    static let ctrlShiftQ = HotkeyCombo(
+        id: "ctrlShiftQ", label: "⌃⇧Q",
+        keyCode: UInt32(kVK_ANSI_Q), modifiers: UInt32(controlKey | shiftKey))
+
+    static let ctrlOptionSpace = HotkeyCombo(
+        id: "ctrlOptionSpace", label: "⌃⌥Space",
+        keyCode: UInt32(kVK_Space), modifiers: UInt32(controlKey | optionKey))
+
     static let summonChoices = [cmdShiftSpace, optionSpace, cmdShiftF]
     static let hushChoices = [ctrlShiftEscape, cmdShiftEscape, cmdShiftPeriod]
     static let recordChoices = [cmdShiftR, ctrlShiftR, optionShiftR]
     static let connectChoices = [ctrlShiftF, ctrlShiftSpace, cmdShiftL]
+    static let wakeChoices = [ctrlQ, ctrlShiftQ, ctrlOptionSpace]
 
-    static let all = summonChoices + connectChoices + recordChoices + hushChoices
+    static let all = summonChoices + connectChoices + recordChoices + hushChoices + wakeChoices
 
     static func named(_ id: String) -> HotkeyCombo {
         all.first { $0.id == id } ?? .cmdShiftSpace
@@ -84,6 +108,12 @@ final class GlobalHotkey {
     private struct Slot {
         var ref: EventHotKeyRef?
         var action: () -> Void
+        /// Set only for slots that care about the key coming up again.
+        ///
+        /// Almost nothing does — a shortcut fires when you press it, and the release is
+        /// noise. Hold-to-dictate is the exception: the whole gesture is defined by how
+        /// long the key stays down, which cannot be known from key-down alone.
+        var release: (() -> Void)?
     }
 
     private var slots: [UInt32: Slot] = [:]
@@ -139,9 +169,40 @@ final class GlobalHotkey {
 
     func unregisterHush() { unbind(id: 5) }
 
+    /// Turn it on. Never turns it off.
+    ///
+    /// The mirror image of the hush key, and a different slot from connect for the same
+    /// reason hush is: connect TOGGLES, and a toggle cannot answer "just be on". Someone
+    /// hitting this has already decided what they want, and half the time they do not
+    /// know whether a session is open — so a key that might hang up is the wrong key.
+    func registerWake(_ combo: HotkeyCombo, action: @escaping () -> Void) {
+        bind(id: 6, keyCode: combo.keyCode, modifiers: combo.modifiers, action: action)
+    }
+
+    func unregisterWake() { unbind(id: 6) }
+
+    /// The dictation key, which reports both halves of the press.
+    ///
+    /// Its own slot rather than an option on the wake key because the two answer different
+    /// questions, and because this is the only slot in the app that needs key-up at all.
+    /// The gesture — hold to dictate, double press to open a session, tap to hang one up —
+    /// is decided by `HotkeyGesture.Recognizer`; this just reports the raw edges.
+    func registerDictation(_ combo: HotkeyCombo,
+                           down: @escaping () -> Void,
+                           up: @escaping () -> Void) {
+        bind(id: 7, keyCode: combo.keyCode, modifiers: combo.modifiers, action: down, release: up)
+    }
+
+    func unregisterDictation() { unbind(id: 7) }
+
+
     // MARK: -
 
-    private func bind(id: UInt32, keyCode: UInt32, modifiers: UInt32, action: @escaping () -> Void) {
+    private func bind(id: UInt32,
+                      keyCode: UInt32,
+                      modifiers: UInt32,
+                      action: @escaping () -> Void,
+                      release: (() -> Void)? = nil) {
         installHandlerIfNeeded()
         unbind(id: id)
 
@@ -156,7 +217,7 @@ final class GlobalHotkey {
                 "[hotkey] could not register id \(id) (OSStatus \(status)) — another app may own it\n".utf8))
             return
         }
-        slots[id] = Slot(ref: ref, action: action)
+        slots[id] = Slot(ref: ref, action: action, release: release)
     }
 
     private func unbind(id: UInt32) {
@@ -166,20 +227,37 @@ final class GlobalHotkey {
 
     private func installHandlerIfNeeded() {
         guard handler == nil else { return }
-        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
-                                 eventKind: UInt32(kEventHotKeyPressed))
+        // Two specs now, not one. Registering only kEventHotKeyPressed is why hold-to-
+        // dictate could not work at all: Carbon delivers the release as a separate event
+        // kind, and a handler that never asked for it simply never hears the key come up.
+        var specs = [
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                          eventKind: UInt32(kEventHotKeyPressed)),
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                          eventKind: UInt32(kEventHotKeyReleased)),
+        ]
         InstallEventHandler(GetApplicationEventTarget(), { _, event, _ -> OSStatus in
             var hkID = EventHotKeyID()
             GetEventParameter(event, EventParamName(kEventParamDirectObject),
                               EventParamType(typeEventHotKeyID), nil,
                               MemoryLayout<EventHotKeyID>.size, nil, &hkID)
             let id = hkID.id
-            DispatchQueue.main.async { GlobalHotkey.shared.fire(id) }
+            let released = GetEventKind(event) == UInt32(kEventHotKeyReleased)
+            DispatchQueue.main.async { GlobalHotkey.shared.fire(id, released: released) }
             return noErr
-        }, 1, &spec, nil, &handler)
+        }, specs.count, &specs, nil, &handler)
     }
 
-    fileprivate func fire(_ id: UInt32) { slots[id]?.action() }
+    /// Slots without a `release` closure ignore key-up entirely, so adding the second
+    /// event spec above cannot make any existing shortcut fire twice.
+    fileprivate func fire(_ id: UInt32, released: Bool = false) {
+        guard let slot = slots[id] else { return }
+        if released {
+            slot.release?()
+        } else {
+            slot.action()
+        }
+    }
 
     func unregister() {
         for id in slots.keys { unbind(id: id) }
@@ -202,6 +280,32 @@ enum Summon {
         }
         app.activate(ignoringOtherApps: true)
         for w in app.windows where w.canBecomeMain {
+            w.makeKeyAndOrderFront(nil)
+            break
+        }
+    }
+
+    /// Raises and focuses, and never hides.
+    ///
+    /// `toggle()` is wrong for anything that means "be here": pressing the wake key
+    /// while the window happens to be in front would send it away, which is the exact
+    /// opposite of what was asked for. Deliberately unconditional — being told to come
+    /// forward when you are already forward is a no-op, not a reason to leave.
+    @MainActor
+    static func bringToFront() {
+        let app = NSApplication.shared
+        // Closing the last window leaves the app running (see `AppDelegate`) but with
+        // nothing to raise, so a window is asked for rather than assumed. Going through
+        // SwiftUI's own `openWindow` — captured by `WindowReopener` while the scene was
+        // alive — because a `Window(id:)` scene cannot be rebuilt from the AppKit side.
+        if app.windows.first(where: { $0.canBecomeMain }) == nil {
+            AppState.current?.reopenMainWindow?()
+        }
+        app.activate(ignoringOtherApps: true)
+        for w in app.windows where w.canBecomeMain {
+            // Minimised counts as "running in the background", and ordering a window in
+            // the Dock to the front does nothing at all — it has to come out first.
+            if w.isMiniaturized { w.deminiaturize(nil) }
             w.makeKeyAndOrderFront(nil)
             break
         }

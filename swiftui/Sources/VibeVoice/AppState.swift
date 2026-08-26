@@ -277,6 +277,11 @@ final class AppState: ObservableObject {
     @Published private(set) var queuedResponses: Int = 0
 
     let audio = AudioEngine()
+
+    /// Hold-to-dictate. Owns its own recorder rather than sharing `audio`, so an utterance
+    /// can be captured while a voice session is live without touching that engine's
+    /// voice-processing unit.
+    let dictation = DictationDriver()
     let cost = CostMeter()
     /// Records both halves of the conversation. Fed from the same PCM the socket sees.
     let recorder = SessionRecorder()
@@ -426,6 +431,112 @@ final class AppState: ObservableObject {
         GlobalHotkey.shared.registerHush(HotkeyCombo.named(settings.hushHotkey)) { [weak self] in
             Task { @MainActor in self?.hush() }
         }
+    }
+
+    /// Registers or removes the login item, and puts the setting back if macOS refused.
+    ///
+    /// The stored setting is not the source of truth — `SMAppService` is — so a failed
+    /// registration must not leave a switch reading "on" for something that will not
+    /// happen at the next login.
+    func applyStartAtLogin() {
+        if let problem = LoginItem.setEnabled(settings.startAtLogin) {
+            settings.startAtLogin = LoginItem.isEnabled
+            banner = problem
+        } else if settings.startAtLogin, LoginItem.needsApproval {
+            banner = "macOS is holding \(kAssistantDisplayName)'s login item until you allow it — System Settings › General › Login Items."
+        }
+        objectWillChange.send()
+    }
+
+    /// The wake key. ⌃Q by default. See `HotkeyCombo.ctrlQ`.
+    ///
+    /// The same combo now carries three gestures rather than one, so this registers the
+    /// dictation slot (which reports key-up as well as key-down) instead of the wake slot.
+    /// `DictationDriver` decides which gesture happened; wake is what a double press
+    /// resolves to, so the old behaviour is still in there, just no longer the only one.
+    func applyWakeHotkey() {
+        guard !settings.wakeHotkey.isEmpty else {
+            GlobalHotkey.shared.unregisterDictation()
+            GlobalHotkey.shared.unregisterWake()
+            return
+        }
+        GlobalHotkey.shared.unregisterWake()
+        wireDictationDriver()
+        let combo = HotkeyCombo.named(settings.wakeHotkey)
+        GlobalHotkey.shared.registerDictation(
+            combo,
+            down: { [weak self] in Task { @MainActor in self?.dictation.keyDown() } },
+            up:   { [weak self] in Task { @MainActor in self?.dictation.keyUp() } })
+    }
+
+    /// Hand the driver the four things it cannot know on its own.
+    private func wireDictationDriver() {
+        dictation.isVoiceModeActive = { [weak self] in
+            guard let self else { return false }
+            switch self.connection {
+            case .live, .connecting: return true
+            case .idle, .error:      return false
+            }
+        }
+        dictation.onStartVoiceMode = { [weak self] in
+            self?.wakeAndConnect(from: "double press")
+        }
+        dictation.onStopVoiceMode = { [weak self] in
+            _ = self?.hush()
+        }
+        dictation.onTranscript = { [weak self] text in
+            self?.note("Dictated: \(text)")
+        }
+    }
+
+    /// Be here, and be listening. The only key that has no off.
+    ///
+    /// Four things have to be true before somebody can talk, and the point of this one
+    /// key is that they stop being four things: the app is running, it is in front of
+    /// them, the microphone is open, and a session exists. Any of the four can be false
+    /// independently — a window closed behind Xcode, a mute left on from a meeting, a
+    /// session that dropped an hour ago — and every one of them looks identical from the
+    /// user's side, which is a Mac that does not answer.
+    ///
+    /// Idempotent by construction. Held down, pressed twice by accident, fired by a deep
+    /// link a second after the hotkey already fired: none of that may cost a live
+    /// session, so nothing here tears anything down.
+    func wakeAndConnect(from source: String) {
+        // Unconditional, and before any of the decisions below. "Running in the
+        // background" and "already connected" are independent states, and this key means
+        // the same thing in both — so activation is not part of the no-op.
+        Summon.bringToFront()
+
+        // An explicit key press outranks the quiet period. Hush snoozes the wake trigger
+        // because something in the room kept setting it off; a finger on a key is not
+        // that, and leaving the snooze up would mean the wake phrase stays deaf for the
+        // rest of the conversation this key just started. Zero seconds ends it now.
+        if wake.isSnoozed { wake.snooze(seconds: 0) }
+
+        // Connected but muted is the exact failure this key exists to prevent: the
+        // session is open, the orb is moving, and not one word is heard. Turning it on
+        // has to mean the microphone as well as the socket.
+        if audio.isMuted { setMicMuted(false) }
+
+        // Already live, or already on the way. Reconnecting would throw away a session
+        // that is working, and cancelling a handshake is worse than waiting the second
+        // out. Straight to stderr rather than `note()` — a no-op that files a transcript
+        // line turns a leaned-on key into a wall of "Already listening."
+        switch connection {
+        case .live, .connecting:
+            FileHandle.standardError.write(Data(
+                "[wake] \(source): already \(connection.label.lowercased()) — nothing to do\n".utf8))
+            return
+        case .idle, .error:
+            break
+        }
+
+        // Before the connection, not after, for the same reason the wake phrase plays it
+        // early: this is the answer to "did it hear me", and that question is being asked
+        // now rather than in the two seconds the socket takes.
+        sound(.wake, "wake")
+        FileHandle.standardError.write(Data("[wake] \(source): connecting\n".utf8))
+        Task { @MainActor in await connect() }
     }
 
     /// Stop. Hangs up if there is anything to hang up, and makes it stay stopped.
@@ -1560,7 +1671,24 @@ final class AppState: ObservableObject {
         set { settingsStore.settings = newValue }
     }
 
+    /// The live instance, for the two things that exist outside the SwiftUI graph and
+    /// still have to reach it: the app delegate (which is built before the scene's
+    /// `@StateObject`) and `DeepLink`. Weak, and read only on the main actor — this is a
+    /// back reference, not an owner, and there is exactly one `AppState`.
+    private(set) static weak var current: AppState?
+
+    /// Reopens the main window after it has been closed.
+    ///
+    /// A SwiftUI `Window(id:)` scene has no AppKit handle once its window is gone —
+    /// there is nothing in `NSApp.windows` left to `makeKeyAndOrderFront`. The only way
+    /// back is `openWindow(id:)`, which is an environment value and therefore only
+    /// readable from inside a view, so `WindowReopener` captures it while the scene is
+    /// alive and leaves it here. The captured action stays valid after the window
+    /// closes, which is the entire point.
+    var reopenMainWindow: (() -> Void)?
+
     init() {
+        Self.current = self
         // Re-publish nested object changes so views refresh.
         audio.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
         settingsStore.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
@@ -1772,6 +1900,15 @@ final class AppState: ObservableObject {
         applyConnectHotkey()
         applyRecordHotkey()
         applyHushHotkey()
+        applyWakeHotkey()
+        // The system owns this, not the settings file: a login item can be switched off
+        // from System Settings, and a stale `true` here would claim the wake key survives
+        // a reboot when it does not.
+        if LoginItem.isAvailable { settings.startAtLogin = LoginItem.isEnabled }
+        // A `flowstate://connect` that arrived while this object was still being built —
+        // which is every cold start through the URL scheme, since the delegate receives
+        // the URL before the scene exists. See `DeepLink.pending`.
+        DeepLink.drainPending(into: self)
         startOutreach()
         applyWakeWord()
         // NOT applyHUD() here. Building the widget's hosting view during init means
