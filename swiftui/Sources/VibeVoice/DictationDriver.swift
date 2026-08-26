@@ -35,6 +35,8 @@ final class DictationDriver: ObservableObject {
     var onStopVoiceMode: () -> Void = {}
     /// Where transcripts get logged, so dictation shows up in the same history as speech.
     var onTranscript: (String) -> Void = { _ in }
+    /// Whether the user wants the small sounds. Same switch as every other earcon.
+    var earconsEnabled: () -> Bool = { true }
 
     // MARK: - Hotkey edges
 
@@ -98,6 +100,9 @@ final class DictationDriver: ObservableObject {
         do {
             try recorder.start()
             indicator = .listening
+            // After the recorder starts, not before: a chime that plays and *then* fails
+            // to open the mic teaches you to trust a sound that is sometimes a lie.
+            EarconPlayer.shared.play(.dictateOpen, id: "dictateOpen", enabled: earconsEnabled())
         } catch {
             session.cancel()
             indicator = .off
@@ -108,6 +113,7 @@ final class DictationDriver: ObservableObject {
     private func endDictation() {
         guard session.finishListening() else { return }
         indicator = .working
+        EarconPlayer.shared.play(.dictateClose, id: "dictateClose", enabled: earconsEnabled())
 
         guard let file = recorder.stop() else {
             // Too short to contain speech. Silent no-op rather than an error — a stray

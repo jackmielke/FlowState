@@ -166,6 +166,36 @@ struct HUDView: View {
                             .transition(.scale.combined(with: .opacity))
                     }
                 }
+                // Dictation rides the opposite corner from mute, and uses a waveform
+                // rather than a mic glyph, because the one thing this badge must never do
+                // is read as "muted" or as a live session. Different corner, different
+                // shape, different colour — three signals, since at 11 points any one of
+                // them alone is easy to misread at a glance.
+                .overlay(alignment: .topTrailing) {
+                    switch state.dictation.indicator {
+                    case .off:
+                        EmptyView()
+                    case .listening:
+                        Image(systemName: "waveform")
+                            .font(.system(size: style == .orb ? 11 : 9, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(3)
+                            .background(Circle().fill(Theme.good))
+                            .offset(x: 2, y: -2)
+                            .transition(.scale.combined(with: .opacity))
+                            .accessibilityLabel("Dictating")
+                    case .working:
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: style == .orb ? 11 : 9, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(3)
+                            .background(Circle().fill(Theme.textFaint))
+                            .offset(x: 2, y: -2)
+                            .transition(.scale.combined(with: .opacity))
+                            .accessibilityLabel("Transcribing")
+                    }
+                }
+                .animation(.easeOut(duration: 0.16), value: state.dictation.indicator)
                 .contentShape(Circle())
                 // The orb is the click target in every style, and the rest of the surface
                 // stays the drag handle — AppKit needs somewhere to grab the window.

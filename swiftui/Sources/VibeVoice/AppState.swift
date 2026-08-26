@@ -282,6 +282,7 @@ final class AppState: ObservableObject {
     /// can be captured while a voice session is live without touching that engine's
     /// voice-processing unit.
     let dictation = DictationDriver()
+    private var dictationForwarded = false
     let cost = CostMeter()
     /// Records both halves of the conversation. Fed from the same PCM the socket sees.
     let recorder = SessionRecorder()
@@ -471,6 +472,17 @@ final class AppState: ObservableObject {
 
     /// Hand the driver the four things it cannot know on its own.
     private func wireDictationDriver() {
+        // A nested ObservableObject does not redraw anything on its own — SwiftUI observes
+        // AppState, not AppState's properties. Without this forward, the widget's
+        // dictation badge would only appear when something *else* happened to change.
+        // Guarded so re-registering the hotkey does not stack duplicate subscriptions.
+        if !dictationForwarded {
+            dictationForwarded = true
+            dictation.objectWillChange
+                .receive(on: RunLoop.main)
+                .sink { [weak self] _ in self?.objectWillChange.send() }
+                .store(in: &bag)
+        }
         dictation.isVoiceModeActive = { [weak self] in
             guard let self else { return false }
             switch self.connection {
@@ -484,6 +496,7 @@ final class AppState: ObservableObject {
         dictation.onStopVoiceMode = { [weak self] in
             _ = self?.hush()
         }
+        dictation.earconsEnabled = { [weak self] in self?.settings.earcons ?? true }
         dictation.onTranscript = { [weak self] text in
             self?.note("Dictated: \(text)")
         }
