@@ -12,7 +12,7 @@ import Foundation
 /// it look like, what can it see, how do I reach it, what can it change, and what does it
 /// keep.
 public enum SettingsTab: String, CaseIterable, Identifiable, Codable, Sendable {
-    case general, look, screen, access, dev, data
+    case general, look, screen, access, dictation, dev, data
 
     public var id: String { rawValue }
 
@@ -24,6 +24,7 @@ public enum SettingsTab: String, CaseIterable, Identifiable, Codable, Sendable {
         case .look:    return "Look"
         case .screen:  return "Screen"
         case .access:  return "Access"
+        case .dictation: return "Dictate"
         case .dev:     return "Dev"
         case .data:    return "Data"
         }
@@ -36,6 +37,7 @@ public enum SettingsTab: String, CaseIterable, Identifiable, Codable, Sendable {
         case .look:    return "paintbrush"
         case .screen:  return "display"
         case .access:  return "menubar.arrow.up.rectangle"
+        case .dictation: return "text.cursor"
         case .dev:     return "hammer"
         case .data:    return "lock.shield"
         }
@@ -49,6 +51,7 @@ public enum SettingsTab: String, CaseIterable, Identifiable, Codable, Sendable {
         case .look:    return "Appearance, backdrops, moving backgrounds and the floating widget."
         case .screen:  return "What it can see: permission, which display, how often."
         case .access:  return "Menu bar, summon shortcut, tools and connectors."
+        case .dictation: return "Hold-to-talk, where the words go, and what gets cleaned up."
         case .dev:     return "Letting Claude Code change files on this Mac."
         case .data:    return "Recordings, conversations, what is kept and for how long."
         }

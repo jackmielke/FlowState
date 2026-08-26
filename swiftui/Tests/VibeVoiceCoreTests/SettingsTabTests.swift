@@ -25,9 +25,9 @@ final class SettingsTabTests: XCTestCase {
         XCTAssertEqual(SettingsTab.allCases.first, .general)
     }
 
-    /// Six one-word labels is what the strip is sized for.
+    /// Seven one-word labels is what the strip is sized for.
     func test_labelsAreShortEnoughForTheStrip() {
-        XCTAssertEqual(SettingsTab.allCases.count, 6)
+        XCTAssertEqual(SettingsTab.allCases.count, 7)
         for tab in SettingsTab.allCases {
             XCTAssertFalse(tab.label.contains(" "), "\(tab.rawValue) label wraps")
             XCTAssertLessThanOrEqual(tab.label.count, 8, "\(tab.rawValue) label")
