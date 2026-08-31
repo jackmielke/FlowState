@@ -157,11 +157,38 @@ struct AppSettings: Codable, Equatable {
     /// Start or stop recording from anywhere. Empty string = off.
     var recordHotkey: String = "cmdShiftR"
 
+    /// Turn it on, from anywhere, without caring what state it was in. Empty = off.
+    ///
+    /// ⌃Q rather than a ⌘⇧ pair because this is the key that gets hit blind, mid-thought.
+    /// It only ever turns things on — see `AppState.wakeAndConnect` — which is what lets
+    /// it be pressed without first working out whether a session is already open.
+    var wakeHotkey: String = "ctrlQ"
+
+    /// Start FlowState at login, so the wake key is live before it is reached for.
+    ///
+    /// Not cosmetic: a hotkey belongs to a running process, so a key that is meant to
+    /// work "even when the app is closed" needs the app not to be closed. See
+    /// `LoginItem` for the two halves of that and why both ship.
+    var startAtLogin: Bool = false
+
     /// Stop everything, now. Empty string = off.
     var hushHotkey: String = "ctrlShiftEscape"
     /// How long the wake trigger stays quiet after the hush key. Long enough to get out
     /// of whatever set it off; short enough that nobody has to remember to undo it.
     var hushSeconds: Double = 90
+
+    /// Every chord a process-wide hotkey currently owns. Empty settings mean "off" and
+    /// are dropped.
+    ///
+    /// Exists so a window-scoped shortcut can stay out of a global one's way. Carbon
+    /// registers ahead of every app — including this one — so a chord listed here is
+    /// already spoken for even while Flow is the frontmost app, and a SwiftUI
+    /// `.keyboardShortcut` on the same chord would be a key that never fires while the
+    /// UI claims it does.
+    var claimedHotkeyIDs: Set<String> {
+        Set([summonHotkey, connectHotkey, recordHotkey, hushHotkey, wakeHotkey]
+            .filter { !$0.isEmpty })
+    }
 
     /// Let it start the conversation when something is worth saying — a coding task
     /// finishing. Off by default: an app that opens a microphone and talks to you
@@ -268,6 +295,21 @@ struct AppSettings: Codable, Equatable {
     /// `captions` — only on there being a screen to be on.
     var hudEnabled: Bool = false
     var hudStyle: HUDStyle = .pill
+    /// Grow to show more while the pointer is on it, shrink back when it leaves.
+    ///
+    /// The small style exists to be ignorable, which also makes it uninformative — it
+    /// cannot show what the session costs or whether the mic is open. Hovering is the
+    /// one moment you have said you are interested, so it is the one moment the widget
+    /// can afford to say more without ever having been in the way.
+    var hudHoverExpand: Bool = true
+    /// How solid the widget is when the pointer is elsewhere. It goes fully opaque on
+    /// hover regardless, so this can be set low without making it unusable.
+    var hudIdleOpacity: Double = 1.0
+    /// Set while the widget is tucked away; it comes back on its own at this time.
+    ///
+    /// A timer rather than a toggle. "Hide" with no end to it becomes a widget somebody
+    /// switched off in a meeting three weeks ago and has been meaning to turn back on.
+    var hudHiddenUntil: Date? = nil
 
     /// Set once the Dev Mode offer has been declined. Permanent on purpose.
     var devNudgeDismissed: Bool = false
@@ -337,10 +379,12 @@ struct AppSettings: Codable, Equatable {
         case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
         case photoRotateSeconds, menuBarEnabled, summonHotkey, devNudgeDismissed
         case connectHotkey, recordHotkey, hushHotkey, hushSeconds, proactive, wakeWord, wakePhrase, clapToWake, clapSensitivity
+        case wakeHotkey, startAtLogin
         case voiceCommands
         case earcons, captions, ambientClock
         case motionStyle, motionIntensity, motionAssets
         case devAutoCommit, devAutoPush, hudEnabled, hudStyle, cameraBubble
+        case hudHoverExpand, hudIdleOpacity, hudHiddenUntil
         case cameraSize, cameraCorner, cameraShape, cameraControls, cameraMirrored
         case privacy, summaries, resumeLastSession, retention, transcriptHidden
         case captureMode, capturePerformance, cameraDeviceID
@@ -398,6 +442,8 @@ extension AppSettings {
         connectHotkey     = v(.connectHotkey, d.connectHotkey)
         recordHotkey      = v(.recordHotkey, d.recordHotkey)
         hushHotkey        = v(.hushHotkey, d.hushHotkey)
+        wakeHotkey        = v(.wakeHotkey, d.wakeHotkey)
+        startAtLogin      = v(.startAtLogin, d.startAtLogin)
         hushSeconds       = v(.hushSeconds, d.hushSeconds)
         proactive         = v(.proactive, d.proactive)
         wakeWord          = v(.wakeWord, d.wakeWord)
@@ -419,6 +465,9 @@ extension AppSettings {
         cameraControls    = v(.cameraControls, d.cameraControls)
         cameraMirrored    = v(.cameraMirrored, d.cameraMirrored)
         hudStyle          = v(.hudStyle, d.hudStyle)
+        hudHoverExpand    = v(.hudHoverExpand, d.hudHoverExpand)
+        hudIdleOpacity    = min(max(v(.hudIdleOpacity, d.hudIdleOpacity), 0.25), 1.0)
+        hudHiddenUntil    = v(.hudHiddenUntil, d.hudHiddenUntil)
         ambientMode       = v(.ambientMode, d.ambientMode)
         privacy           = v(.privacy, d.privacy)
         summaries         = v(.summaries, d.summaries)

@@ -678,6 +678,11 @@ struct ContentView: View {
             HStack(spacing: 10) {
                 Button(connectLabel) { state.toggleConnection() }
                     .buttonStyle(PrimaryButtonStyle(tint: state.connection == .live ? Theme.bad : Theme.accent))
+                    // ⌃Q reaches this button from anywhere in the window — no focus on
+                    // any particular field, no pointer. See `stopShortcut` for the two
+                    // cases where it is deliberately absent.
+                    .keyboardShortcut(stopShortcut)
+                    .help(connectHelp)
 
                 // Screen capture lives in the header icon and ⌘⇧2 — it was here as well,
                 // which made the busiest row in the app carry the same action twice.
@@ -804,6 +809,39 @@ struct ContentView: View {
         case .connecting: return "Cancel"
         default: return "Connect"
         }
+    }
+
+    /// ⌃Q on the Disconnect button: turn it off without going to find the pointer.
+    ///
+    /// `nil` in two cases, and both are the point.
+    ///
+    /// While idle this button says Connect, and this key must never turn the assistant
+    /// ON. It is the key somebody hits to make it stop — often mid-sentence, without
+    /// looking — and a key that might connect is worse than no key at all. Same argument
+    /// the hush hotkey is built on; see `GlobalHotkey.registerHush`.
+    ///
+    /// And when a global hotkey already owns ⌃Q — the wake key does, by default — that
+    /// binding keeps it. Carbon registers ahead of every app, including this one, so the
+    /// global key wins even while Flow is frontmost; declaring this shortcut anyway
+    /// would put a chord in the tooltip that never fires. Existing bindings are left
+    /// alone and this one appears only when the chord is free.
+    private var stopShortcut: KeyboardShortcut? {
+        guard state.connection == .live || state.connection == .connecting else { return nil }
+        guard !state.settings.claimedHotkeyIDs.contains(HotkeyCombo.ctrlQ.id) else { return nil }
+        return KeyboardShortcut("q", modifiers: .control)
+    }
+
+    /// Doubles as the accessibility description — `.help` is what VoiceOver reads for a
+    /// custom-styled button, so the shortcut is named there rather than only in a
+    /// tooltip nobody using a screen reader will ever see.
+    private var connectHelp: String {
+        let base: String
+        switch state.connection {
+        case .live: base = "Hang up and close the session"
+        case .connecting: base = "Stop trying to connect"
+        default: base = "Open a session"
+        }
+        return stopShortcut == nil ? base : base + " · " + HotkeyCombo.ctrlQ.label
     }
 
     private func banner(_ msg: String) -> some View {

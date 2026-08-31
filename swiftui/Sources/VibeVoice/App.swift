@@ -6,7 +6,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
     }
-    func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }
+
+    /// Closing the window used to quit the app — and quitting the app unregisters every
+    /// global hotkey, because a Carbon hotkey belongs to a process. So the wake key
+    /// worked until the first time somebody hit ⌘W, and then silently did not, which is
+    /// indistinguishable from the key never having been bound.
+    ///
+    /// It still quits when there is genuinely no way back in: no menu bar icon and no
+    /// wake key means a windowless FlowState is a process the user cannot reach and
+    /// cannot see, which is worse than one that closed.
+    func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool {
+        guard let settings = AppState.current?.settings else { return true }
+        return !(settings.menuBarEnabled || !settings.wakeHotkey.isEmpty)
+    }
+
+    /// Clicking the Dock icon with no window open.
+    func applicationShouldHandleReopen(_ s: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { AppState.current?.reopenMainWindow?() }
+        return true
+    }
+
+}
+
+/// Keeps a way to reopen the main window after it is closed. See
+/// `AppState.reopenMainWindow` for why this cannot be done from AppKit.
+private struct WindowReopener: View {
+    @Environment(\.openWindow) private var openWindow
+    let state: AppState
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .onAppear { state.reopenMainWindow = { openWindow(id: "main") } }
+    }
 }
 
 @main
@@ -23,6 +55,16 @@ struct VibeVoiceApp: App {
                 .task { await SettingsSnapshot.runIfRequested(state: state) }
                 // Also a no-op unless asked for — see RecordingSmokeTest.
                 .task { await RecordingSmokeTest.runIfRequested(state: state) }
+                .background(WindowReopener(state: state))
+                // `flowstate://connect`, from Shortcuts, Raycast, a script — anything
+                // that is already running when this app is not. See `DeepLink`.
+                //
+                // NOT `application(_:open:)` on the delegate: `@NSApplicationDelegateAdaptor`
+                // installs SwiftUI's own delegate in front of ours, and it consumes the
+                // URL event without forwarding it. Measured — the delegate method was
+                // never called for a `flowstate://` URL that LaunchServices had already
+                // matched to this bundle. This is the route SwiftUI actually delivers on.
+                .onOpenURL { DeepLink.handle($0) }
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
@@ -50,6 +92,14 @@ struct VibeVoiceApp: App {
             CommandMenu("Session") {
                 Button("Connect / Disconnect") { state.toggleConnection() }
                     .keyboardShortcut("k", modifiers: .command)
+                // Listed so the wake key is discoverable somewhere other than Settings.
+                // No `.keyboardShortcut` — the binding is a global Carbon hotkey and is
+                // user-chosen, and declaring it here as well would register a second,
+                // menu-local copy that fights the real one.
+                Button("Wake and Listen (\(HotkeyCombo.named(state.settings.wakeHotkey).label))") {
+                    state.wakeAndConnect(from: "menu")
+                }
+                .disabled(state.settings.wakeHotkey.isEmpty)
                 Button("Send Screenshot") { Task { await state.captureAndSend(auto: false) } }
                     .keyboardShortcut("2", modifiers: [.command, .shift])
                 Button("Settings…") { state.showSettings = true }
@@ -93,6 +143,10 @@ struct MenuBarMenu: View {
             state.toggleConnection()
         }
         .keyboardShortcut("k", modifiers: .command)
+
+        if state.connection != .live {
+            Button("Wake and listen") { state.wakeAndConnect(from: "menubar") }
+        }
 
         Button("New conversation") { state.newConversation() }
             .keyboardShortcut("n", modifiers: .command)

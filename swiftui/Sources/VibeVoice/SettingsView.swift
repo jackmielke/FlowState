@@ -518,6 +518,34 @@ struct SettingsView: View {
                                         set: { state.settings.hudStyle = $0; state.applyHUD() }),
                                     accessibilityPrefix: "Widget style")
                     caption(state.settings.hudStyle.blurb)
+
+                    if state.settings.hudStyle == .orb {
+                        HStack {
+                            Text("Grow when I point at it")
+                                .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                            Spacer()
+                            NeatToggle(isOn: Binding(
+                                get: { state.settings.hudHoverExpand },
+                                set: { state.settings.hudHoverExpand = $0 }))
+                        }
+                        caption("The orb is small so it can be ignored, which also means it cannot tell you what the session costs or whether the mic is open. Hovering is the one moment you have said you are interested, so it briefly becomes the pill and then shrinks back.")
+                    }
+
+                    HStack {
+                        Text("Fade when I'm not using it")
+                            .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                        Spacer()
+                        Text("\(Int(state.settings.hudIdleOpacity * 100))%")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(Theme.textFaint)
+                    }
+                    Slider(value: Binding(
+                        get: { state.settings.hudIdleOpacity },
+                        set: { state.settings.hudIdleOpacity = $0 }), in: 0.25...1.0)
+                        .accessibilityLabel("Widget opacity when idle")
+                    caption("How solid it is while the pointer is elsewhere. It goes fully opaque the moment you point at it, so this can go quite low before it stops being useful.")
+
+                    caption("Drag it from anywhere, including the orb — a click starts a session, a drag moves it. Right-click to tuck it away for a while; it comes back on its own.")
                 }
             }
     }

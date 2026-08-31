@@ -336,11 +336,55 @@ is the whole claim `VideoTrackWriter.setPaused` makes.
 | Barge-in | `input_audio_buffer.speech_started` → flush the local playback queue. The server truncates its own turn (`turn_detection.interrupt_response: true`), so no `response.cancel` is sent — that only races and returns "no active response found". |
 | Response lifecycle | `ResponseCoordinator` (`VibeVoiceCore`) owns every `response.create` / `response.cancel`. One response at a time, deadlines on every phase, a Stop button that always works. See below. |
 | Screen | ScreenCaptureKit — `SCShareableContent` + `SCContentFilter` + `SCScreenshotManager.captureImage`, downscaled to 1280px wide, JPEG q0.7, sent as a `data:` URI per contract §3. One display at a time — see below |
-| Hotkey | Carbon `RegisterEventHotKey` for ⌘⇧2 (no Accessibility permission needed) |
+| Hotkey | Carbon `RegisterEventHotKey`, six slots (no Accessibility permission needed): ⌘⇧2 screenshot, summon, connect, record, hush, and the wake key |
+| Wake key | ⌃Q — turn it on, from anywhere, with no off. Launch-at-login (`SMAppService`) keeps the process alive so the key has something to fire in; `flowstate://connect` is the cold-start route for when it does not. See below |
 | Settings | JSON at `~/Library/Application Support/VibeVoice/settings.json` |
 | Settings pane | A floating, draggable pane with six tabs that sizes itself to whichever is open (`FloatingPanel.swift`; geometry in `PanelLayout`, `VibeVoiceCore`) |
 | Theme | One `Theme` token = one dynamic `NSColor`, resolved per effective appearance (`Theme.swift`) |
 | Window | `.titled` + `fullSizeContentView` + transparent titlebar + `NSVisualEffectView`. `.titled` is kept deliberately — dropping it is what loses the system corner rounding. |
+
+### The wake key (⌃Q)
+
+One key, one direction: **turn it on**. It brings FlowState forward, ends any hush
+snooze, unmutes the microphone and opens a session — and if a session is already open it
+does nothing at all. That last part is the point. The connect key (⌃⇧F) *toggles*, which
+means using it requires already knowing what state the app is in, and half the time
+nobody does. `AppState.wakeAndConnect` is idempotent, so the key can be leaned on.
+
+**"Even when the app is closed" is a claim with a catch, and it is worth being straight
+about it.** `RegisterEventHotKey` binds a hotkey to a *running process*. macOS has no
+facility for launching an app because a key was pressed — not LaunchServices, not a
+plist, nothing. So there are exactly two honest implementations, and both ship:
+
+1. **Make sure it is running.** Settings › Access › *Start at login* registers the app
+   with `SMAppService` (`LoginItem.swift`), and closing the window no longer quits it
+   (`applicationShouldTerminateAfterLastWindowClosed` now returns false as long as the
+   menu bar icon or the wake key gives you a way back in). The Carbon hotkey is then
+   live from login to logout.
+2. **Let something that is running launch it.** `flowstate://connect` — registered in
+   `CFBundleURLTypes`, handled in `DeepLink.swift`. Bind ⌃Q in Shortcuts.app, Raycast,
+   Alfred or Keyboard Maestro to `open flowstate://connect`: those keep a resident
+   process, so they can catch the key and cold-start FlowState into exactly the same
+   place the hotkey lands. `flowstate://show` and `flowstate://hush` are there too.
+
+A URL that arrives before `AppState` exists is held in `DeepLink.pending` and drained
+during init — on a cold start SwiftUI builds the delegate before the scene's
+`@StateObject`, and dropping the URL there is the difference between "⌃Q launches Flow
+and connects" and "⌃Q launches Flow".
+
+Delivery is `.onOpenURL` on the scene, **not** `application(_:open:)` on the delegate:
+`@NSApplicationDelegateAdaptor` puts SwiftUI's own delegate in front of ours and it
+consumes the URL event without forwarding. Measured — the delegate method was never
+called for a URL LaunchServices had already matched to this bundle.
+
+**⌃Q is XON.** In a terminal it is the key that resumes output after ⌃S paused it, and a
+Carbon hotkey is registered ahead of every app — so binding this takes ⌃Q from Terminal,
+iTerm and tmux. ⌃⇧Q and ⌃⌥Space are offered beside it for anyone who uses flow control.
+
+Nothing here needs Accessibility. A bare modifier chord (hold ⌃⇧, the way Wispr Flow
+does) would need an event tap, and that means a permission prompt this app has already
+spent enough of its owner's patience on.
+
 
 Sample rates are logged and shown in the UI footer at runtime, e.g.
 `in 48000 Hz × 1 ch → wire 24000 Hz mono PCM16 · out 48000 Hz`.
@@ -509,7 +553,7 @@ Six tabs, in the order the questions arrive:
 | **General** | Personality prompt, voice, model, speaking speed, turn detection, cost mode |
 | **Look** | Appearance, backdrops, moving backgrounds, the floating widget |
 | **Screen** | Continuous screen mode, permission, which display |
-| **Access** | Menu bar, summon shortcut, native tools, Notion |
+| **Access** | Menu bar, wake key, start at login, summon/connect/record/stop shortcuts, native tools, Notion |
 | **Dev** | Dev Mode — the one tab where a switch can change files on this Mac |
 | **Data** | Recordings, conversations, retention, summaries |
 

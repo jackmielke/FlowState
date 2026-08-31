@@ -24,6 +24,24 @@
 	<string>public.app-category.productivity</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
+	<!-- flowstate://connect — the cold-start door for the wake shortcut.
+	     A Carbon hotkey cannot fire in a process that is not running, so anything that
+	     has to work with FlowState quit goes through LaunchServices instead: Shortcuts,
+	     Raycast, Alfred or `open flowstate://connect` all launch the app and deliver the
+	     URL. See Sources/VibeVoice/DeepLink.swift. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.jackmielke.vibevoice.deeplink</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>flowstate</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Not used.</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>

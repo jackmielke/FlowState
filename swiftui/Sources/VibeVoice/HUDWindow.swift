@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import QuartzCore
 import VibeVoiceCore
 
 /// The little always-there widget, like the one Wispr Flow floats on the desktop.
@@ -113,6 +114,38 @@ final class HUDPanel: NSPanel {
         setFrameOrigin(ActiveScreenOverlay.moved(frame, from: current.visibleFrame, to: visible))
     }
 
+    /// Resizes to a style, keeping the corner it is anchored to.
+    ///
+    /// Growing from the left would walk the widget across the screen every time it
+    /// changed size, and it changes size on hover now, so that would be a widget that
+    /// creeps away from the pointer as you approach it.
+    func resize(to style: HUDStyle, animate: Bool = false) {
+        if let c = contentView as? HUDContainerView {
+            c.surface = style.surface
+            c.corner = style.corner
+        }
+        let want = style.size
+        guard frame.size != want else { return }
+        var f = frame
+        f.origin.x += f.width - want.width
+        f.size = want
+        // Clamped after the grow: expanding near the right edge would otherwise push the
+        // extra width straight off the screen.
+        if let visible = (screen ?? NSScreen.main)?.visibleFrame {
+            f.origin = HUDDrag.clamped(f.origin, size: want, in: visible,
+                                       bleed: want.width / 2)
+        }
+        if animate {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.16
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                animator().setFrame(f, display: true)
+            }
+        } else {
+            setFrame(f, display: true)
+        }
+    }
+
     /// Keeps the widget on screen after a monitor is unplugged or resolution changes.
     func nudgeBackOnScreen() {
         guard let visible = (screen ?? NSScreen.main)?.visibleFrame else { return }
@@ -133,9 +166,33 @@ final class HUDController {
 
     init(state: AppState) { self.state = state }
 
+    /// Brings the widget back when its tuck-away expires.
+    private var returnTimer: Timer?
+
     func apply() {
         guard let state else { return }
-        state.settings.hudEnabled ? show() : hide()
+        returnTimer?.invalidate()
+        returnTimer = nil
+        guard state.settings.hudEnabled else { return hide() }
+
+        if let until = state.settings.hudHiddenUntil, until > Date() {
+            hide()
+            // Comes back on its own. Without this the "tuck away for 15 minutes" is a
+            // hide that lasts until something else happens to call apply() — which, on a
+            // widget nobody is touching, may be never.
+            returnTimer = Timer.scheduledTimer(
+                withTimeInterval: until.timeIntervalSinceNow + 0.5, repeats: false
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.state?.settings.hudHiddenUntil = nil
+                    self?.apply()
+                }
+            }
+            return
+        }
+        // Expired: clear it so the setting does not sit there as a stale date.
+        if state.settings.hudHiddenUntil != nil { state.settings.hudHiddenUntil = nil }
+        show()
     }
 
     /// Follows the screen being worked on, the way the captions and the camera bubble do.
@@ -182,22 +239,7 @@ final class HUDController {
                     MainActor.assumeIsolated { p?.nudgeBackOnScreen() }
                 }
         }
-        if let p = panel {
-            let style = state.settings.hudStyle
-            if let c = p.contentView as? HUDContainerView {
-                c.surface = style.surface
-                c.corner = style.corner
-            }
-            let want = style.size
-            if p.frame.size != want {
-                // Grow from the same corner it is anchored to, so switching style does
-                // not walk the widget across the screen.
-                var f = p.frame
-                f.origin.x += f.width - want.width
-                f.size = want
-                p.setFrame(f, display: true)
-            }
-        }
+        if let p = panel { p.resize(to: state.settings.hudStyle) }
         panel?.orderFrontRegardless()
     }
 

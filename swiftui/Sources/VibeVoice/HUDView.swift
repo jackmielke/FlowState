@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import VibeVoiceCore
 
@@ -82,11 +83,257 @@ enum HUDStyle: String, Codable, CaseIterable, Identifiable {
 struct HUDView: View {
     @ObservedObject var state: AppState
     @State private var hovering = false
+    /// Where the window was when the current drag began. Nil between drags.
+    @State private var dragOrigin: CGPoint?
     /// The one case that earns a visible outline: someone who cannot rely on the orb's
     /// colour to tell live from idle.
     @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
 
-    private var style: HUDStyle { state.settings.hudStyle }
+    /// What the widget is currently drawn as.
+    ///
+    /// Hovering the smallest style promotes it one step, so the thing you leave up all
+    /// day can stay a dot and still answer "is it listening, and what has it cost" the
+    /// moment you look at it. The setting is the resting style; this is the shown one.
+    private var style: HUDStyle {
+        let resting = state.settings.hudStyle
+        guard resting == .orb, hovering, state.settings.hudHoverExpand else { return resting }
+        return .pill
+    }
+
+    /// The panel this view is drawn in. Looked up rather than injected: the view is built
+    /// inside HUDPanel's own init, so there is no window to hand it at that point.
+
+    /// The dictation badge.
+    ///
+    /// Pulled out of `body` because the view expression grew past what the type checker
+    /// will attempt — "unable to type-check this expression in reasonable time", which is
+    /// SwiftUI's way of saying one modifier too many.
+    @ViewBuilder
+    private var dictationBadge: some View {
+                switch state.dictation.indicator {
+                case .off:
+                    EmptyView()
+                case .listening:
+                    Image(systemName: "waveform")
+                        .font(.system(size: style == .orb ? 11 : 9, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(3)
+                        .background(Circle().fill(Theme.good))
+                        .offset(x: 2, y: -2)
+                        .transition(.scale.combined(with: .opacity))
+                        .accessibilityLabel("Dictating")
+                case .working:
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: style == .orb ? 11 : 9, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(3)
+                        .background(Circle().fill(Theme.textFaint))
+                        .offset(x: 2, y: -2)
+                        .transition(.scale.combined(with: .opacity))
+                        .accessibilityLabel("Transcribing")
+                }
+    }
+
+
+    /// The two lines of text: what it is doing, and what it has cost.
+    @ViewBuilder
+    private var statusBlock: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(statusLine)
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(isActive ? glow : Theme.text)
+                .lineLimit(1)
+            if state.cost.turns > 0 {
+                Text("$" + state.cost.formatted)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(Theme.textFaint)
+            } else {
+                Text(subCaption)
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.textFaint)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+
+    /// Mute, in every style with room for a button at all, and the first of them. On a
+    /// widget that lives over someone's desktop all day it is the control most likely to
+    /// be wanted in a hurry — someone has just walked in — so it does not get to be the
+    /// one you have to aim for.
+    private var muteButton: some View {
+        Button { state.toggleMicMute() } label: {
+            Image(systemName: MicMute.symbol(muted: state.isMicMuted))
+        }
+        .buttonStyle(HUDIconButtonStyle(on: state.isMicMuted))
+        .help(MicMute.help(muted: state.isMicMuted, live: state.connection == .live))
+        .accessibilityLabel(MicMute.label(muted: state.isMicMuted))
+    }
+
+    /// Connect and screenshot, in the widest style only.
+    private var barButtons: some View {
+        HStack(spacing: 6) {
+            Button { state.toggleConnection() } label: {
+                Image(systemName: state.connection == .live ? "stop.fill" : "waveform")
+            }
+            .buttonStyle(HUDIconButtonStyle())
+            .help(state.connection == .live ? "End the session" : "Start a session")
+
+            Button { Task { await state.captureAndSend(auto: false) } } label: {
+                Image(systemName: "rectangle.dashed.badge.record")
+            }
+            .buttonStyle(HUDIconButtonStyle())
+            .disabled(state.connection != .live)
+            .help("Show it my screen")
+        }
+    }
+
+
+    /// The widget's contents, before any of the chrome that positions and lights it.
+    ///
+    /// Separated from `body` so the modifier chain below applies to one opaque view
+    /// rather than to a freshly inferred stack type: together they exceeded what the
+    /// type checker will attempt.
+    private var row: some View {
+        HStack(spacing: style == .orb ? 0 : 11) {
+            VoiceOrb(mode: mode, level: level)
+                .frame(width: style.orbDiameter, height: style.orbDiameter)
+                // In the smallest style there is no room for a button, so the state has
+                // to ride on the orb itself. A slashed mic in the corner is the same
+                // glyph the button carries, at the size the widget can afford.
+                .overlay(alignment: .bottomTrailing) {
+                    if state.isMicMuted {
+                        Image(systemName: "mic.slash.fill")
+                            .font(.system(size: style == .orb ? 11 : 9, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(3)
+                            .background(Circle().fill(Theme.bad))
+                            .offset(x: 2, y: 2)
+                            .transition(.scale.combined(with: .opacity))
+                    }
+                }
+                // Dictation rides the opposite corner from mute, and uses a waveform
+                // rather than a mic glyph, because the one thing this badge must never do
+                // is read as "muted" or as a live session. Different corner, different
+                // shape, different colour — three signals, since at 11 points any one of
+                // them alone is easy to misread at a glance.
+                .overlay(alignment: .topTrailing) { dictationBadge }
+                .animation(.easeOut(duration: 0.16), value: state.dictation.indicator)
+                .contentShape(Circle())
+                .help(isActive ? "Click to end · drag to move" : "Click to start · drag to move")
+                .animation(.easeOut(duration: 0.16), value: state.isMicMuted)
+
+            if style != .orb { statusBlock }
+
+            // Mute is in every style that has room for a button at all, and it is the
+            // FIRST of them. On a widget that lives over someone's desktop all day it is
+            // the control most likely to be wanted in a hurry — someone has just walked
+            // in — so it does not get to be the one you have to aim for.
+            if style != .orb { muteButton }
+            if style == .bar { barButtons }
+        }
+    }
+
+
+    /// The orb style's only route to the controls, and a right-click away in the others.
+    @ViewBuilder
+    private var menu: some View {
+        Button(MicMute.label(muted: !state.isMicMuted)) { state.toggleMicMute() }
+        Button(isActive ? "End session" : "Start session") { state.toggleConnection() }
+        Divider()
+        Menu("Tuck away") {
+            Button("For 5 minutes")  { tuckAway(minutes: 5) }
+            Button("For 15 minutes") { tuckAway(minutes: 15) }
+            Button("For an hour")    { tuckAway(minutes: 60) }
+            Button("Until I bring it back") { tuckAway(minutes: nil) }
+        }
+        Button("Open FlowState") { Summon.toggle() }
+    }
+
+
+    /// The widget as drawn and driven — everything except the menu and the
+    /// accessibility surface, which are the two heaviest parts of the chain for the type
+    /// checker and the two that do not affect a single pixel.
+    private var plate: some View {
+        row
+        .padding(.horizontal, style == .orb ? 8 : 13)
+        .padding(.vertical, 8)
+        .frame(width: style.surface.width, height: style.surface.height)
+        .background {
+            if style.showsSurface {
+                RoundedRectangle(cornerRadius: style.corner, style: .continuous)
+                    .fill(Color.black)
+            }
+        }
+        // Not a border: the glow sits *under* the black surface and bleeds past it, so it
+        // reads as the widget being lit from inside rather than as chrome switching on.
+        .shadow(color: glow.opacity(showsGlow ? 0.55 : 0), radius: glowRadius)
+        .overlay(
+            // Colour-independent proof of life, drawn only when the system asks for it.
+            RoundedRectangle(cornerRadius: style.corner, style: .continuous)
+                .strokeBorder(Color.white.opacity(differentiateWithoutColor && isActive ? 0.85 : 0),
+                              lineWidth: 1.5)
+        )
+        // One gesture, both jobs — see `moveOrClick`.
+        .contentShape(RoundedRectangle(cornerRadius: style.corner, style: .continuous))
+        .gesture(moveOrClick)
+        .opacity(hovering ? 1 : state.settings.hudIdleOpacity)
+        .onHover { hovering = $0 }
+        // The window resizes too, not just the drawing: the panel is only as big as the
+        // resting style, so a pill drawn inside an orb-sized window has its ends cut off.
+        .onChange(of: style) { _, now in hudWindow?.resize(to: now, animate: true) }
+        // The transparent remainder of the panel: room for the glow to spill into.
+        .frame(width: style.size.width, height: style.size.height)
+        .animation(.easeOut(duration: 0.18), value: isActive)
+    }
+
+    private var hudWindow: HUDPanel? { NSApp.windows.compactMap { $0 as? HUDPanel }.first }
+
+    /// Move the widget, or start a session — decided by how far the pointer travelled.
+    ///
+    /// This used to lean on AppKit's isMovableByWindowBackground, with the orb taking
+    /// clicks and "the rest of the surface" taking drags. In the orb style there is no
+    /// rest: the orb is drawn across all 66 points of it, so its tap gesture swallowed
+    /// every event and the small widget — the one you actually leave up all day — was the
+    /// only one that could not be moved. Giving the orb a margin to grab by would work
+    /// and would look like a mistake: a ring of dead space around a circle.
+    private var moveOrClick: some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .global)
+            .onChanged { g in
+                guard let win = hudWindow else { return }
+                let anchor = dragOrigin ?? win.frame.origin
+                if dragOrigin == nil { dragOrigin = anchor }
+                // Below the slop this may still be a click, and shifting the window a
+                // point or two under someone's finger reads as jitter.
+                guard !HUDDrag.isClick(translation: g.translation) else { return }
+                win.setFrameOrigin(HUDDrag.origin(from: anchor, translation: g.translation))
+            }
+            .onEnded { g in
+                dragOrigin = nil
+                if HUDDrag.isClick(translation: g.translation) {
+                    state.toggleConnection()
+                    return
+                }
+                guard let win = hudWindow,
+                      let visible = (win.screen ?? NSScreen.main)?.visibleFrame else { return }
+                // Tuckable half off the edge on purpose, never draggable somewhere it
+                // cannot be got back from.
+                let settled = HUDDrag.clamped(win.frame.origin, size: win.frame.size,
+                                              in: visible, bleed: win.frame.width / 2)
+                if settled != win.frame.origin { win.setFrameOrigin(settled) }
+            }
+    }
+
+    /// Puts the widget away, with an end to it.
+    ///
+    /// A plain hide becomes a widget somebody switched off during a meeting three weeks
+    /// ago and has been meaning to turn back on.
+    private func tuckAway(minutes: Int?) {
+        state.settings.hudHiddenUntil = minutes.map {
+            Date().addingTimeInterval(TimeInterval($0) * 60)
+        }
+        if minutes == nil { state.settings.hudEnabled = false }
+    }
 
     private var mode: OrbMode {
         switch state.connection {
@@ -149,142 +396,8 @@ struct HUDView: View {
     }
 
     var body: some View {
-        HStack(spacing: style == .orb ? 0 : 11) {
-            VoiceOrb(mode: mode, level: level)
-                .frame(width: style.orbDiameter, height: style.orbDiameter)
-                // In the smallest style there is no room for a button, so the state has
-                // to ride on the orb itself. A slashed mic in the corner is the same
-                // glyph the button carries, at the size the widget can afford.
-                .overlay(alignment: .bottomTrailing) {
-                    if state.isMicMuted {
-                        Image(systemName: "mic.slash.fill")
-                            .font(.system(size: style == .orb ? 11 : 9, weight: .bold))
-                            .foregroundStyle(.white)
-                            .padding(3)
-                            .background(Circle().fill(Theme.bad))
-                            .offset(x: 2, y: 2)
-                            .transition(.scale.combined(with: .opacity))
-                    }
-                }
-                // Dictation rides the opposite corner from mute, and uses a waveform
-                // rather than a mic glyph, because the one thing this badge must never do
-                // is read as "muted" or as a live session. Different corner, different
-                // shape, different colour — three signals, since at 11 points any one of
-                // them alone is easy to misread at a glance.
-                .overlay(alignment: .topTrailing) {
-                    switch state.dictation.indicator {
-                    case .off:
-                        EmptyView()
-                    case .listening:
-                        Image(systemName: "waveform")
-                            .font(.system(size: style == .orb ? 11 : 9, weight: .bold))
-                            .foregroundStyle(.white)
-                            .padding(3)
-                            .background(Circle().fill(Theme.good))
-                            .offset(x: 2, y: -2)
-                            .transition(.scale.combined(with: .opacity))
-                            .accessibilityLabel("Dictating")
-                    case .working:
-                        Image(systemName: "ellipsis")
-                            .font(.system(size: style == .orb ? 11 : 9, weight: .bold))
-                            .foregroundStyle(.white)
-                            .padding(3)
-                            .background(Circle().fill(Theme.textFaint))
-                            .offset(x: 2, y: -2)
-                            .transition(.scale.combined(with: .opacity))
-                            .accessibilityLabel("Transcribing")
-                    }
-                }
-                .animation(.easeOut(duration: 0.16), value: state.dictation.indicator)
-                .contentShape(Circle())
-                // The orb is the click target in every style, and the rest of the surface
-                // stays the drag handle — AppKit needs somewhere to grab the window.
-                .onTapGesture { state.toggleConnection() }
-                .help(isActive ? "Click to end the session" : "Click to start a session")
-                .animation(.easeOut(duration: 0.16), value: state.isMicMuted)
-
-            if style != .orb {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(statusLine)
-                        .font(.system(size: 11.5, weight: .semibold))
-                        .foregroundStyle(isActive ? glow : Theme.text)
-                        .lineLimit(1)
-                    if state.cost.turns > 0 {
-                        Text("$" + state.cost.formatted)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(Theme.textFaint)
-                    } else {
-                        Text(subCaption)
-                            .font(.system(size: 10))
-                            .foregroundStyle(Theme.textFaint)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            // Mute is in every style that has room for a button at all, and it is the
-            // FIRST of them. On a widget that lives over someone's desktop all day it is
-            // the control most likely to be wanted in a hurry — someone has just walked
-            // in — so it does not get to be the one you have to aim for.
-            if style != .orb {
-                Button { state.toggleMicMute() } label: {
-                    Image(systemName: MicMute.symbol(muted: state.isMicMuted))
-                }
-                .buttonStyle(HUDIconButtonStyle(on: state.isMicMuted))
-                .help(MicMute.help(muted: state.isMicMuted, live: state.connection == .live))
-                .accessibilityLabel(MicMute.label(muted: state.isMicMuted))
-            }
-
-            if style == .bar {
-                HStack(spacing: 6) {
-                    Button { state.toggleConnection() } label: {
-                        Image(systemName: state.connection == .live ? "stop.fill" : "waveform")
-                    }
-                    .buttonStyle(HUDIconButtonStyle())
-                    .help(state.connection == .live ? "End the session" : "Start a session")
-
-                    Button { Task { await state.captureAndSend(auto: false) } } label: {
-                        Image(systemName: "rectangle.dashed.badge.record")
-                    }
-                    .buttonStyle(HUDIconButtonStyle())
-                    .disabled(state.connection != .live)
-                    .help("Show it my screen")
-                }
-            }
-        }
-        .padding(.horizontal, style == .orb ? 8 : 13)
-        .padding(.vertical, 8)
-        .frame(width: style.surface.width, height: style.surface.height)
-        .background {
-            if style.showsSurface {
-                RoundedRectangle(cornerRadius: style.corner, style: .continuous)
-                    .fill(Color.black)
-            }
-        }
-        // Not a border: the glow sits *under* the black surface and bleeds past it, so it
-        // reads as the widget being lit from inside rather than as chrome switching on.
-        .shadow(color: glow.opacity(showsGlow ? 0.55 : 0), radius: glowRadius)
-        .overlay(
-            // Colour-independent proof of life, drawn only when the system asks for it.
-            RoundedRectangle(cornerRadius: style.corner, style: .continuous)
-                .strokeBorder(Color.white.opacity(differentiateWithoutColor && isActive ? 0.85 : 0),
-                              lineWidth: 1.5)
-        )
-        // The whole surface is the drag handle — AppKit moves the window itself, so this
-        // is only about not putting a hole in the draggable area.
-        .contentShape(RoundedRectangle(cornerRadius: style.corner, style: .continuous))
-        .onHover { hovering = $0 }
-        // The transparent remainder of the panel: room for the glow to spill into.
-        .frame(width: style.size.width, height: style.size.height)
-        .animation(.easeOut(duration: 0.18), value: isActive)
-        .contextMenu {
-            // The orb style's only route to the gate, and a right-click away in the
-            // others.
-            Button(MicMute.label(muted: !state.isMicMuted)) { state.toggleMicMute() }
-            Button(isActive ? "End session" : "Start session") { state.toggleConnection() }
-            Divider()
-            Button("Open FlowState") { Summon.toggle() }
-        }
+        plate
+        .contextMenu { menu }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel("FlowState")
