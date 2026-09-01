@@ -30,7 +30,7 @@ cd FlowState/swiftui
 ```
 
 That compiles, assembles `FlowState.app`, ad-hoc signs it, installs it to
-`/Applications`, and launches it. The first build takes a few minutes.
+`/Applications`, and launches it. From a cold clone it takes under a minute.
 
 Ad-hoc signing is why no certificate appears anywhere in this file: it is enough
 for an app built and run on the same Mac.
