@@ -21,7 +21,7 @@ All three were drawn with `Text(item.text)`, which renders every marker literall
 ## Shape
 
 ```
-Markdown.blocks(_:)        VibeVoiceCore — headings, lists, code fences, quotes, rules, tables
+Markdown.blocks(_:)        FlowStateCore — headings, lists, code fences, quotes, rules, tables
         │                  pure Foundation, no SwiftUI, fully tested
         ▼
 MarkdownText               the app target — one block per row, styled like the rest of the app

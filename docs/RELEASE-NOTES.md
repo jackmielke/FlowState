@@ -129,11 +129,11 @@ display list changes.
 
 | | |
 |---|---|
-| `VibeVoiceCore/ActiveScreenOverlay.swift` | Which screen an overlay belongs on, and where on it |
-| `VibeVoiceCore/ActiveDisplay.swift` | What makes a display active in the first place |
-| `VibeVoice/CaptionBar.swift` | The strip, and its accessibility and Reduce Transparency fallbacks |
-| `VibeVoice/HUDWindow.swift` | The widget, and the corner it keeps |
-| `VibeVoice/AppState.swift` | `syncOverlayDisplays()` — the one place both are pointed |
+| `FlowStateCore/ActiveScreenOverlay.swift` | Which screen an overlay belongs on, and where on it |
+| `FlowStateCore/ActiveDisplay.swift` | What makes a display active in the first place |
+| `FlowState/CaptionBar.swift` | The strip, and its accessibility and Reduce Transparency fallbacks |
+| `FlowState/HUDWindow.swift` | The widget, and the corner it keeps |
+| `FlowState/AppState.swift` | `syncOverlayDisplays()` — the one place both are pointed |
 
 Tests: `ActiveScreenOverlayTests`, `ActiveDisplayGateTests` (`swift test`). Placement on a
 live second monitor is not unit-testable; `FLOWSTATE_CAPTION_TEST="some text"` puts a
@@ -191,7 +191,7 @@ a warning people learn to scroll past.
 
 ### Nothing about audio-only changed
 
-Same folder (`~/Library/Application Support/VibeVoice/Recordings`), same `.wav`, same
+Same folder (`~/Library/Application Support/FlowState/Recordings`), same `.wav`, same
 name, same mixdown, same code path. The video writer is not in it. If you never open the
 new setting, you cannot tell this release happened.
 
@@ -250,12 +250,12 @@ would have got from the same conversation recorded audio-only.
 
 | | |
 |---|---|
-| `VibeVoiceCore/CaptureMode.swift` | The modes, the profiles, codec choice, frame geometry, bit rate |
-| `VibeVoiceCore/CaptureStorage.swift` | Rates, thresholds, and every warning string |
-| `VibeVoiceCore/RecordingName.swift` | One file-naming rule, shared by both writers |
-| `VibeVoice/SessionRecorder.swift` | The timeline, the mixdown, every outcome — no ScreenCaptureKit |
-| `VibeVoice/VideoCapture.swift` | ScreenCaptureKit, AVAssetWriter, the composite |
-| `VibeVoice/CameraCapture.swift` | Which cameras exist, and whether we may use one |
+| `FlowStateCore/CaptureMode.swift` | The modes, the profiles, codec choice, frame geometry, bit rate |
+| `FlowStateCore/CaptureStorage.swift` | Rates, thresholds, and every warning string |
+| `FlowStateCore/RecordingName.swift` | One file-naming rule, shared by both writers |
+| `FlowState/SessionRecorder.swift` | The timeline, the mixdown, every outcome — no ScreenCaptureKit |
+| `FlowState/VideoCapture.swift` | ScreenCaptureKit, AVAssetWriter, the composite |
+| `FlowState/CameraCapture.swift` | Which cameras exist, and whether we may use one |
 
 Tests: `CaptureModeTests`, `CaptureStorageTests`, `RecordingNameTests` (`swift test`),
 plus `Scripts/verify-recorder.sh` §6 for the audio/video contract and

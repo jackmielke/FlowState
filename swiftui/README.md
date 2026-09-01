@@ -7,16 +7,16 @@ a real `.app` bundle.
 ## Build & run
 
 ```bash
-cd ~/dev/vibe-voice/swiftui
+cd ~/dev/FlowState/swiftui
 ./build.sh                 # swift build -c release + assemble + ad-hoc codesign
-open VibeVoice.app         # launch it
+open FlowState.app         # launch it
 ```
 
 Debug build: `CONFIG=debug ./build.sh`.
 Plain compile check: `swift build -c release`.
-Tests: `swift test` (covers `VibeVoiceCore`, see [Response lifecycle](#response-lifecycle)).
+Tests: `swift test` (covers `FlowStateCore`, see [Response lifecycle](#response-lifecycle)).
 
-> **Launch `VibeVoice.app`, not `.build/release/VibeVoice`.**
+> **Launch `FlowState.app`, not `.build/release/FlowState`.**
 > A bare SPM binary is not a bundle, so macOS TCC silently denies it mic and
 > screen-recording access. `build.sh` copies `Resources/Info.plist` in and runs
 > `codesign --force --deep --sign -` so TCC sees a stable identity across launches.
@@ -93,14 +93,14 @@ RESULT: transport OK — no audio devices were opened.
 
 `SessionRecorder` tees the two PCM streams the app already carries — your microphone on
 its way out, the model's voice on its way in — and mixes them into one 16-bit WAV under
-`~/Library/Application Support/VibeVoice/Recordings`. No extra permission, no second
+`~/Library/Application Support/FlowState/Recordings`. No extra permission, no second
 capture, no re-encoding. The mic is the clock: its sample count is the timeline, and the
 model's voice is mixed in wherever that timeline stands when it lands.
 
 The recorder lives in the app target, which cannot be unit-tested — it is compiled beside
 AppKit and AVAudioEngine. So the script above compiles `SessionRecorder.swift` on its own
 (it imports nothing but Foundation, AVFoundation, Combine, os and the pure-Foundation
-`VibeVoiceCore`, deliberately) and drives it directly, including from background threads,
+`FlowStateCore`, deliberately) and drives it directly, including from background threads,
 which is where the audio tap runs. Last run:
 
 ```
@@ -135,7 +135,7 @@ buttons: **Play** and **Open in Finder**. The same card is in Settings › Recor
 it falls back to the newest file on disk so it survives a relaunch.
 
 Every route into Finder goes through `AppState.reveal`, which asks `RecordingLocation`
-(in `VibeVoiceCore`, so it is tested) what to open. This matters because
+(in `FlowStateCore`, so it is tested) what to open. This matters because
 `activateFileViewerSelecting` accepts a path to a file that is not there and then does
 nothing at all — a recording moved or thrown away since the panel was drawn used to make
 the button look dead. It now opens the folder instead and says why, on the row or card
@@ -163,7 +163,7 @@ The recording transport and the camera bubble are voice commands:
 | "show my face" | `show_face` | Puts the camera bubble on screen, and in the take |
 | "hide my face" | `hide_face` | Takes it off screen |
 
-One vocabulary, two routes, in `VoiceCommand` (`VibeVoiceCore`, so it is tested):
+One vocabulary, two routes, in `VoiceCommand` (`FlowStateCore`, so it is tested):
 
 * **With a session open**, the model calls them as tools. The descriptions it reads come
   from the same enum.
@@ -271,7 +271,7 @@ recording of someone reading a document comes in far under the number.
 
 ### Constraints worth knowing
 
-- **File naming** is one rule, in `VibeVoiceCore/RecordingName.swift`, tested in
+- **File naming** is one rule, in `FlowStateCore/RecordingName.swift`, tested in
   `RecordingNameTests`: `2026-02-02 02.40 — standup.wav`. Stamp first so the folder sorts
   chronologically; `/` and `:` become `-`; newlines and control characters become spaces;
   a leading `.` is dropped so the file is not invisible; 40 characters *and* 180 bytes of
@@ -317,7 +317,7 @@ one:
 
 ```bash
 FLOWSTATE_RECORD_TEST=6 FLOWSTATE_RECORD_TEST_MODE=screen FLOWSTATE_RECORD_TEST_PAUSE=4 \
-  /Applications/FlowState.app/Contents/MacOS/VibeVoice
+  /Applications/FlowState.app/Contents/MacOS/FlowState
 [record-test] file: … .mov — 780772 bytes, 6.21s
 [record-test] paused 4s — the file should be ~6s, not ~10s
 ```
@@ -334,14 +334,14 @@ is the whole claim `VideoTrackWriter.setPaused` makes.
 | Playback | `response.output_audio.delta` → base64-decode → Float32 @ 24 kHz → `AVAudioPlayerNode` (engine resamples to the device rate) |
 | Amplitude | Real RMS. Mic RMS from the input tap; output RMS from a tap installed **on the player node**, i.e. what is actually being rendered. No timer fakery. |
 | Barge-in | `input_audio_buffer.speech_started` → flush the local playback queue. The server truncates its own turn (`turn_detection.interrupt_response: true`), so no `response.cancel` is sent — that only races and returns "no active response found". |
-| Response lifecycle | `ResponseCoordinator` (`VibeVoiceCore`) owns every `response.create` / `response.cancel`. One response at a time, deadlines on every phase, a Stop button that always works. See below. |
+| Response lifecycle | `ResponseCoordinator` (`FlowStateCore`) owns every `response.create` / `response.cancel`. One response at a time, deadlines on every phase, a Stop button that always works. See below. |
 | Screen | ScreenCaptureKit — `SCShareableContent` + `SCContentFilter` + `SCScreenshotManager.captureImage`, downscaled to 1280px wide, JPEG q0.7, sent as a `data:` URI per contract §3. One display at a time — see below |
 | Hotkey | Carbon `RegisterEventHotKey`, seven slots (no Accessibility permission needed): ⌘⇧2 screenshot, summon, connect, record, hush, wake, and the dictation slot (the only one that also reports key-up). Every registration is checked — a chord another app owns fails with an `OSStatus`, and that failure is carried up to the row in Settings that set it rather than dying in stderr |
 | Wake key | ⌃Q — a tap toggles a session on or off, from anywhere; hold it to dictate. Launch-at-login (`SMAppService`) keeps the process alive so the key has something to fire in; `flowstate://connect` is the cold-start route for when it does not. See below |
 | Deactivate key | Esc — turn it off, from anywhere. The one binding that is not permanent: a modifier-less chord is registered only while a session is live *and* FlowState is not the app in front. See below |
-| Shortcut conflicts | `HotkeyConflict` (`VibeVoiceCore`) — two rows on one chord, a chord macOS refused, and a chord that already means something elsewhere (⌃Q is XON, ⌥Space is Raycast's). All three are said out loud under the picker that set them |
-| Settings | JSON at `~/Library/Application Support/VibeVoice/settings.json` |
-| Settings pane | A floating, draggable pane with six tabs that sizes itself to whichever is open (`FloatingPanel.swift`; geometry in `PanelLayout`, `VibeVoiceCore`) |
+| Shortcut conflicts | `HotkeyConflict` (`FlowStateCore`) — two rows on one chord, a chord macOS refused, and a chord that already means something elsewhere (⌃Q is XON, ⌥Space is Raycast's). All three are said out loud under the picker that set them |
+| Settings | JSON at `~/Library/Application Support/FlowState/settings.json` |
+| Settings pane | A floating, draggable pane with six tabs that sizes itself to whichever is open (`FloatingPanel.swift`; geometry in `PanelLayout`, `FlowStateCore`) |
 | Theme | One `Theme` token = one dynamic `NSColor`, resolved per effective appearance (`Theme.swift`) |
 | Window | `.titled` + `fullSizeContentView` + transparent titlebar + `NSVisualEffectView`. `.titled` is kept deliberately — dropping it is what loses the system corner rounding. |
 
@@ -490,7 +490,7 @@ Every start, finish, queue, cancel, timeout and recovery is logged to stderr as
 `[response] …`; the ones a user could mistake for the app going silent also appear in
 the transcript.
 
-Covered by `Tests/VibeVoiceCoreTests` — 24 tests over the collision, deferral,
+Covered by `Tests/FlowStateCoreTests` — 24 tests over the collision, deferral,
 cancellation, error-recovery and watchdog paths, with an injected clock so the timeout
 cases are deterministic. `swift test`.
 
@@ -627,7 +627,7 @@ Three things that were specifically wrong before, and what they were:
   and selection in the swatch grids is a ring plus a checkmark rather than a heavy stroke.
 
 The geometry — sizing, clamping, dragging, and deciding whether a new measurement is worth
-animating to — is `PanelLayout` in `VibeVoiceCore`, with tests. The view layer owns none of
+animating to — is `PanelLayout` in `FlowStateCore`, with tests. The view layer owns none of
 those decisions.
 
 ### Looking at it without a screenshot
@@ -670,7 +670,7 @@ without closing Settings.
 This used to be one grid with a **Motion** tile in it that revealed a second grid below,
 which made the moving backdrops a mode rather than a choice — and a click on one of their
 tiles while a still backdrop was showing set a value nothing was reading, so the whole
-section looked dead. `LookSelection` (`Sources/VibeVoiceCore/LookBackdrop.swift`) is where
+section looked dead. `LookSelection` (`Sources/FlowStateCore/LookBackdrop.swift`) is where
 both halves of the choice now move together, and `LookBackdropTests` is why that stays
 true.
 
@@ -722,7 +722,7 @@ Which one you are on is stated in Settings, under the buttons.
 copies it in as the chosen style's backdrop. Copied, not referenced — a backdrop that
 points into `~/Downloads` is a backdrop that disappears the week you tidy up.
 
-They live in `~/Library/Application Support/VibeVoice/Motion/`, named after the style, so
+They live in `~/Library/Application Support/FlowState/Motion/`, named after the style, so
 you can also just drop files there:
 
 ```
@@ -780,7 +780,7 @@ Three things keep it that way, all in `MotionBudget`:
 
 ### Adding a style
 
-1. A case in `MotionStyle` (`Sources/VibeVoiceCore/MotionBackdrop.swift`) with a label,
+1. A case in `MotionStyle` (`Sources/FlowStateCore/MotionBackdrop.swift`) with a label,
    a blurb, four palette stops and a speed.
 2. A `[[stitchable]]` function in `Resources/Shaders/Motion.metal` named `motion_<case>`.
    That name is the entire contract between the two files and nothing checks it at compile

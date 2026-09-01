@@ -48,8 +48,8 @@ warning and nothing to do in Terminal.
 **If you'd rather build it** — you need Xcode's command line tools:
 
 ```bash
-git clone https://github.com/jackmielke/vantage && cd vantage/swiftui
-./build.sh && open VibeVoice.app
+git clone https://github.com/jackmielke/FlowState && cd vantage/swiftui
+./build.sh && open FlowState.app
 ```
 
 Either way, on first launch a setup sheet asks for your OpenAI key and verifies it by
@@ -72,7 +72,7 @@ Maintainers: `swiftui/release.sh` builds the notarized DMG.
 
 - The OpenAI key lives in `~/.config/vibe-voice/config.json`, mode `0600`, outside the
   repo. It is never bundled into the binary — verifiable with
-  `strings FlowState.app/Contents/MacOS/VibeVoice | grep sk-`.
+  `strings FlowState.app/Contents/MacOS/FlowState | grep sk-`.
 - The app mints a short-lived `ek_…` token per session and puts **only that** on the wire.
 - Dev Mode runs Claude Code as **you**, under **your** account. FlowState never sees your
   Anthropic credentials, and no coding usage is billed to anyone else.

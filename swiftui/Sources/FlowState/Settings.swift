@@ -1,0 +1,603 @@
+import Foundation
+import Combine
+import CoreGraphics
+import FlowStateCore
+
+let kVoices = ["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]
+let kModels = ["gpt-realtime-2.1", "gpt-realtime-2.1-mini", "gpt-realtime-2", "gpt-realtime-1.5", "gpt-realtime", "gpt-realtime-mini"]
+
+let kDefaultPrompt = """
+You are Flow, a warm and quick voice companion living on this Mac. \
+Keep replies short and conversational — a sentence or two unless asked for more. \
+When you are shown a screenshot, describe what actually matters on it, concretely, \
+and never pretend to see something you cannot.
+"""
+
+/// Prompts shipped by earlier builds, under earlier names.
+///
+/// The personality prompt is stored in the user's settings, so renaming the app cannot
+/// reach a prompt already on disk — it would keep introducing itself as Vibe or Vantage
+/// forever. Any of these, untouched, is silently upgraded to the current default; a
+/// prompt the user has actually edited is left completely alone.
+let kSupersededPrompts: [String] = [
+    kDefaultPrompt
+        .replacingOccurrences(of: "You are Flow,", with: "You are Vibe,"),
+    kDefaultPrompt
+        .replacingOccurrences(of: "You are Flow,", with: "You are FlowState,"),
+    kDefaultPrompt
+        .replacingOccurrences(of: "You are Flow,", with: "You are Vantage,"),
+]
+
+struct AppSettings: Codable, Equatable {
+    var voice: String = "marin"
+    var model: String = "gpt-realtime-2.1"
+    var systemPrompt: String = kDefaultPrompt
+    var speed: Double = 1.0
+    var continuousScreen: Bool = false
+    var screenInterval: Double = 5.0      // 2...30 s
+    var vadThreshold: Double = 0.5        // 0...1
+    var silenceDurationMs: Double = 500   // 200...1500
+    var transcribeUser: Bool = true
+
+    /// The microphone gate, remembered between launches.
+    ///
+    /// Persisted because a mute you have to re-apply every launch is not a mute — the
+    /// case for it is "this Mac is in a room where I do not want an open microphone",
+    /// and that is a fact about the room, not about this session. The cost of persisting
+    /// it is a launch where the app hears nothing and the user has forgotten why, which
+    /// is why muted state is carried loudly rather than quietly: the orb changes, the
+    /// widget shows a slashed mic, and the status line says Muted rather than Live.
+    var micMuted: Bool = false
+
+    /// Dev Mode — lets the model dispatch coding tasks to headless Claude Code.
+    /// Off by default: it edits files with `--permission-mode acceptEdits`, so a
+    /// misheard sentence can change your code.
+    var devMode: Bool = false
+    var devRepo: String = "~/dev/vibe-voice"
+
+    /// How much Claude Code is allowed to do without asking.
+    ///
+    /// `acceptEdits` auto-approves file edits only — MCP tools (Notion, Slack) and shell
+    /// commands still prompt, and in headless mode nobody can answer, so the task stalls.
+    /// `bypassPermissions` approves everything, which is what makes connectors usable by
+    /// voice, and also means a misheard sentence can run anything.
+    var devPermissionMode: String = "acceptEdits"
+
+    /// Start Claude Code without connecting this Mac's MCP servers unless the task
+    /// actually names one.
+    ///
+    /// Measured here: five user-level servers add about three seconds to every run,
+    /// before it has read a single file, and it is paid again on every follow-up. A typo
+    /// fix does not need Figma. `DevTaskPlan` gives them back the moment an instruction
+    /// mentions Notion, Slack, Supabase and so on; this switch is the way out for a repo
+    /// whose tasks need a connector the words never name.
+    var devFastStart: Bool = true
+
+    /// Native tools the user has switched OFF. Stored as the exceptions rather than the
+    /// enabled list, so a tool added in a later build is on by default instead of
+    /// silently missing for everyone who already has a settings file.
+    var disabledTools: [String] = []
+
+    /// Speak progress aloud while Claude Code works, instead of going quiet until it
+    /// finishes. Steps are always filed silently so the model can answer "what are you
+    /// doing?" — this only controls whether it volunteers updates unprompted.
+    var devNarrate: Bool = true
+    /// Seconds between spoken updates. Each one is a real spoken turn, so this is a
+    /// direct cost dial.
+    var devNarrateInterval: Double = 25
+    /// Hard ceiling on spoken updates per task, so a long run cannot narrate forever.
+    var devNarrateMax: Int = 8
+
+    /// Which display the assistant looks at. `0` — the sentinel, since no real display
+    /// has id 0 — means "whichever display FlowState is on right now", which is the
+    /// behaviour every build before this one had.
+    ///
+    /// Persisted, but never trusted on its own: CoreGraphics display ids do not survive
+    /// an unplug or a reboot, so `AppState` re-resolves this against the live display
+    /// list and falls back to the active display if it no longer matches anything.
+    var screenDisplayID: UInt32 = DisplayOption.followsActiveID
+
+    /// How many screen frames stay in context. Older ones are deleted so their image
+    /// tokens stop being re-billed every turn. 0 = keep everything (expensive).
+    var maxScreenFrames: Int = 3
+    /// Long edge of a screenshot in pixels. Fewer pixels = fewer image tokens.
+    var screenshotSize: Int = 1280
+
+    var qualityMode: QualityMode = .quality
+
+    /// Dark / light / follow-the-system. Persisted like everything else here, so the
+    /// choice is restored on launch.
+    var appearance: AppearanceMode = .system
+
+    /// The scene behind the orb. Midnight and Paper follow the existing theme; the place
+    /// presets and a custom photo are painted by `BackdropView`.
+    /// Aurora, moving, out of the box.
+    ///
+    /// The old default was a flat near-black field, which is the safe choice and the
+    /// wrong one: the first thing anybody sees decides whether they keep the app open,
+    /// and this is an app whose whole argument is that it is nicer to be in the room
+    /// with than a terminal. It costs a GPU shader behind the orb — `MotionBudget`
+    /// already drops it to one frame when the window is occluded or Reduce Motion is on,
+    /// which is the version of "it is free when nobody is looking" that matters.
+    var backdrop: Backdrop = .motion
+    var backdropImagePath: String = ""
+    /// "auto" follows the local clock; otherwise a pinned Daylight raw value.
+    var daylightMode: String = "auto"
+    /// Seconds between photos when the backdrop points at a folder. 0 = never rotate.
+    var photoRotateSeconds: Double = 120
+
+    /// Which moving backdrop `Backdrop.motion` shows.
+    var motionStyle: MotionStyle = .aurora
+    /// 0…1 — how much the motion moves. Amplitude and contrast only: nothing here
+    /// changes the speed, because a backdrop you notice speeding up is a backdrop you
+    /// start watching instead of the person you are talking to.
+    var motionIntensity: Double = 0.6
+    /// Prefer a video loop from the Motion folder over the shader, when one is there.
+    /// On by default — someone who went to the trouble of installing a loop meant it —
+    /// and the switch is how you get back to the drawn version without deleting the file.
+    var motionAssets: Bool = true
+    /// Fade the chrome away when nothing has happened for a while, leaving the scene.
+    var ambientMode: Bool = true
+
+    /// The two Look-pane fields as the one thing they behave like.
+    ///
+    /// `backdrop` and `motionStyle` are stored separately — they always have been, and the
+    /// settings file is not going to be rewritten over a UI change — but every rule about
+    /// them involves both at once: picking a moving background sets the backdrop as well
+    /// as the style, and a tile counts as selected only when the pair agrees. Those rules
+    /// live in `LookSelection`, in Core, where they can be tested; this is the seam.
+    var look: LookSelection {
+        get { LookSelection(backdrop: backdrop, motionStyle: motionStyle) }
+        set { backdrop = newValue.backdrop; motionStyle = newValue.motionStyle }
+    }
+
+    /// Show Flow in the menu bar, so it is reachable without hunting for its window.
+    var menuBarEnabled: Bool = true
+    /// Summon hotkey. Empty string = off.
+    var summonHotkey: String = "cmdShiftSpace"
+
+    /// Connect or hang up from anywhere. Empty string = off.
+    ///
+    /// Defaults to ⌃⇧Space rather than a modifier-only chord like Wispr Flow's
+    /// double-tap. Carbon hotkeys need a real key and cost no permission; watching for
+    /// bare modifiers means an event tap, which means Accessibility, and this app has
+    /// already spent enough of its owner's patience on macOS privacy dialogs.
+    var connectHotkey: String = "ctrlShiftF"
+
+    /// Start or stop recording from anywhere. Empty string = off.
+    var recordHotkey: String = "cmdShiftR"
+
+    /// Turn it on, from anywhere, without caring what state it was in. Empty = off.
+    ///
+    /// ⌃Q rather than a ⌘⇧ pair because this is the key that gets hit blind, mid-thought.
+    /// It only ever turns things on — see `AppState.wakeAndConnect` — which is what lets
+    /// it be pressed without first working out whether a session is already open.
+    var wakeHotkey: String = "ctrlQ"
+
+    /// Start FlowState at login, so the wake key is live before it is reached for.
+    ///
+    /// Not cosmetic: a hotkey belongs to a running process, so a key that is meant to
+    /// work "even when the app is closed" needs the app not to be closed. See
+    /// `LoginItem` for the two halves of that and why both ship.
+    var startAtLogin: Bool = false
+
+    /// Stop everything, now — the deactivate key. Empty string = off.
+    ///
+    /// Escape by default, which is the key a person already presses at anything they
+    /// want to stop. It is the one binding in here that is not simply handed to Carbon
+    /// and left there: a permanent process-wide Escape would break cancelling in every
+    /// app on the machine, so it is bound only while a session is live and Flow is not
+    /// in front, and released the moment either stops being true. See
+    /// `HotkeyCombo.escape` and `AppState.applyHushHotkey`.
+    ///
+    /// The three modifier chords beside it are for anyone who would rather have a key
+    /// that is always listening — including while idle, where it silences the wake
+    /// phrase for `hushSeconds` without a session needing to exist.
+    var hushHotkey: String = "escape"
+    /// How long the wake trigger stays quiet after the hush key. Long enough to get out
+    /// of whatever set it off; short enough that nobody has to remember to undo it.
+    var hushSeconds: Double = 90
+
+    /// Every chord a process-wide hotkey currently owns. Empty settings mean "off" and
+    /// are dropped.
+    ///
+    /// Exists so a window-scoped shortcut can stay out of a global one's way. Carbon
+    /// registers ahead of every app — including this one — so a chord listed here is
+    /// already spoken for even while Flow is the frontmost app, and a SwiftUI
+    /// `.keyboardShortcut` on the same chord would be a key that never fires while the
+    /// UI claims it does.
+    var claimedHotkeyIDs: Set<String> {
+        Set([summonHotkey, connectHotkey, recordHotkey, hushHotkey, wakeHotkey]
+            // Session-scoped chords — Escape — are deliberately not claimed. They are
+            // never registered while Flow is the app in front, which is the only time a
+            // window shortcut could have fired anyway, so listing one here would block a
+            // key that was free.
+            .filter { !$0.isEmpty && !HotkeyCombo.named($0).isSessionScoped })
+    }
+
+    /// Let it start the conversation when something is worth saying — a coding task
+    /// finishing. Off by default: an app that opens a microphone and talks to you
+    /// unprompted has to be asked for, not discovered.
+    var proactive: Bool = false
+
+    /// Listen for a wake phrase whenever nothing else is going on.
+    ///
+    /// Off by default. This holds the microphone open all day — recognition is
+    /// on-device and nothing leaves the Mac, but an app that listens continuously is
+    /// something a person opts into knowingly, not something they find switched on.
+    var wakeWord: Bool = false
+    /// Which phrase. Two words on purpose: "flow" alone is a word this user says
+    /// constantly, including as the name of another app.
+    var wakePhrase: String = "heyFlow"
+
+    /// Answer the recording commands — "start recording", "pause recording", "show my
+    /// face" — without a session, whenever the wake listener is running.
+    ///
+    /// On by default, but it can only ever do anything while `wakeWord` is on: this rides
+    /// on that recogniser rather than opening a second one, so an app that is not
+    /// listening is not listening for these either. That is the honest arrangement — one
+    /// switch decides whether the microphone is open all day, and it is the one that
+    /// already says so.
+    var voiceCommands: Bool = true
+
+    /// Two claps also wake it. Independent of the phrase, and more reliable across a
+    /// room: a clap does not have to be understood, only heard.
+    var clapToWake: Bool = true
+    /// 0...1, higher is easier to trigger. Defaults low: a wake trigger that fires by
+    /// accident is worse than one that needs a second try, because the accident happens
+    /// while you are doing something else.
+    var clapSensitivity: Double = 0.35
+
+    /// Small sounds for the moments with no visual feedback — waking, hanging up,
+    /// trouble. On by default: the app is designed to be used without looking at it, and
+    /// silence in those moments is indistinguishable from a crash.
+    var earcons: Bool = true
+
+    /// Subtitles for the conversation, floating over whatever you are doing.
+    ///
+    /// On by default. The app's window is usually not in front — it is a voice assistant
+    /// — so the transcript inside it is invisible exactly when it matters most: when it
+    /// has misheard you and you cannot tell why the answer is strange.
+    ///
+    /// **Follows the active screen.** On is not the same as visible: the strip appears on
+    /// whichever display the pointer has settled on, and with several attached and no
+    /// settled answer it stays off rather than picking one. That guardrail lives in
+    /// `ActiveScreenOverlay`, not here — this switch is only the user's intent, and there
+    /// is no reason to persist the accident of where a pointer happened to be.
+    var captions: Bool = true
+
+    /// Show the time when ambient mode has faded everything else away.
+    ///
+    /// Ambient mode on its own leaves a beautiful empty rectangle, which is a screensaver
+    /// you cannot use for anything. This is the version you can glance at from across a
+    /// room and get something back.
+    var ambientClock: Bool = true
+
+    /// Commit what each task changed, on the current branch, when it finishes.
+    ///
+    /// Without this Dev Mode edits the working tree and stops, so a session's work is
+    /// invisible to anyone but whoever is sitting at this Mac.
+    var devAutoCommit: Bool = true
+    /// And push it. This is the only way work reaches a Claude Code running in the cloud,
+    /// which can see the remote and nothing else.
+    var devAutoPush: Bool = true
+
+    /// Show your camera in a floating bubble, the way Loom does. Independent of whether
+    /// a recording is running, so you can frame yourself before you start.
+    var cameraBubble: Bool = false
+
+    /// How big the bubble is, and — through `CameraOverlay` — how big the camera is in
+    /// the recording. One setting for both, so what you frame is what you get.
+    var cameraSize: CameraSize = .medium
+
+    /// Which corner of the recording the camera sits in. Not chosen in Settings: it
+    /// follows wherever the bubble has been dragged, which is the same gesture Loom
+    /// uses and one fewer control to explain.
+    var cameraCorner: CameraCorner = .bottomTrailing
+
+    /// Circle, rounded rectangle or square — the same outline on screen and in the file.
+    var cameraShape: CameraShape = .circle
+
+    /// Show the size controls when the pointer is over the bubble, the way Loom does.
+    /// Off leaves a bubble with nothing on it, which is what you want while recording
+    /// something where a control bar appearing would be a distraction.
+    var cameraControls: Bool = true
+
+    /// Flip the preview horizontally.
+    ///
+    /// Off by default, and that is the honest default rather than the flattering one:
+    /// a screen recording captures the bubble as it appears, so unlike Loom — which
+    /// composites, and can mirror what you see while recording what others should see —
+    /// mirroring here mirrors the recording too. Anything with text in shot comes out
+    /// backwards.
+    var cameraMirrored: Bool = false
+
+    /// The floating widget: a small always-on-top panel that follows you between apps,
+    /// Spaces and displays, so FlowState is reachable without its window in front.
+    ///
+    /// Follows the active screen like the captions do, keeping whichever corner it was
+    /// dragged to. Unlike the captions it is not the transcript, so it is not gated on
+    /// `captions` — only on there being a screen to be on.
+    var hudEnabled: Bool = false
+    var hudStyle: HUDStyle = .pill
+    /// Grow to show more while the pointer is on it, shrink back when it leaves.
+    ///
+    /// The small style exists to be ignorable, which also makes it uninformative — it
+    /// cannot show what the session costs or whether the mic is open. Hovering is the
+    /// one moment you have said you are interested, so it is the one moment the widget
+    /// can afford to say more without ever having been in the way.
+    var hudHoverExpand: Bool = true
+    /// How solid the widget is when the pointer is elsewhere. It goes fully opaque on
+    /// hover regardless, so this can be set low without making it unusable.
+    var hudIdleOpacity: Double = 1.0
+    /// Set while the widget is tucked away; it comes back on its own at this time.
+    ///
+    /// A timer rather than a toggle. "Hide" with no end to it becomes a widget somebody
+    /// switched off in a meeting three weeks ago and has been meaning to turn back on.
+    var hudHiddenUntil: Date? = nil
+
+    /// Set once the Dev Mode offer has been declined. Permanent on purpose.
+    var devNudgeDismissed: Bool = false
+
+    /// What FlowState is allowed to remember, and for how long. See `TranscriptPrivacy` —
+    /// every switch in it is honoured in one place, `ConversationLog.append`.
+    var privacy: TranscriptPrivacy = TranscriptPrivacy()
+
+    /// When a running conversation gets summarised, and where the summary goes.
+    var summaries: SummaryPolicy = SummaryPolicy()
+
+    // MARK: - Capture
+
+    /// What the record button captures: audio, audio + screen, audio + camera, or both.
+    ///
+    /// Audio-only by default, and that is not merely a conservative default — it is the
+    /// behaviour of every build before video existed, written to the same folder with the
+    /// same name and the same extension. Someone who never opens this setting cannot tell
+    /// that video was added.
+    var captureMode: CaptureMode = .audioOnly
+
+    /// How hard the encoder is allowed to work and how much disk it may spend. Ignored
+    /// entirely when `captureMode` is `.audioOnly` — a WAV has no profile.
+    var capturePerformance: PerformanceProfile = .balanced
+
+    /// `AVCaptureDevice.uniqueID` of the camera to record. Empty means "whichever one
+    /// macOS would pick", which is what a laptop with one built-in camera wants and what
+    /// a Mac whose external camera is currently unplugged has to fall back to anyway.
+    ///
+    /// Unlike a display id, a camera's unique id survives unplugging and rebooting, so
+    /// this one is safe to persist — it is still re-resolved against the live list before
+    /// every recording, because "safe to persist" is not "guaranteed to be attached".
+    var cameraDeviceID: String = ""
+
+    /// What to open on launch.
+    ///
+    /// ON — the default — reopens the conversation you were last in, with its history.
+    ///
+    /// It was OFF for a while, on the argument that what you say now should not be
+    /// silently appended to a conversation from Tuesday. The argument lost to what it
+    /// looked like: a transcript that is on screen one minute and gone after a relaunch
+    /// reads as a transcript that was thrown away, whatever the switcher says. Starting
+    /// fresh is still one click, and it is a click, which is the right way round.
+    ///
+    /// A pinned conversation is reopened whatever this says — see
+    /// `SessionCatalog.sessionToResume`.
+    var resumeLastSession: Bool = true
+
+    /// How many conversations are kept, and whether they are written without being
+    /// asked. See `TranscriptRetention`; the hours half is `privacy.retentionHours`.
+    var retention: TranscriptRetention = TranscriptRetention()
+
+    /// The transcript column is hidden.
+    ///
+    /// Hiding is not deleting and not pausing: every line is still in memory, still on
+    /// disk, still being recorded. This is for the moment somebody shares their screen,
+    /// and the way back is the same button. Persisted, because a screen share outlives a
+    /// relaunch — and because a hidden transcript that quietly came back would be worse
+    /// than one that stayed hidden.
+    var transcriptHidden: Bool = false
+
+    enum CodingKeys: String, CodingKey {
+        case voice, model, systemPrompt, speed, continuousScreen, screenInterval
+        case vadThreshold, silenceDurationMs, transcribeUser, micMuted, devMode, devRepo
+        case maxScreenFrames, screenshotSize, qualityMode, appearance, screenDisplayID
+        case devNarrate, devNarrateInterval, devNarrateMax, devPermissionMode, devFastStart
+        case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
+        case photoRotateSeconds, menuBarEnabled, summonHotkey, devNudgeDismissed
+        case connectHotkey, recordHotkey, hushHotkey, hushSeconds, proactive, wakeWord, wakePhrase, clapToWake, clapSensitivity
+        case wakeHotkey, startAtLogin
+        case voiceCommands
+        case earcons, captions, ambientClock
+        case motionStyle, motionIntensity, motionAssets
+        case devAutoCommit, devAutoPush, hudEnabled, hudStyle, cameraBubble
+        case hudHoverExpand, hudIdleOpacity, hudHiddenUntil
+        case cameraSize, cameraCorner, cameraShape, cameraControls, cameraMirrored
+        case privacy, summaries, resumeLastSession, retention, transcriptHidden
+        case captureMode, capturePerformance, cameraDeviceID
+    }
+}
+
+extension AppSettings {
+    /// Hand-rolled so a missing key falls back to its default instead of throwing.
+    ///
+    /// The synthesised decoder does *not* use property defaults for absent keys, and
+    /// `SettingsStore` decodes with `try?` — so adding a field to this struct would
+    /// silently reset every existing user's whole settings file on first launch.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = AppSettings()
+        // Missing key OR a value of the wrong shape both fall back, so one bad field
+        // can never cost the user the other fourteen.
+        func v<T: Decodable>(_ k: CodingKeys, _ fallback: T) -> T {
+            // `try?` flattens decodeIfPresent's own optional, so nil here already
+            // covers both "key absent" and "value was the wrong shape".
+            guard let found = try? c.decodeIfPresent(T.self, forKey: k) else { return fallback }
+            return found
+        }
+        voice             = v(.voice, d.voice)
+        model             = v(.model, d.model)
+        systemPrompt      = v(.systemPrompt, d.systemPrompt)
+        speed             = v(.speed, d.speed)
+        continuousScreen  = v(.continuousScreen, d.continuousScreen)
+        screenInterval    = v(.screenInterval, d.screenInterval)
+        screenDisplayID   = v(.screenDisplayID, d.screenDisplayID)
+        vadThreshold      = v(.vadThreshold, d.vadThreshold)
+        silenceDurationMs = v(.silenceDurationMs, d.silenceDurationMs)
+        transcribeUser    = v(.transcribeUser, d.transcribeUser)
+        micMuted          = v(.micMuted, d.micMuted)
+        devMode           = v(.devMode, d.devMode)
+        devRepo           = v(.devRepo, d.devRepo)
+        devNarrate        = v(.devNarrate, d.devNarrate)
+        devPermissionMode = v(.devPermissionMode, d.devPermissionMode)
+        devFastStart      = v(.devFastStart, d.devFastStart)
+        disabledTools     = v(.disabledTools, d.disabledTools)
+        devNarrateInterval = v(.devNarrateInterval, d.devNarrateInterval)
+        devNarrateMax     = v(.devNarrateMax, d.devNarrateMax)
+        maxScreenFrames   = v(.maxScreenFrames, d.maxScreenFrames)
+        screenshotSize    = v(.screenshotSize, d.screenshotSize)
+        qualityMode       = v(.qualityMode, d.qualityMode)
+        appearance        = v(.appearance, d.appearance)
+        backdrop          = v(.backdrop, d.backdrop)
+        backdropImagePath = v(.backdropImagePath, d.backdropImagePath)
+        daylightMode      = v(.daylightMode, d.daylightMode)
+        photoRotateSeconds = v(.photoRotateSeconds, d.photoRotateSeconds)
+        motionStyle       = v(.motionStyle, d.motionStyle)
+        motionIntensity   = v(.motionIntensity, d.motionIntensity)
+        motionAssets      = v(.motionAssets, d.motionAssets)
+        menuBarEnabled    = v(.menuBarEnabled, d.menuBarEnabled)
+        summonHotkey      = v(.summonHotkey, d.summonHotkey)
+        connectHotkey     = v(.connectHotkey, d.connectHotkey)
+        recordHotkey      = v(.recordHotkey, d.recordHotkey)
+        hushHotkey        = v(.hushHotkey, d.hushHotkey)
+        wakeHotkey        = v(.wakeHotkey, d.wakeHotkey)
+        startAtLogin      = v(.startAtLogin, d.startAtLogin)
+        hushSeconds       = v(.hushSeconds, d.hushSeconds)
+        proactive         = v(.proactive, d.proactive)
+        wakeWord          = v(.wakeWord, d.wakeWord)
+        wakePhrase        = v(.wakePhrase, d.wakePhrase)
+        clapToWake        = v(.clapToWake, d.clapToWake)
+        voiceCommands     = v(.voiceCommands, d.voiceCommands)
+        clapSensitivity   = v(.clapSensitivity, d.clapSensitivity)
+        earcons           = v(.earcons, d.earcons)
+        captions          = v(.captions, d.captions)
+        ambientClock      = v(.ambientClock, d.ambientClock)
+        devNudgeDismissed = v(.devNudgeDismissed, d.devNudgeDismissed)
+        devAutoCommit     = v(.devAutoCommit, d.devAutoCommit)
+        devAutoPush       = v(.devAutoPush, d.devAutoPush)
+        hudEnabled        = v(.hudEnabled, d.hudEnabled)
+        cameraBubble      = v(.cameraBubble, d.cameraBubble)
+        cameraSize        = v(.cameraSize, d.cameraSize)
+        cameraCorner      = v(.cameraCorner, d.cameraCorner)
+        cameraShape       = v(.cameraShape, d.cameraShape)
+        cameraControls    = v(.cameraControls, d.cameraControls)
+        cameraMirrored    = v(.cameraMirrored, d.cameraMirrored)
+        hudStyle          = v(.hudStyle, d.hudStyle)
+        hudHoverExpand    = v(.hudHoverExpand, d.hudHoverExpand)
+        hudIdleOpacity    = min(max(v(.hudIdleOpacity, d.hudIdleOpacity), 0.25), 1.0)
+        hudHiddenUntil    = v(.hudHiddenUntil, d.hudHiddenUntil)
+        ambientMode       = v(.ambientMode, d.ambientMode)
+        privacy           = v(.privacy, d.privacy)
+        summaries         = v(.summaries, d.summaries)
+        resumeLastSession = v(.resumeLastSession, d.resumeLastSession)
+        retention         = v(.retention, d.retention)
+        transcriptHidden  = v(.transcriptHidden, d.transcriptHidden)
+        captureMode       = v(.captureMode, d.captureMode)
+        capturePerformance = v(.capturePerformance, d.capturePerformance)
+        cameraDeviceID    = v(.cameraDeviceID, d.cameraDeviceID)
+    }
+}
+
+enum QualityMode: String, Codable, CaseIterable {
+    case budget, quality
+
+    var label: String { self == .budget ? "Budget" : "Quality" }
+
+    var blurb: String {
+        self == .budget
+            ? "Mini model, smaller frames, tighter history. Roughly a third the cost."
+            : "Full model, full-size frames. Best listening and vision."
+    }
+
+    var symbol: String { self == .budget ? "leaf.fill" : "sparkles" }
+
+    /// There are only two, so the one-click header control just flips between them.
+    var next: QualityMode { self == .budget ? .quality : .budget }
+
+    /// Applied on top of whatever else is set, so switching modes is one control.
+    func apply(to s: inout AppSettings) {
+        s.qualityMode = self
+        switch self {
+        case .budget:
+            s.model = "gpt-realtime-2.1-mini"
+            s.screenshotSize = 960
+            s.maxScreenFrames = 2
+            s.screenInterval = max(s.screenInterval, 10)
+            // Transcription STAYS ON in Budget mode.
+            //
+            // It was switched off here to save the separate per-utterance transcription
+            // charge, which is a small fraction of what the audio itself costs — and the
+            // price of it was half the transcript. The user's own words simply stopped
+            // appearing, so the panel showed the assistant talking to nobody and read as
+            // broken. Nobody would trade their own side of a conversation for a few
+            // percent.
+            s.transcribeUser = true
+            // With no transcription there are no user words to record — the audio
+            // metadata still lands, so a session is not silent in the record, but a
+            // summary built from one side only is worth less. Left to the user rather
+            // than forced: they may well want the assistant's half kept anyway.
+        case .quality:
+            s.model = "gpt-realtime-2.1"
+            s.screenshotSize = 1280
+            s.maxScreenFrames = 3
+            s.transcribeUser = true
+        }
+    }
+}
+
+@MainActor
+final class SettingsStore: ObservableObject {
+    /// Writes only on a REAL change.
+    ///
+    /// Without the equality guard this is a loaded gun. SwiftUI writes to bindings during
+    /// view evaluation, so a binding whose setter assigns here — MenuBarExtra's
+    /// `isInserted` did exactly this — starts a loop: assign, save, @Published fires, body
+    /// re-evaluates, assign again. It pegged a core at 99% and wrote settings.json
+    /// continuously until the app stopped responding. AppSettings is Equatable precisely
+    /// so this comparison is cheap and total.
+    @Published var settings: AppSettings {
+        didSet {
+            guard settings != oldValue else { return }
+            save()
+        }
+    }
+
+    private static var fileURL: URL {
+        // One root for everything FlowState keeps, so `VIBEVOICE_HOME` moves the settings
+        // with the transcripts instead of half of each.
+        let base = ConversationStore.root
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base.appendingPathComponent("settings.json")
+    }
+
+    init() {
+        if let d = try? Data(contentsOf: Self.fileURL),
+           var s = try? JSONDecoder().decode(AppSettings.self, from: d) {
+            // Carry an untouched older prompt forward under the new name.
+            let migrated = kSupersededPrompts.contains(s.systemPrompt)
+            if migrated { s.systemPrompt = kDefaultPrompt }
+            settings = s
+            // Property observers do NOT fire for assignments inside init, so didSet never
+            // runs here and the migration would live only in memory — correct behaviour,
+            // but the file on disk would still say Flow until some unrelated setting
+            // happened to change. Write it now.
+            if migrated { save() }
+        } else {
+            settings = AppSettings()
+        }
+    }
+
+    private func save() {
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let d = try? enc.encode(settings) { try? d.write(to: Self.fileURL, options: .atomic) }
+    }
+}

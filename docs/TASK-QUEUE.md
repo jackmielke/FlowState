@@ -52,7 +52,7 @@ snapshot would be a queue whose jobs cannot be undone.
 
 ## The rules, and where they are tested
 
-All of them are decidable from their arguments, so all of them live in `VibeVoiceCore`
+All of them are decidable from their arguments, so all of them live in `FlowStateCore`
 and are covered by `DevTaskRegistryTests`:
 
 | Rule | Why |

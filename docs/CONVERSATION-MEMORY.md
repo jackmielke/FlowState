@@ -56,10 +56,10 @@ AVAudioEngine tap ──▶ AudioEngine.onMicPCM ──┬──▶ RealtimeClie
 ```
 
 The split down the middle is the one the rest of this codebase already uses:
-**anything decidable from its arguments lives in `VibeVoiceCore` and is tested; anything
+**anything decidable from its arguments lives in `FlowStateCore` and is tested; anything
 that touches the world lives in the app target.** `ResponseCoordinator` is the precedent.
 
-### VibeVoiceCore — the rules
+### FlowStateCore — the rules
 
 | Type | Answers |
 |---|---|
@@ -283,7 +283,7 @@ kept and one that is merely on screen.
 ### Proving it
 
 `Scripts/verify-transcript.sh` compiles the real `ConversationStore` on its own — it
-imports Foundation, Combine and VibeVoiceCore and nothing else — over a temporary
+imports Foundation, Combine and FlowStateCore and nothing else — over a temporary
 `VIBEVOICE_HOME`, then writes, throws the store away, builds a new one over the same
 folder and asks what it remembers. Seven groups: written to disk at 0600, read back after
 a "restart", corrected and deleted per line, pinned across a restart and past its
@@ -332,7 +332,7 @@ it in the "don't write this down" direction is the expensive way round.
 ## On disk
 
 ```
-~/Library/Application Support/VibeVoice/
+~/Library/Application Support/FlowState/
   settings.json                      everything in AppSettings
   sessions.json                      the session index, 0600 — a cache, never the truth
   conversations/<sessionID>.jsonl    one JSON object per line, 0600

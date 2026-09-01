@@ -11,12 +11,12 @@
 # "Flow.app/Contents/MacOS". So that pattern killed Wispr Flow — an unrelated app
 # the user depends on for dictation — on every single rebuild, silently.
 #
-# `pkill -x` matches the executable NAME exactly, and this app's binary is VibeVoice,
+# `pkill -x` matches the executable NAME exactly, and this app's binary is FlowState,
 # so it can only ever match this app. Never reintroduce a -f pattern here.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-APP_BINARY="VibeVoice"                 # executable name inside the bundle
+APP_BINARY="FlowState"                 # executable name inside the bundle
 INSTALLED="/Applications/FlowState.app"
 SIGN_ID="Vibe Voice Dev"
 SIGN_KC="$HOME/Library/Keychains/vibevoice.keychain-db"
@@ -55,7 +55,7 @@ echo "==> build"
 
 echo "==> install to $INSTALLED"
 rm -rf "$INSTALLED"
-cp -R VibeVoice.app "$INSTALLED"
+cp -R FlowState.app "$INSTALLED"
 
 if [ -f "$SIGN_KC" ] && [ -f "$HOME/.config/vibe-voice/signing/kc.pass" ]; then
   security unlock-keychain -p "$(cat "$HOME/.config/vibe-voice/signing/kc.pass")" "$SIGN_KC" 2>/dev/null

@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "VibeVoice",
+    name: "FlowState",
     platforms: [.macOS(.v14)],
     targets: [
         // Logic that must be verifiable without a window, a socket or a microphone.
@@ -10,20 +10,20 @@ let package = Package(
         // unit-tested (it owns AppKit, AVAudioEngine and ScreenCaptureKit), so anything
         // with rules worth proving lives on this side of the line.
         .target(
-            name: "VibeVoiceCore",
-            path: "Sources/VibeVoiceCore",
+            name: "FlowStateCore",
+            path: "Sources/FlowStateCore",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .executableTarget(
-            name: "VibeVoice",
-            dependencies: ["VibeVoiceCore"],
-            path: "Sources/VibeVoice",
+            name: "FlowState",
+            dependencies: ["FlowStateCore"],
+            path: "Sources/FlowState",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
-            name: "VibeVoiceCoreTests",
-            dependencies: ["VibeVoiceCore"],
-            path: "Tests/VibeVoiceCoreTests",
+            name: "FlowStateCoreTests",
+            dependencies: ["FlowStateCore"],
+            path: "Tests/FlowStateCoreTests",
             swiftSettings: [.swiftLanguageMode(.v5)]
         )
     ]

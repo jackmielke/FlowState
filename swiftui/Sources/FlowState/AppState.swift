@@ -1,0 +1,4391 @@
+import Foundation
+import SwiftUI
+import AppKit
+import AVFoundation
+import Speech
+import Combine
+import os
+import FlowStateCore
+
+enum Speaker { case user, assistant, system }
+
+extension TranscriptSpeaker {
+    /// The stored speaker, back as the one the views switch on. Two enums rather than
+    /// one because the record is persisted and must not depend on AppKit — see
+    /// `TranscriptSpeaker` — but restoring a conversation has to cross that line.
+    var asSpeaker: Speaker {
+        switch self {
+        case .user:      return .user
+        case .assistant: return .assistant
+        case .system:    return .system
+        }
+    }
+}
+
+struct TranscriptItem: Identifiable {
+    let id = UUID()
+    let speaker: Speaker
+    var text: String
+    var image: NSImage?
+    var streaming: Bool = false
+    var at: Date = Date()
+    /// The conversation this line belongs to — the app's own session id, the one the
+    /// transcript file is named after. Carried on the view model as well as on the
+    /// stored record so a line on screen can always be traced to the file it was written
+    /// to, and so "forget this conversation" clears both instead of leaving the words on
+    /// screen after deleting the file under them.
+    ///
+    /// Deliberately not the realtime `session.created` id: that changes on every
+    /// reconnect, so half a conversation would stop matching the other half.
+    var sessionID: String?
+    /// The durable record this line produced, or nil when privacy refused to keep it.
+    /// The difference is visible: an unrecorded line is still shown, because the live
+    /// transcript reports what was said rather than what was kept.
+    var entryID: UUID?
+    /// True while this line is a placeholder waiting for its text.
+    ///
+    /// The user's words are put on screen the moment they stop speaking, which is a
+    /// second or more before the transcription of them exists. Without the placeholder
+    /// the assistant's reply appears above the question that prompted it, and the app
+    /// looks like it answered something nobody asked. See `PendingTranscripts`.
+    var pending: Bool = false
+    /// Set when the placeholder was given up on — the transcription never arrived.
+    /// The line stays, because they did say something and the reply below it is about
+    /// whatever that was.
+    var unheard: Bool = false
+}
+
+@MainActor
+final class AppState: ObservableObject {
+
+    @Published var connection: ConnectionState = .idle {
+        didSet {
+            // The deactivate key is bound to a moment, not to the app — see
+            // `applyHushHotkey`. Opening and closing a session is half of what moves
+            // that moment; the other half is which app is in front.
+            guard connection != oldValue else { return }
+            refreshSessionScopedHotkeys()
+        }
+    }
+    @Published var transcript: [TranscriptItem] = []
+    @Published var userSpeaking = false
+    @Published var banner: String?
+    /// Optional one-click fix rendered on the banner (e.g. "Add credits").
+    @Published var bannerAction: BannerAction?
+    /// The first error that actually explained something this session.
+    ///
+    /// Running out of credit kills the socket, so the real cause ("no credits
+    /// remaining") is immediately followed by "send failed: socket is not connected"
+    /// and "could not connect". Those arrive last, so naively they win the banner and
+    /// the user is told the least useful thing — which is exactly what happened.
+    private var terminalCause: (message: String, action: BannerAction?)?
+
+    /// Transport symptoms of an earlier, real failure. Never worth showing on their own
+    /// once something better is known.
+    private static func isTransportNoise(_ m: String) -> Bool {
+        let l = m.lowercased()
+        return l.contains("socket is not connected")
+            || l.contains("send failed")
+            || l.contains("software caused connection abort")
+            || l.contains("connection reset")
+    }
+    /// Live macOS Screen Recording state. Refreshed on launch, on app activation,
+    /// before every capture, and on demand — never assumed from a past failure.
+    @Published var screenPermission: ScreenPermission = .unknown
+    /// The same, for the camera. Separate because the two fail differently: a screen
+    /// grant can be on and still unusable until the app is relaunched, and a camera
+    /// grant cannot.
+    @Published var cameraPermission: CameraPermission = .notAsked
+    /// Every camera that could be recorded. Empty on a Mac with none attached, which is
+    /// an ordinary state for a desktop rather than an error.
+    @Published var cameras: [CameraCapture.Option] = []
+    @Published var showSettings = false
+    /// First run, or any launch with no usable key — there is nothing to do without one.
+    @Published var showWelcome = KeyStore.secret(forKey: "OPENAI_API_KEY") == nil
+    /// Whether Dev Mode can work at all on this machine.
+    @Published var claudeAvailability: ClaudeCode.Availability = ClaudeCode.availability()
+
+    func refreshClaudeAvailability() { claudeAvailability = ClaudeCode.availability() }
+
+    /// The floating widget. Created lazily and only while it is switched on.
+    private lazy var hud = HUDController(state: self)
+
+    func applyHUD() { hud.apply() }
+
+    /// The floating camera preview. See `CameraBubbleController`.
+    private lazy var cameraBubble = CameraBubbleController()
+
+    /// Which screen is being worked on. Drives the camera bubble and, while one is
+    /// running, the recording — see `ActiveDisplayGate` for what counts as a change.
+    private let displayWatcher = ActiveDisplayWatcher()
+
+    func startFollowingActiveDisplay() {
+        displayWatcher.onChange = { [weak self] id in self?.activeDisplayChanged(to: id) }
+        displayWatcher.start()
+        // The watcher adopts a display on `start()` without reporting it as a change —
+        // correctly, there is nothing to debounce against yet — so the overlays have to
+        // be seeded here. Without this they held nil until the pointer settled on a
+        // *different* screen, which on the common single-display Mac is never: the
+        // captions fell back to `NSScreen.main`, i.e. FlowState's own window.
+        syncOverlayDisplays()
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    // A display was plugged in or taken away, so the remembered one may
+                    // not refer to anything any more. Re-read rather than debounce:
+                    // there is nothing to debounce against.
+                    self?.displayWatcher.resync()
+                    guard let self else { return }
+                    // The overlays may be sitting on a display that no longer exists.
+                    self.syncOverlayDisplays()
+                    Task { await self.refreshDisplays() }
+                }
+            }
+    }
+
+    private static let displayLog = Logger(subsystem: "com.jackmielke.vibevoice", category: "display")
+
+    private func activeDisplayChanged(to id: CGDirectDisplayID) {
+        Self.displayLog.notice("active display -> \(id, privacy: .public)")
+        FileHandle.standardError.write(Data("[display] attention -> \(id)\n".utf8))
+        // The bubble goes wherever the work is, always — it is a thing on screen, and a
+        // camera preview on a screen you are not looking at is not a preview.
+        cameraBubble.followDisplay(id)
+        syncOverlayDisplays()
+
+        // The recording follows only if the user asked for "the active display" rather
+        // than pinning one. Pinning a display and having it wander would be worse than
+        // not following at all.
+        guard isFollowingActiveDisplay, recorder.isRecording else { return }
+        activeVideo?.follow(displayID: id)
+    }
+
+    /// Points the two over-everything overlays — the caption strip and the widget — at
+    /// the active screen, or at nothing.
+    ///
+    /// Deliberately independent of `settings.screenDisplayID`. That setting pins which
+    /// display the *model* is shown; these two are things the *user* looks at, and a
+    /// caption pinned to the monitor you are not sitting at is not a caption. So the
+    /// overlays follow the active screen whatever the capture mode is doing — see
+    /// `ActiveScreenOverlay` for the rule, including why an unresolved active screen
+    /// means off rather than a guess.
+    private func syncOverlayDisplays() {
+        let attached = NSScreen.screens.compactMap {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+        }
+        let active = displayWatcher.current ?? ScreenCapture.activeDisplayID()
+        let target = ActiveScreenOverlay.target(enabled: settings.captions,
+                                                active: active, attached: attached)
+        // The widget is not the transcript, so it is not gated on the captions setting —
+        // only on there being a screen to be on at all.
+        let widget = ActiveScreenOverlay.target(enabled: true, active: active, attached: attached)
+        let changed = captions.displayID != target
+        captions.followDisplay(target)
+        hud.followDisplay(widget)
+        // Greppable, and only on a change: this is the one decision that cannot be unit
+        // tested — it needs a second monitor and a hand on the mouse — so it says out
+        // loud where the overlays went and, when they went nowhere, that it was on
+        // purpose. Pairs with the `[display] attention ->` line above it.
+        guard changed else { return }
+        let where_ = target.map(String.init) ?? "off (\(attached.count) displays, active=\(active.map(String.init) ?? "none"))"
+        FileHandle.standardError.write(Data("[display] captions -> \(where_)\n".utf8))
+    }
+
+    func applyCameraBubble() {
+        settings.cameraBubble ? cameraBubble.show(state: self) : cameraBubble.hide()
+        objectWillChange.send()
+    }
+
+    /// Picked from the bubble's own hover controls, so it has to write the setting and
+    /// rebuild the panel at the size it now claims.
+    func setCameraSize(_ size: CameraSize) {
+        guard settings.cameraSize != size else { return }
+        settings.cameraSize = size
+        applyCameraBubble()
+    }
+
+    func setCameraShape(_ shape: CameraShape) {
+        guard settings.cameraShape != shape else { return }
+        settings.cameraShape = shape
+        applyCameraBubble()
+    }
+
+    /// The overlay both halves read. Assembled here because the corner comes from where
+    /// the bubble was dragged and the size from its controls.
+    var cameraOverlay: CameraOverlay {
+        CameraOverlay(size: settings.cameraSize, corner: settings.cameraCorner, shape: settings.cameraShape)
+    }
+
+    /// Points the bubble at the recording's own camera session while a take is running,
+    /// so it shows what is actually being recorded rather than a second view of it.
+    func cameraBubbleUse(session: AVCaptureSession?) {
+        cameraBubble.useSession(session)
+    }
+
+    /// Settings lives in a real window now, not a panel drawn inside this one.
+    private lazy var settingsWindow = SettingsWindowController(state: self)
+
+    func applySettingsWindow(_ open: Bool) {
+        open ? settingsWindow.show() : settingsWindow.hide()
+    }
+
+    /// The Dev Mode offer, if one is warranted right now. See `DevModeHint`.
+    @Published private(set) var devOffer: DevModeHint.Trigger?
+    private var assistantTurns = 0
+    private var lastUserSaid: String?
+
+    private func reconsiderDevOffer() {
+        devOffer = DevModeHint.offer(devModeOn: settings.devMode,
+                                     dismissed: settings.devNudgeDismissed,
+                                     assistantTurns: assistantTurns,
+                                     lastUserTranscript: lastUserSaid)
+    }
+
+    func acceptDevOffer() {
+        devOffer = nil
+        if claudeAvailability == .ready {
+            settings.devMode = true
+            applySettingsLive()
+            note("Dev Mode is on. Ask me to change something in \(settings.devRepo).")
+        } else {
+            showSettings = true    // it cannot be switched on yet; show them why
+        }
+    }
+
+    func dismissDevOffer() {
+        devOffer = nil
+        settings.devNudgeDismissed = true
+    }
+    /// Every display FlowState could look at. Re-read on launch, on activation, and
+    /// whenever macOS reports a display arriving or leaving.
+    @Published var displays: [DisplayOption] = []
+    /// Which display this window sits on, i.e. what "follow the active display" means at
+    /// this instant. See `refreshActiveDisplay()`.
+    @Published private var windowDisplayID: CGDirectDisplayID?
+    /// The realtime session id, from `session.created`. Shown in the header and in the
+    /// menu bar; it says whether a socket is open, not which conversation this is.
+    @Published var sessionID: String?
+    @Published var devTaskRunning = false
+    @Published var devTaskSummary: String?
+
+    /// The summary panel — what has been written about this conversation, and the
+    /// button that writes one now. See `SummaryService` / `SummaryJob`.
+    @Published var showSummary = false
+    @Published private(set) var isSummarizing = false
+    /// The newest summary written this launch. Drives the button's caption, and is
+    /// what the panel opens on.
+    @Published private(set) var latestSummary: ConversationSummary?
+    /// Why the last request produced nothing — shown in the panel rather than swallowed,
+    /// because a button that silently does nothing is indistinguishable from a broken one.
+    @Published private(set) var summaryProblem: String?
+
+    /// Mirrors of the response lifecycle, for the views. See `ResponseCoordinator`.
+    @Published private(set) var responsePhase: ResponseCoordinator.Phase = .idle
+    @Published private(set) var queuedResponses: Int = 0
+
+    let audio = AudioEngine()
+
+    /// Hold-to-dictate. Owns its own recorder rather than sharing `audio`, so an utterance
+    /// can be captured while a voice session is live without touching that engine's
+    /// voice-processing unit.
+    let dictation = DictationDriver()
+    private var dictationForwarded = false
+    let cost = CostMeter()
+    /// Records both halves of the conversation. Fed from the same PCM the socket sees.
+    let recorder = SessionRecorder()
+    @Published var recordings: [SessionRecorder.Recording] = []
+    /// The recording that just finished, until it is dismissed.
+    ///
+    /// A line in the transcript saying "Saved 2026-08-21 22.40 — …wav" was technically a
+    /// full answer and practically useless: it scrolls away, it is not clickable, and it
+    /// names a file in a folder nobody has open. What someone wants the moment a
+    /// recording stops is to hear it or to see it in Finder, so that is what this puts
+    /// on screen.
+    @Published var lastRecording: SessionRecorder.Recording?
+    /// What the last attempt to open or play a recording could not do — almost always a
+    /// file that has been moved or thrown away since the panel naming it was drawn.
+    /// Cleared the moment something works, so it never outlives the problem it describes.
+    @Published private(set) var recordingIssue: RecordingIssue?
+
+    /// A failure, and which file it is about.
+    ///
+    /// The file matters: a card describing this session's recording must not sprout a
+    /// warning because a row three sections down failed to play something recorded last
+    /// week. `path` is nil when the complaint is about the recordings folder as a whole
+    /// and belongs anywhere.
+    struct RecordingIssue: Equatable {
+        let path: String?
+        let message: String
+    }
+
+    /// The warning this particular file should carry, if any.
+    func recordingProblem(for url: URL?) -> String? {
+        guard let issue = recordingIssue else { return nil }
+        guard let path = issue.path else { return issue.message }
+        return path == url?.path ? issue.message : nil
+    }
+
+    private func noteRecordingIssue(_ message: String?, about url: URL?) {
+        recordingIssue = message.map { RecordingIssue(path: url?.path, message: $0) }
+    }
+    let settingsStore = SettingsStore()
+    /// The durable transcript: what was said, when, in which session, and what the
+    /// microphone looked like while it was said. Privacy is applied on the way in.
+    let conversation = ConversationStore()
+    /// Measures the utterance in progress. Metadata only — see `UtteranceRecorder`.
+    private let utterance = UtteranceRecorder()
+    /// Metadata for the utterance that just ended, waiting for its transcript to arrive
+    /// on the socket. The two events are separate (`speech_stopped` then
+    /// `input_audio_transcription.completed`, often a second apart), so the measurement
+    /// has to be parked between them.
+    private var pendingUtteranceAudio: UtteranceAudio?
+    /// Rolling summaries of the conversation. See `SummaryService` / `SummaryJob`.
+    private var summaries: SummaryService!
+    private var summaryTimer: Timer?
+    private let client = RealtimeClient()
+    private let claude = ClaudeCode()
+    private var frameItemIDs: [String] = []
+    /// The single owner of `response.create` / `response.cancel`. A create sent while a
+    /// response is already running is rejected outright ("Conversation already has an
+    /// active response in progress"), and this app can want a turn from four places at
+    /// once — server VAD, a screenshot, a tool result, a Claude Code progress note — so
+    /// the decision lives in exactly one place instead of at each call site.
+    private let responses = ResponseCoordinator()
+    /// Drives the coordinator's deadlines while a session is live.
+    private var responseWatchdog: Timer?
+    /// Several Claude Code jobs at once. The rules about how many, and what may run
+    /// beside what, live in FlowStateCore where they are tested.
+    let devTasks = DevTaskRegistry(maxConcurrent: 3)
+    /// Ambient: goes true when nothing has happened for a while, so the UI can step out
+    /// of the way and leave the scene. Any hover, any speech, any state change resets it.
+    @Published private(set) var isAmbient = false
+    private var lastActivity = Date()
+    private var ambientTimer: Timer?
+
+    /// Which light to paint the scene in — the local clock, or a pinned choice.
+    var currentDaylight: Daylight {
+        Daylight(rawValue: settings.daylightMode) ?? .now()
+    }
+
+    /// Applies the appearance the UI should actually be in: a painted backdrop forces
+    /// dark, otherwise the user's own choice.
+    /// (Re)binds the summon hotkey to whatever Settings now says.
+    /// The menu-bar glyph. Says what Flow is doing at a glance, without colour, because
+    /// the menu bar renders it as a template image.
+    var menuBarSymbol: String {
+        switch connection {
+        case .live:       return devTaskRunning ? "waveform.badge.gearshape" : "waveform"
+        case .connecting: return "waveform.badge.plus"
+        case .error:      return "waveform.badge.exclamationmark"
+        case .idle:       return "waveform.slash"
+        }
+    }
+
+    func applySummonHotkey() {
+        guard !settings.summonHotkey.isEmpty else {
+            GlobalHotkey.shared.unregisterSummon()
+            report(.summon, taken: false, combo: nil)
+            return
+        }
+        let combo = HotkeyCombo.named(settings.summonHotkey)
+        let ok = GlobalHotkey.shared.registerSummon(combo) {
+            Task { @MainActor in Summon.toggle() }
+        }
+        report(.summon, taken: !ok, combo: combo)
+    }
+
+    /// Connect or hang up without going to find the window.
+    ///
+    /// The point of an assistant that is always there is that reaching it is not a task.
+    /// Summoning the window and opening a session were the same key before, which meant
+    /// starting a conversation began with looking at an app.
+    func applyConnectHotkey() {
+        guard !settings.connectHotkey.isEmpty else {
+            GlobalHotkey.shared.unregisterConnect()
+            report(.connect, taken: false, combo: nil)
+            return
+        }
+        let combo = HotkeyCombo.named(settings.connectHotkey)
+        let ok = GlobalHotkey.shared.registerConnect(combo) { [weak self] in
+            Task { @MainActor in self?.toggleConnection() }
+        }
+        report(.connect, taken: !ok, combo: combo)
+    }
+
+    func applyRecordHotkey() {
+        guard !settings.recordHotkey.isEmpty else {
+            GlobalHotkey.shared.unregisterRecord()
+            report(.record, taken: false, combo: nil)
+            return
+        }
+        let combo = HotkeyCombo.named(settings.recordHotkey)
+        let ok = GlobalHotkey.shared.registerRecord(combo) { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                // Through the same door as the spoken route, so the key and the sentence
+                // are subject to the same rules and land in the same log. The key is
+                // still a toggle — it is one key and there are two states — but which
+                // action that toggle means is `VoiceCommand`'s to name.
+                if self.isRecording {
+                    self.runVoiceCommand(.stopRecording, from: .hotkey)
+                    self.sound(.sleep, "sleep")
+                } else {
+                    // The sound is the only confirmation there is: the window is not in
+                    // front, which is the entire reason this key exists.
+                    self.runVoiceCommand(.startRecording, from: .hotkey)
+                    if self.isRecording { self.sound(.heard, "heard") }
+                }
+            }
+        }
+        report(.record, taken: !ok, combo: combo)
+    }
+
+    /// The deactivate key. Escape by default. See `HotkeyCombo.escape`.
+    ///
+    /// Every other shortcut in here is bound once and left alone. This one is re-applied
+    /// whenever the session opens or closes and whenever Flow comes forward or goes
+    /// away, because the default chord has no modifier on it: Escape is the key that
+    /// cancels a dialog, leaves an insert mode, closes this app's own settings panel.
+    /// Owning it process-wide all day would be theft. Owning it for the minute somebody
+    /// is in a conversation, from any app but this one, is the feature.
+    ///
+    /// A chord *with* modifiers — the three alternates — skips all of that and stays
+    /// bound, including while idle, where it still silences the wake phrase.
+    func applyHushHotkey() {
+        guard !settings.hushHotkey.isEmpty else {
+            GlobalHotkey.shared.unregisterHush()
+            report(.hush, taken: false, combo: nil)
+            return
+        }
+        let combo = HotkeyCombo.named(settings.hushHotkey)
+        guard !combo.isSessionScoped || hushWindowIsOpen else {
+            // Not a failure: the key is simply not wanted right now. Any problem
+            // recorded for this row is cleared with it, so the pane does not keep
+            // warning about a registration that is no longer being attempted.
+            GlobalHotkey.shared.unregisterHush()
+            report(.hush, taken: false, combo: combo)
+            return
+        }
+        let ok = GlobalHotkey.shared.registerHush(combo) { [weak self] in
+            Task { @MainActor in self?.hush() }
+        }
+        report(.hush, taken: !ok, combo: combo)
+    }
+
+    /// Whether a modifier-less deactivate key should be listening at this instant.
+    ///
+    /// Both halves matter. Without the first, Escape is stolen from the whole machine
+    /// for as long as Flow runs. Without the second, Escape stops cancelling a
+    /// transcript edit or closing the settings panel — Carbon registers ahead of every
+    /// app *including this one*, so the in-window shortcut would lose to our own hotkey
+    /// and the user would be left pressing a key that does the wrong thing in the one
+    /// place they can see us.
+    private var hushWindowIsOpen: Bool {
+        let live: Bool
+        switch connection {
+        case .live, .connecting: live = true
+        case .idle, .error:      live = false
+        }
+        return SessionScopedHotkey.shouldBind(sessionLive: live,
+                                              appIsFrontmost: NSApplication.shared.isActive)
+    }
+
+    /// Re-bind the deactivate key when the conditions it depends on move.
+    ///
+    /// Cheap and idempotent: `applyHushHotkey` unbinds before it binds, and for the
+    /// modifier chords this returns immediately without touching Carbon at all.
+    func refreshSessionScopedHotkeys() {
+        guard HotkeyCombo.named(settings.hushHotkey).isSessionScoped else { return }
+        applyHushHotkey()
+    }
+
+    /// Registers or removes the login item, and puts the setting back if macOS refused.
+    ///
+    /// The stored setting is not the source of truth — `SMAppService` is — so a failed
+    /// registration must not leave a switch reading "on" for something that will not
+    /// happen at the next login.
+    func applyStartAtLogin() {
+        if let problem = LoginItem.setEnabled(settings.startAtLogin) {
+            settings.startAtLogin = LoginItem.isEnabled
+            banner = problem
+        } else if settings.startAtLogin, LoginItem.needsApproval {
+            banner = "macOS is holding \(kAssistantDisplayName)'s login item until you allow it — System Settings › General › Login Items."
+        }
+        objectWillChange.send()
+    }
+
+    /// The wake key. ⌃Q by default. See `HotkeyCombo.ctrlQ`.
+    ///
+    /// The same combo now carries two gestures rather than one, so this registers the
+    /// dictation slot (which reports key-up as well as key-down) instead of the wake slot.
+    /// `DictationDriver` decides which gesture happened: hold it to dictate, tap it once
+    /// to toggle a session on or off.
+    func applyWakeHotkey() {
+        guard !settings.wakeHotkey.isEmpty else {
+            GlobalHotkey.shared.unregisterDictation()
+            GlobalHotkey.shared.unregisterWake()
+            report(.wake, taken: false, combo: nil)
+            return
+        }
+        GlobalHotkey.shared.unregisterWake()
+        wireDictationDriver()
+        let combo = HotkeyCombo.named(settings.wakeHotkey)
+        let ok = GlobalHotkey.shared.registerDictation(
+            combo,
+            down: { [weak self] in Task { @MainActor in self?.dictation.keyDown() } },
+            up:   { [weak self] in Task { @MainActor in self?.dictation.keyUp() } })
+        report(.wake, taken: !ok, combo: combo)
+    }
+
+    // MARK: - When a shortcut does not work
+
+    /// Why each shortcut is not working, when it is not, keyed by role.
+    ///
+    /// A hotkey that failed to register is indistinguishable from one that works until
+    /// somebody presses it and nothing happens — at which point the app looks broken and
+    /// the actual cause (Raycast owns ⌥Space) is invisible. This is that cause, carried
+    /// from `RegisterEventHotKey`'s status code to the row in Settings that set it.
+    @Published var hotkeyProblems: [HotkeyRole: String] = [:]
+
+    /// Every rebindable shortcut as it is currently set, for the conflict rules in
+    /// `HotkeyConflict`.
+    var hotkeyBindings: [HotkeyBinding] {
+        let ids: [(HotkeyRole, String)] = [
+            (.summon, settings.summonHotkey), (.wake, settings.wakeHotkey),
+            (.connect, settings.connectHotkey), (.hush, settings.hushHotkey),
+            (.record, settings.recordHotkey),
+        ]
+        return ids.map { role, id in
+            HotkeyBinding(role: role.title, comboID: id,
+                          label: id.isEmpty ? "Off" : HotkeyCombo.named(id).label)
+        }
+    }
+
+    /// Everything worth saying about one row's shortcut: what the OS refused, or which
+    /// other row is fighting it for the same chord.
+    ///
+    /// Both at once is possible and both are shown — a chord can be taken by another app
+    /// *and* be double-booked in here, and fixing only the half you were told about
+    /// leaves a key that still does nothing.
+    func hotkeyWarnings(for role: HotkeyRole) -> [String] {
+        var out: [String] = []
+        if let taken = hotkeyProblems[role] { out.append(taken) }
+        if let clash = HotkeyConflict.clash(for: role.title, among: hotkeyBindings) {
+            out.append(clash.message)
+        }
+        return out
+    }
+
+    /// Record — or clear — the outcome of one registration.
+    private func report(_ role: HotkeyRole, taken: Bool, combo: HotkeyCombo?) {
+        if taken, let combo {
+            hotkeyProblems[role] = HotkeyConflict.refused(role: role.title, label: combo.label)
+        } else {
+            hotkeyProblems[role] = nil
+        }
+    }
+
+    /// Hand the driver the four things it cannot know on its own.
+    private func wireDictationDriver() {
+        // A nested ObservableObject does not redraw anything on its own — SwiftUI observes
+        // AppState, not AppState's properties. Without this forward, the widget's
+        // dictation badge would only appear when something *else* happened to change.
+        // Guarded so re-registering the hotkey does not stack duplicate subscriptions.
+        if !dictationForwarded {
+            dictationForwarded = true
+            dictation.objectWillChange
+                .receive(on: RunLoop.main)
+                .sink { [weak self] _ in self?.objectWillChange.send() }
+                .store(in: &bag)
+        }
+        dictation.isVoiceModeActive = { [weak self] in
+            guard let self else { return false }
+            switch self.connection {
+            case .live, .connecting: return true
+            case .idle, .error:      return false
+            }
+        }
+        dictation.onStartVoiceMode = { [weak self] in
+            self?.wakeAndConnect(from: "tap")
+        }
+        dictation.onStopVoiceMode = { [weak self] in
+            _ = self?.hush()
+        }
+        dictation.earconsEnabled = { [weak self] in self?.settings.earcons ?? true }
+        dictation.onTranscript = { [weak self] text in
+            self?.note("Dictated: \(text)")
+        }
+    }
+
+    /// Be here, and be listening. The only key that has no off.
+    ///
+    /// Four things have to be true before somebody can talk, and the point of this one
+    /// key is that they stop being four things: the app is running, it is in front of
+    /// them, the microphone is open, and a session exists. Any of the four can be false
+    /// independently — a window closed behind Xcode, a mute left on from a meeting, a
+    /// session that dropped an hour ago — and every one of them looks identical from the
+    /// user's side, which is a Mac that does not answer.
+    ///
+    /// Idempotent by construction. Held down, pressed twice by accident, fired by a deep
+    /// link a second after the hotkey already fired: none of that may cost a live
+    /// session, so nothing here tears anything down.
+    func wakeAndConnect(from source: String) {
+        // Unconditional, and before any of the decisions below. "Running in the
+        // background" and "already connected" are independent states, and this key means
+        // the same thing in both — so activation is not part of the no-op.
+        Summon.bringToFront()
+
+        // An explicit key press outranks the quiet period. Hush snoozes the wake trigger
+        // because something in the room kept setting it off; a finger on a key is not
+        // that, and leaving the snooze up would mean the wake phrase stays deaf for the
+        // rest of the conversation this key just started. Zero seconds ends it now.
+        if wake.isSnoozed { wake.snooze(seconds: 0) }
+
+        // Connected but muted is the exact failure this key exists to prevent: the
+        // session is open, the orb is moving, and not one word is heard. Turning it on
+        // has to mean the microphone as well as the socket.
+        if audio.isMuted { setMicMuted(false) }
+
+        // Already live, or already on the way. Reconnecting would throw away a session
+        // that is working, and cancelling a handshake is worse than waiting the second
+        // out. Straight to stderr rather than `note()` — a no-op that files a transcript
+        // line turns a leaned-on key into a wall of "Already listening."
+        switch connection {
+        case .live, .connecting:
+            FileHandle.standardError.write(Data(
+                "[wake] \(source): already \(connection.label.lowercased()) — nothing to do\n".utf8))
+            return
+        case .idle, .error:
+            break
+        }
+
+        // Before the connection, not after, for the same reason the wake phrase plays it
+        // early: this is the answer to "did it hear me", and that question is being asked
+        // now rather than in the two seconds the socket takes.
+        sound(.wake, "wake")
+        FileHandle.standardError.write(Data("[wake] \(source): connecting\n".utf8))
+        Task { @MainActor in await connect() }
+    }
+
+    /// Stop. Hangs up if there is anything to hang up, and makes it stay stopped.
+    ///
+    /// Hanging up alone is not enough for an accidental wake: whatever triggered it —
+    /// a television, a door, somebody clapping in a meeting — is still happening, so the
+    /// session reopens seconds later and the user is now fighting their own Mac. The
+    /// wake trigger goes quiet for a while too.
+    @discardableResult
+    func hush() -> String {
+        let wasLive = client.isConnected
+        if wasLive { disconnect() }
+        captions.clear()
+        wake.snooze(seconds: settings.hushSeconds)
+        // A confirmation that does not require looking: the same falling pair that means
+        // "leaving", which is what just happened.
+        sound(.sleep, "sleep")
+        let quiet = Int(settings.hushSeconds)
+        let said = wasLive
+            ? "Stopped. Quiet for \(quiet) seconds."
+            : "Quiet for \(quiet) seconds."
+        note(said)
+        objectWillChange.send()
+        return said
+    }
+
+    /// Listens for a few seconds and sets the clap dial from what it hears.
+    ///
+    /// Opens the microphone itself if nothing else has: the panel is reachable with no
+    /// session running and the wake phrase switched off, and a calibration that silently
+    /// requires both would be one more thing to have got wrong before it works.
+    func startClapCalibration() {
+        openMicrophone(for: "calibration")
+        wake.beginClapCalibration()
+    }
+
+    func finishClapCalibration() -> ClapCalibration.Result? {
+        let result = wake.endClapCalibration()
+        releaseMicrophone(for: "calibration")
+        return result
+    }
+
+    /// Subtitles over whatever the user is doing. See `CaptionBar`.
+    let captions = CaptionController()
+
+    func applyCaptions() {
+        captions.isEnabled = settings.captions
+        // Switching them back on has to re-resolve where they go: the pointer has very
+        // likely moved since they were switched off, and nothing reports a change that
+        // happened while nobody was listening.
+        syncOverlayDisplays()
+        objectWillChange.send()
+    }
+
+    /// The small sounds. See `Earcon`.
+    ///
+    /// Played through the conversation's own engine — there is no second audio engine
+    /// any more. Two of them holding one output device, one with voice processing on
+    /// it, is a source of crackling and buys nothing: a chime is a fifth of a second.
+    /// Rendered once each and kept, because synthesising on the main thread at the
+    /// moment of playing would be a stutter in the one place it shows.
+    private var earconCache: [String: [Float]] = [:]
+
+    func sound(_ earcon: Earcon, _ id: String) {
+        guard settings.earcons else { return }
+        let samples = earconCache[id] ?? {
+            let rendered = earcon.render(sampleRate: AudioEngine.targetRate)
+            earconCache[id] = rendered
+            return rendered
+        }()
+        audio.playTone(samples)
+    }
+
+    /// Always-listening wake phrase. See `WakeListener`.
+    let wake = WakeListener()
+
+    private var sigtermSource: DispatchSourceSignal?
+
+    /// Hand the audio device back, cleanly.
+    ///
+    /// Voice processing is an audio unit attached to the shared output device. Killed
+    /// without stopping the engine, it is left behind — and its effects are system
+    /// wide, which is why the symptom is Spotify crackling rather than anything in
+    /// this app.
+    func releaseAudioHardware() {
+        guard audio.isCapturing else { return }
+        audio.stop()
+    }
+
+    /// Where microphone chunks are handled. Serial, and never the audio thread.
+    private static let micQueue = DispatchQueue(label: "com.jackmielke.vibevoice.mic",
+                                                qos: .userInitiated)
+
+    func applyWakeWord() {
+        guard settings.wakeWord else {
+            wake.stop()
+            releaseMicrophone(for: "wake")
+            objectWillChange.send()
+            return
+        }
+        Task { @MainActor in
+            guard await WakeListener.authorize() == .authorized else {
+                self.settings.wakeWord = false
+                self.banner = "Speech recognition is off for \(kAssistantDisplayName), so the wake phrase cannot run. Turn it on in System Settings › Privacy & Security › Speech Recognition."
+                self.objectWillChange.send()
+                return
+            }
+            self.wake.phrase = self.settings.wakePhrase == "heyFlowState" ? .heyFlowState : .heyFlow
+            self.wake.clapEnabled = self.settings.clapToWake
+            self.wake.clapSensitivity = Float(self.settings.clapSensitivity)
+            // The recogniser that is about to run for the wake phrase listens for the
+            // recording commands as well. It costs nothing extra — same audio, same
+            // task, six more phrases — and it is the only route that works with no
+            // session open, which is most of the time a recording is running.
+            self.wake.commandsEnabled = self.settings.voiceCommands
+            self.wake.onCommand = { [weak self] command in
+                self?.runVoiceCommand(command, from: .speech)
+            }
+            self.wake.onWake = { [weak self] in
+                guard let self else { return }
+                // Already talking is the common case for a false positive, and there is
+                // nothing to do about it — the session is open, they were heard.
+                guard !self.client.isConnected else { return }
+                // Before the connection, not after: the socket takes a second or two, and
+                // the sound is the answer to "did it hear me" — which is a question being
+                // asked right now, not in two seconds.
+                self.sound(.wake, "wake")
+                Task { @MainActor in await self.connect() }
+            }
+            self.openMicrophone(for: "wake")
+            self.wake.start()
+            if let p = self.wake.problem { self.banner = p; self.settings.wakeWord = false }
+            self.objectWillChange.send()
+        }
+    }
+
+    /// The assistant speaking first. See `Outreach` and `OutreachPolicy`.
+    let outreach = Outreach()
+
+    func startOutreach() {
+        outreach.isInSession = { [weak self] in
+            guard let self else { return false }
+            if case .live = self.connection { return true }
+            return false
+        }
+        outreach.sayInline = { [weak self] text in
+            self?.client.sendSystemNote(
+                "[Tell the user, in your own words, briefly: \(text)]")
+            self?.client.createResponse()
+        }
+        outreach.speak = { [weak self] text in
+            guard let self else { return }
+            // Set BEFORE connecting, not after. `session.created` is what flips the
+            // connection to live and is also where the note is delivered, so anything
+            // that waits for live and *then* stores the text has already missed its own
+            // delivery — which is exactly what the first end-to-end run did: it opened a
+            // session, said nothing, and sat there.
+            self.pendingOutreach = text
+            Task { @MainActor in await self.connect() }
+        }
+        // Held items are delivered when the reason for holding them goes away, rather
+        // than never. A minute is well inside the two hours before one goes stale.
+        let t = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.outreach.flush() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        outreachTimer = t
+
+        // Opens Settings on a given tab at launch, for pointing somebody at a control
+        // rather than describing where it is. `open_settings` is the same thing by voice.
+        if let t = ProcessInfo.processInfo.environment["FLOWSTATE_OPEN_SETTINGS"], !t.isEmpty {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(600))
+                _ = self.openSettings(tab: t)
+            }
+        }
+
+        // Shows a caption without needing a conversation, for checking placement and
+        // sizing on whatever display is in front.
+        if let text = ProcessInfo.processInfo.environment["FLOWSTATE_CAPTION_TEST"], !text.isEmpty {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(700))
+                self.captions.isEnabled = true
+                // The test hook turns them on behind the setting's back, so it has to
+                // resolve a screen too — otherwise the caption has nowhere to go.
+                // …and falls back to any attached screen, because a binary launched
+                // straight from the command line has no key window, so `NSScreen.main`
+                // is nil and every other route to a display id returns nothing.
+                let anyScreen = NSScreen.screens.first.flatMap {
+                    ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+                }
+                self.captions.followDisplay(self.displayWatcher.current
+                                            ?? ScreenCapture.activeDisplayID()
+                                            ?? anyScreen)
+                self.captions.say(.assistant, text)
+            }
+        }
+
+        // Connects, hangs up, and reports whether the microphone survived — the thing
+        // that decides whether the wake phrase still works after "go to sleep".
+        if ProcessInfo.processInfo.environment["FLOWSTATE_SLEEP_TEST"] == "1" {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(900))
+                self.applyWakeWord()
+                try? await Task.sleep(for: .seconds(3))
+                let before = self.audio.isCapturing
+                self.vpIdleBefore = self.audio.voiceProcessing
+                await self.connect()
+                try? await Task.sleep(for: .seconds(6))
+                let during = self.audio.isCapturing
+                self.vpDuring = self.audio.voiceProcessing
+                self.disconnect()
+                try? await Task.sleep(for: .seconds(2))
+                let after = self.audio.isCapturing
+                let line = "[sleep-test] mic before=\(before) during=\(during) "
+                         + "AFTER SLEEP=\(after) holders=\(self.micHolders.sorted())\n"
+                         + "[sleep-test] voice processing: idle=\(self.vpIdleBefore) "
+                         + "in-session=\(self.vpDuring) after=\(self.audio.voiceProcessing)\n"
+                         + "[sleep-test] audio error: \(self.audio.lastError ?? "none")\n"
+
+                FileHandle.standardError.write(Data(line.utf8))
+                // Also to a file: launched with `open` the app stays alive long enough to
+                // finish, but its stderr goes nowhere anybody can read.
+                try? line.write(to: URL(fileURLWithPath: "/tmp/flowstate-sleep-test.txt"),
+                                atomically: true, encoding: .utf8)
+                exit(after ? 0 : 1)
+            }
+        }
+
+        // Listens for a while and writes down every phrase the recogniser produced,
+        // with the score it got. "It didn't work" is not something anybody can act on;
+        // "you said hey flow and it came through as 'a flow' scoring 0.71" is.
+        // A standing record of why the wake word did not fire.
+        //
+        // Every round of "I said Hey Flow and nothing happened" so far has been solved by
+        // capturing what the recogniser ACTUALLY heard, and every one of those captures
+        // cost a timed window that had to be coordinated out loud — start the timer, ask
+        // him to speak, hope he was at the keyboard. Twice the window closed before he
+        // clapped and the file came back empty, which looks identical to a failure.
+        //
+        // So it writes itself down as it goes. Whenever the wake word is on, each new
+        // transcript with its score, and each rejected clap with the level it needed
+        // against the level it got, appends to the log. "It is not working" then has an
+        // answer already sitting on disk, from the moment it did not work, rather than
+        // from a re-enactment afterwards.
+        Task { @MainActor in
+            let dir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Logs/FlowState")
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let url = dir.appendingPathComponent("wake.log")
+            var seenText = Set<String>()
+            var seenTrace = 0
+            let stamp = DateFormatter()
+            stamp.dateFormat = "HH:mm:ss"
+            func append(_ line: String) {
+                let entry = "\(stamp.string(from: Date()))  \(line)\n"
+                guard let d = entry.data(using: .utf8) else { return }
+                if let h = try? FileHandle(forWritingTo: url) {
+                    defer { try? h.close() }
+                    _ = try? h.seekToEnd()
+                    try? h.write(contentsOf: d)
+                } else {
+                    try? d.write(to: url)
+                }
+            }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(500))
+                guard self.settings.wakeWord else { continue }
+                let text = self.wake.lastHeard
+                if !text.isEmpty, !seenText.contains(text) {
+                    seenText.insert(text)
+                    if seenText.count > 400 { seenText.removeAll() }
+                    let phrase = self.settings.wakePhrase == "heyFlowState"
+                        ? WakePhrase.heyFlowState : WakePhrase.heyFlow
+                    let score = phrase.score(text)
+                    // Only the near misses and the hits. A log of every word he says all
+                    // day is a transcript of his life, not a diagnostic, and it would bury
+                    // the one line that matters.
+                    if score > 0.45 {
+                        append(String(format: "heard  %.2f / %.2f  %@",
+                                      score, WakePhrase.threshold, text))
+                    }
+                }
+                let trace = self.wake.trace
+                if trace.count > seenTrace {
+                    for t in trace[seenTrace...] {
+                        append("clap   \(t.detail) at \(String(format: "%.0f dB", 20 * log10(max(t.peak, 0.0001))))")
+                    }
+                    seenTrace = trace.count
+                } else if trace.count < seenTrace {
+                    seenTrace = trace.count
+                }
+            }
+        }
+
+        if let secs = ProcessInfo.processInfo.environment["FLOWSTATE_WAKE_LISTEN"],
+           let seconds = Double(secs), seconds > 0 {
+            Task { @MainActor in
+                self.settings.wakeWord = true
+                self.applyWakeWord()
+                var lines: [String] = []
+                // Record whether the wake actually FIRES, not just whether the words
+                // scored. The score can be perfect and the wake still be swallowed
+                // somewhere between the recogniser and the socket.
+                var fired = 0
+                try? await Task.sleep(for: .milliseconds(300))
+                self.wake.onWake = { fired += 1 }
+                var seen = Set<String>()
+                let deadline = Date().addingTimeInterval(seconds)
+                while Date() < deadline {
+                    try? await Task.sleep(for: .milliseconds(400))
+                    let text = self.wake.lastHeard
+                    guard !text.isEmpty, !seen.contains(text) else { continue }
+                    seen.insert(text)
+                    let phrase = self.settings.wakePhrase == "heyFlowState"
+                        ? WakePhrase.heyFlowState : WakePhrase.heyFlow
+                    lines.append(String(format: "  %.2f  %@", phrase.score(text), text))
+                }
+                for t in self.wake.trace.prefix(20) {
+                    lines.append("  clap: \(t.detail) at \(String(format: "%.0f dB", 20 * log10(max(t.peak, 0.0001))))")
+                }
+                let out = "threshold \(WakePhrase.threshold)  |  onWake fired \(fired) time(s)\n"
+                        + lines.joined(separator: "\n") + "\n"
+                try? out.write(to: URL(fileURLWithPath: "/tmp/flowstate-wake-listen.txt"),
+                               atomically: true, encoding: .utf8)
+                exit(0)
+            }
+        }
+
+        // Reports every link in the wake chain after idling for a bit, because "the wake
+        // word does not work" has half a dozen possible causes in three files and no way
+        // to tell them apart from the outside.
+        if ProcessInfo.processInfo.environment["FLOWSTATE_WAKE_DIAG"] == "1" {
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(12))
+                var out = ""
+                func say(_ k: String, _ v: Any) { out += "  \(k.padding(toLength: 26, withPad: " ", startingAt: 0)) \(v)\n" }
+                say("setting wakeWord", self.settings.wakeWord)
+                say("setting clapToWake", self.settings.clapToWake)
+                say("clap sensitivity", self.settings.clapSensitivity)
+                say("speech permission", SFSpeechRecognizer.authorizationStatus().rawValue)
+                say("engine capturing", self.audio.isCapturing)
+                say("mic holders", self.micHolders.sorted())
+                say("mic muted", self.audio.isMuted)
+                say("connected", self.client.isConnected)
+                say("listener running", self.wake.isRunning)
+                say("listener problem", self.wake.problem ?? "none")
+                say("clap enabled", self.wake.clapEnabled)
+                say("setting voiceCommands", self.settings.voiceCommands)
+                say("commands armed", self.wake.commandsEnabled)
+                say("snoozed", self.wake.isSnoozed)
+                say("BUFFERS FED", self.wake.buffersFed)
+                say("room level", self.wake.roomLevel)
+                say("recent peak", self.wake.inputPeak)
+                say("clap threshold", self.wake.clapThreshold)
+                say("last heard", self.wake.lastHeard.isEmpty ? "(nothing)" : self.wake.lastHeard)
+                out += "  --- what it made of every sound ---\n"
+                for t in (self.wake.trace + self.wake.phraseTrace)
+                            .sorted(by: { $0.at > $1.at }).prefix(12) {
+                    let kind: String
+                    switch t.kind {
+                    case .woke: kind = "WOKE"
+                    case .armed: kind = "armed"
+                    case .rejected: kind = "no"
+                    }
+                    let db = t.peak > 0 ? String(format: " %.0f dB", 20 * log10(t.peak)) : ""
+                    out += "  \(kind.padding(toLength: 6, withPad: " ", startingAt: 0))\(t.detail)\(db)\n"
+                }
+                try? out.write(to: URL(fileURLWithPath: "/tmp/flowstate-wake-diag.txt"),
+                               atomically: true, encoding: .utf8)
+                FileHandle.standardError.write(Data(("[wake-diag]\n" + out).utf8))
+                exit(0)
+            }
+        }
+
+        // A way to see the whole path work without waiting for a real task to finish.
+        // It goes through `Outreach.raise` like anything else, so the quiet rules apply:
+        // set this while the screen is locked and nothing happens until it is unlocked.
+        if let test = ProcessInfo.processInfo.environment["FLOWSTATE_OUTREACH_TEST"],
+           !test.isEmpty {
+            outreach.raise(test)
+        }
+    }
+
+    private var outreachTimer: Timer?
+
+    /// Said as soon as the session is up. Held rather than sent from `speak` because the
+    /// note has to go after `session.created`, which is where the tools and the prompt
+    /// are configured — a message sent before that arrives into a session with no voice.
+    private var pendingOutreach: String?
+
+    private func deliverPendingOutreach() {
+        guard let text = pendingOutreach else { return }
+        pendingOutreach = nil
+        client.sendSystemNote(
+            "[You are starting this conversation, not answering one. Tell the user, "
+            + "briefly and in your own words: \(text) Then stop and wait — do not ask "
+            + "what else they need.]")
+        client.createResponse()
+    }
+
+    func applyEffectiveAppearance() {
+        if settings.backdrop.isScene {
+            AppearanceMode.dark.applyToApp()
+        } else {
+            settings.appearance.applyToApp()
+        }
+    }
+
+    func noteActivity() {
+        lastActivity = Date()
+        if isAmbient { isAmbient = false }
+    }
+
+    private func startAmbientClock() {
+        ambientTimer?.invalidate()
+        let t = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.settings.ambientMode else { return }
+                // Never fade out mid-sentence — silence is the whole signal here.
+                let busy = self.userSpeaking || self.audio.isPlayingAudio || self.devTaskRunning
+                if busy { self.lastActivity = Date() }
+                let idle = Date().timeIntervalSince(self.lastActivity) > 45
+                if idle != self.isAmbient { self.isAmbient = idle }
+                // Cheap, and keeps "Showing <screen>" honest as the pointer moves.
+                if self.isFollowingActiveDisplay { self.refreshActiveDisplay() }
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        ambientTimer = t
+    }
+
+    /// What each native tool has actually cost lately. Not persisted: a session starts
+    /// optimistic, because yesterday's bad Wi-Fi is not evidence about today's.
+    let toolLatency = ToolLatencyBook()
+
+    /// Tools answered natively, in-process, without Claude Code.
+    let tools = ToolRegistry(specs: NativeTools.specs
+                                  + NativeTools.taskControlSpecs
+                                  + NativeTools.memorySpecs
+                                  + NativeTools.recordingSpecs
+                                  + SettingsTools.specs)
+
+    /// Pause or resume the queue. Announced in the transcript, because a queue that
+    /// silently stopped taking work would look like the app had died.
+    @discardableResult
+    func setQueuePaused(_ paused: Bool) -> String {
+        guard paused != devTasks.isPaused else { return devTasks.pauseExplanation }
+        devTasks.setPaused(paused)
+        objectWillChange.send()
+        if paused {
+            let line = devTasks.pauseExplanation
+            note(line)
+            return line
+        }
+        note("Queue resumed.")
+        // Anything that was waiting can go now.
+        let started = startQueuedTasks()
+        return started.isEmpty
+            ? "Queue resumed. Nothing was waiting."
+            : "Queue resumed — started " + started.map(\.id).joined(separator: ", ") + "."
+    }
+
+    var isQueuePaused: Bool { devTasks.isPaused }
+
+    // MARK: - Recording
+
+    var isRecording: Bool { recorder.isRecording }
+
+    /// What the recorder last refused or failed to do, for the UI to show next to the
+    /// button. Nil whenever the last transition did what it looked like it did.
+    var recordingError: String? { recorder.lastError }
+
+    private static let recordingLog = Logger(subsystem: "com.jackmielke.vibevoice",
+                                             category: "recording")
+
+    /// Start capturing. The mic has to be running for there to be anything to capture,
+    /// so this says so rather than producing a file of silence.
+    ///
+    /// - Parameter mode: what to capture, defaulting to whatever Settings says. Passed
+    ///   explicitly by the header menu, which offers all four in one click without
+    ///   changing the stored preference for the next time.
+    @discardableResult
+    func startRecording(mode: CaptureMode? = nil) -> String {
+        guard !recorder.isRecording else { return "Already recording." }
+        // The recorder is fed from the capture tap, and the tap only exists while the
+        // engine is running. Turning the button red here would be a lie that only comes
+        // out at stop time, as an empty file.
+        // Open the microphone for the recording's sake if no session has opened it.
+        //
+        // Recording used to require a live session, which put a screen recorder behind a
+        // socket to OpenAI and a running meter. That is backwards: capturing your screen
+        // and your voice is the product, and the assistant is the thing added on top of
+        // it. So a recording will open the microphone itself, and — see
+        // `finishRecording` — close it again afterwards if nothing else wanted it.
+        if !audio.isCapturing, let why = openMicrophone(for: "recording") {
+            note(why)
+            banner = why
+            objectWillChange.send()
+            return why
+        }
+
+        // Deliberately not a second `audio.running` check. The engine publishes that
+        // flag on the next turn of the main queue, so it is still false here even
+        // though the tap is installed and delivering — a guard on it would refuse every
+        // recording that opened its own microphone.
+        guard audio.isCapturing else {
+            let why = "Nothing to record yet — the microphone could not be opened."
+            Self.recordingLog.notice("start refused — audio engine not running")
+            note(why)
+            objectWillChange.send()
+            return why
+        }
+
+        let wanted = mode ?? settings.captureMode
+
+        // Permission first, and named. A video recording that starts, runs and produces a
+        // black movie because Screen Recording was off is the worst of both worlds: the
+        // user gets the disk cost of a recording and none of the recording.
+        if let refusal = permissionRefusal(for: wanted) {
+            Self.recordingLog.notice("start refused — \(refusal, privacy: .public)")
+            note(refusal)
+            banner = refusal
+            objectWillChange.send()
+            return refusal
+        }
+
+        let plan = capturePlan(for: wanted)
+        var video: VideoTrackWriter?
+        if wanted.isVideo {
+            let writer = VideoTrackWriter()
+            writer.displayID = resolvedCaptureDisplayID()
+            writer.cameraID = settings.cameraDeviceID
+            // Same description the floating bubble draws itself from, so the circle the
+            // user framed is the circle that lands in the movie.
+            writer.cameraOverlay = cameraOverlay
+            // The bubble is already on screen, so ScreenCaptureKit has already recorded
+            // it — at exactly the size it appears. Compositing a second copy on top is
+            // what put a face in the movie bigger than the one on the display. The
+            // composite is only for when there is no bubble to capture.
+            // Full frame is the exception, and has to be: the camera cannot fill the
+            // recording by being a bubble on screen, so that one size is drawn in even
+            // when there is a bubble. It covers the whole frame, bubble included.
+            writer.compositesCamera = !settings.cameraBubble || settings.cameraSize.isFullFrame
+            // What actually came out of the speakers. See `SystemAudioTap`.
+            writer.onSystemAudio = { [weak self] samples, seconds in
+                self?.recorder.appendSystemAudio(samples, at: seconds)
+            }
+            // A capture that dies on its own — display unplugged, permission pulled
+            // mid-session — would otherwise be discovered only when the movie turns out
+            // to end early. Stopping here keeps what was captured and says why.
+            writer.onFailure = { [weak self] why in
+                guard let self, self.recorder.isRecording else { return }
+                self.banner = why
+                _ = self.finishRecording(reason: "the capture stopped")
+            }
+            video = writer
+        }
+
+        guard recorder.start(title: currentSessionTitle, plan: plan, video: video) != nil else {
+            let why = recorder.lastError ?? "Couldn't start recording — see Console for the reason."
+            Self.recordingLog.error("start failed — \(why, privacy: .public)")
+            note(why)
+            banner = why
+            objectWillChange.send()
+            return why
+        }
+        // The card is about to be replaced by this take's, so nothing it complained
+        // about is still on screen to be true or false.
+        recordingIssue = nil
+        activePlan = plan
+        activeVideo = video
+        // The bubble stops opening its own session and shows the one being recorded —
+        // two sessions on the same device is a device-busy failure mid-take.
+        cameraBubbleUse(session: video?.previewSession)
+        note(wanted == .audioOnly
+             ? "Recording this conversation."
+             : "Recording this conversation — \(wanted.menuLabel.lowercased()), \(plan.summary).")
+        objectWillChange.send()
+        return wanted == .audioOnly ? "Recording." : "Recording \(wanted.menuLabel.lowercased())."
+    }
+
+    /// Who currently wants the microphone open, other than a live session.
+    ///
+    /// A set rather than a flag because there are two of them now — a recording and the
+    /// wake word — and they overlap. Closing the microphone when a recording stops, while
+    /// the wake word is still listening, would silently turn the wake word off; a flag
+    /// per feature would mean every new one has to remember every old one.
+    private var micHolders: Set<String> = []
+    /// Only for the sleep test — see `FLOWSTATE_SLEEP_TEST`.
+    private var vpIdleBefore = false
+    private var vpDuring = false
+
+    /// - Returns: nil on success, or why it could not be opened.
+    @discardableResult
+    private func openMicrophone(for holder: String) -> String? {
+        micHolders.insert(holder)
+        guard !audio.isCapturing else { return nil }
+        // No voice processing: nothing is speaking, so there is no echo to cancel, and
+        // leaving it on would put every sound this Mac makes through a voice processor
+        // for as long as the wake word is listening. See `AudioEngine.start`.
+        do { try audio.start(voiceProcessing: false) }
+        catch {
+            micHolders.remove(holder)
+            return "Audio: \(error.localizedDescription)"
+        }
+        audio.setMuted(settings.micMuted)
+        Self.recordingLog.notice("opened the microphone for \(holder, privacy: .public)")
+        return nil
+    }
+
+    /// Closes it again, unless a session or another holder is using it.
+    private func releaseMicrophone(for holder: String) {
+        guard micHolders.remove(holder) != nil else { return }
+        guard micHolders.isEmpty, !client.isConnected else { return }
+        audio.stop()
+        Self.recordingLog.notice("closed the microphone — nothing else wanted it")
+    }
+
+    // MARK: - What is being captured
+
+    /// The plan the recording in progress is running under, or the one the next
+    /// recording would use. Read by the header and by Settings for the size estimate.
+    @Published private(set) var activePlan: CapturePlan = CapturePlan.make(mode: .audioOnly, profile: .balanced)
+
+    /// Held only so the live storage meter can ask the file how big it has become.
+    /// Cleared on stop — see `finishRecording`.
+    private var activeVideo: VideoTrackWriter?
+
+    /// Sizes up a mode against the display and camera it would actually use.
+    ///
+    /// Not cached: a laptop that has just been plugged into a 5K monitor has a different
+    /// answer than it did a second ago, and an estimate quoted from a stale display is
+    /// worse than no estimate at all.
+    func capturePlan(for mode: CaptureMode) -> CapturePlan {
+        var screen: (width: Int, height: Int)?
+        if mode.capturesScreen {
+            let id = resolvedCaptureDisplayID()
+            if let match = displays.first(where: { $0.displayID == id }) ?? displays.first {
+                screen = (match.width, match.height)
+            }
+        }
+        var camera: (width: Int, height: Int)?
+        if mode.capturesCamera, let device = CameraCapture.device(id: settings.cameraDeviceID) {
+            camera = CameraCapture.nativeSize(of: device)
+        }
+        return CapturePlan.make(mode: mode, profile: settings.capturePerformance,
+                                screen: screen, camera: camera)
+    }
+
+    /// Which display a recording would capture. The same rule the still-frame path uses:
+    /// the saved one if it is still attached, otherwise whichever display is active.
+    private func resolvedCaptureDisplayID() -> CGDirectDisplayID? {
+        let saved = CGDirectDisplayID(settings.screenDisplayID)
+        if saved != DisplayOption.followsActiveID,
+           displays.contains(where: { $0.displayID == saved }) { return saved }
+        // The settled answer, not the instantaneous one.
+        //
+        // A screenshot taken while the pointer happens to be crossing to the other
+        // screen used to capture that screen — and when the pointer was off every
+        // screen it fell back to the window holding focus, which is "wherever I clicked
+        // last" rather than "where I am working". One notion of attention now drives
+        // the camera, the recording and the frames sent to the model, and it is the one
+        // that has to hold still to count. See `ActiveDisplayGate`.
+        return displayWatcher.current ?? ScreenCapture.activeDisplayID()
+    }
+
+    /// Why this mode cannot start, or nil when it can.
+    ///
+    /// Only ever *reports*; it never prompts. The prompting happens in `prepareCapture`,
+    /// which the picker calls when the mode is chosen, so the system dialog appears while
+    /// the user is thinking about cameras rather than three seconds into a recording.
+    func permissionRefusal(for mode: CaptureMode) -> String? {
+        if mode.capturesScreen, screenPermission.blocksCapture {
+            return screenPermission.bannerText
+        }
+        if mode.capturesCamera {
+            let camera = CameraCapture.permission()
+            guard camera.canCapture else { return camera.bannerText }
+            guard CameraCapture.device(id: settings.cameraDeviceID) != nil else {
+                return "No camera is connected, so there is nothing to record."
+            }
+        }
+        return nil
+    }
+
+    /// Asks macOS for whatever this mode needs, once, up front.
+    ///
+    /// Called when a mode is picked rather than when recording starts. The difference
+    /// matters: a permission dialog that appears the instant you hit record is a dialog
+    /// you dismiss to get back to recording, and then the recording has no camera in it.
+    func prepareCapture(for mode: CaptureMode) async {
+        if mode.capturesScreen { screenPermission = await ScreenCapture.ensureAccess(reason: "record \(mode.rawValue)") }
+        if mode.capturesCamera { cameraPermission = await CameraCapture.ensureAccess() }
+        cameras = CameraCapture.options()
+        activePlan = capturePlan(for: mode)
+    }
+
+    /// What the disk has to say about the mode that is selected. `.ok` is still shown —
+    /// it is the "≈27 MB a minute" line — it just does not get a warning triangle.
+    var storageAdvice: StorageAdvice {
+        CaptureStorage.advice(for: activePlan, freeBytes: recordingsFreeBytes)
+    }
+
+    /// The same question, mid-recording: how much has been written and how much room is
+    /// left. Falls back to the estimate when the writer cannot say — an audio recording
+    /// has no file on disk until it stops.
+    var liveStorageAdvice: StorageAdvice {
+        let written = activeVideo?.bytesWritten
+            ?? CaptureStorage.bytes(for: activePlan, seconds: recorder.duration)
+        return CaptureStorage.liveAdvice(for: activePlan,
+                                         bytesWritten: written,
+                                         freeBytes: recordingsFreeBytes)
+    }
+
+    /// Free space where recordings land. Read once a refresh rather than per redraw:
+    /// `resourceValues` hits the volume, and SwiftUI evaluates a body far more often than
+    /// a disk fills up.
+    @Published private(set) var recordingsFreeBytes: Int = 0
+
+    func refreshFreeSpace() {
+        lastFreeSpaceCheck = Date()
+        recordingsFreeBytes = CaptureStorage.freeBytes(at: SessionRecorder.directory)
+    }
+
+    private var lastFreeSpaceCheck = Date.distantPast
+
+    @discardableResult
+    func stopRecording() -> String {
+        finishRecording()
+    }
+
+    /// True while a take is running but taking nothing in. See `SessionRecorder.setPaused`.
+    var isRecordingPaused: Bool { recorder.isPaused }
+
+    /// Hold the take without ending it, or continue it.
+    ///
+    /// The microphone is deliberately left open across a pause. It is held for the
+    /// recording (see `micHolders`), and releasing it here would stop the wake listener's
+    /// audio as well — so "pause recording" would take the ears off the one command that
+    /// can un-pause it, which is the same trap `go_to_sleep` fell into. Nothing paused
+    /// reaches the file either way; the recorder drops it.
+    @discardableResult
+    func setRecordingPaused(_ paused: Bool) -> String {
+        let said: String
+        switch recorder.setPaused(paused) {
+        case .notRecording:
+            said = "Nothing is being recorded."
+        case .unchanged(let already):
+            said = already ? "It's already paused." : "The recording is already running."
+        case .paused(let at):
+            said = "Paused at \(Self.clock(at)). Say resume recording to carry on."
+            note("Recording paused at \(Self.clock(at)) — nothing is being captured until it resumes.")
+        case .resumed(let at):
+            said = "Recording again, from \(Self.clock(at))."
+            note("Recording resumed at \(Self.clock(at)).")
+        }
+        objectWillChange.send()
+        return said
+    }
+
+    // MARK: - The camera bubble, out loud
+
+    /// Why the camera cannot be used, or nil.
+    ///
+    /// `.notAsked` is deliberately not a refusal: it is a question that has not been put
+    /// yet, and `showFace` puts it.
+    var cameraRefusal: String? {
+        let permission = CameraCapture.permission()
+        if permission == .denied || permission == .restricted { return permission.bannerText }
+        guard permission == .notAsked || CameraCapture.device(id: settings.cameraDeviceID) != nil else {
+            return "No camera is connected, so there's nothing to show."
+        }
+        return nil
+    }
+
+    /// Put the user's face on screen — the same bubble the recording composites, so
+    /// saying "show my face" mid-take puts it in the file as well as on the display.
+    @discardableResult
+    func showFace() -> String {
+        if CameraCapture.permission() == .notAsked {
+            // The one place a voice command is allowed to raise a system dialog: the user
+            // just asked for the camera, so a camera prompt is the answer to their
+            // question rather than an interruption of it.
+            Task { @MainActor in
+                self.cameraPermission = await CameraCapture.ensureAccess()
+                self.cameras = CameraCapture.options()
+                guard self.cameraPermission.canCapture else {
+                    self.banner = self.cameraPermission.bannerText
+                    self.objectWillChange.send()
+                    return
+                }
+                self.settings.cameraBubble = true
+                self.applyCameraBubble()
+            }
+            return "Asking for camera access."
+        }
+        settings.cameraBubble = true
+        applyCameraBubble()
+        note("Camera bubble on.")
+        return "Your camera's on screen."
+    }
+
+    @discardableResult
+    func hideFace() -> String {
+        settings.cameraBubble = false
+        applyCameraBubble()
+        note("Camera bubble off.")
+        // A take that is running keeps running — this only takes the face out of it.
+        return isRecording ? "Camera hidden. Still recording." : "Camera hidden."
+    }
+
+    // MARK: - Voice commands
+
+    private static let commandLog = Logger(subsystem: "com.jackmielke.vibevoice",
+                                           category: "voice-command")
+
+    /// What the gate is deciding against, right now.
+    ///
+    /// - Parameter source: only ever consulted for the master switch. Turning the spoken
+    ///   commands off must not disable the record button, and a `commandsEnabled` that
+    ///   did not know where the command came from would do exactly that.
+    func voiceCommandContext(for source: VoiceCommandSource = .speech) -> VoiceCommandContext {
+        VoiceCommandContext(commandsEnabled: !source.isSpoken || settings.voiceCommands,
+                            recordingEnabled: AudioEngine.micPermitted,
+                            recordingBlocked: permissionRefusal(for: settings.captureMode),
+                            isRecording: recorder.isRecording,
+                            isPaused: recorder.isPaused,
+                            cameraBlocked: cameraRefusal,
+                            isFaceVisible: settings.cameraBubble)
+    }
+
+    /// The single door every spoken command comes through — the model's tool call and the
+    /// on-device listener alike.
+    ///
+    /// One door because the interesting part is not the doing, it is the *deciding*, and
+    /// two copies of that decision would drift within a week: the model would be allowed
+    /// to start a recording that the spoken route refuses, and nobody would find out
+    /// until a demo. So both routes gather the same context, ask the same gate, and leave
+    /// the same line in the log:
+    ///
+    ///     [voice-command] stop_recording via speech — performed: Saved 2:14 as …
+    ///
+    /// - Parameter source: where it came from. It decides two things and nothing else:
+    ///   whether the `voiceCommands` switch applies (it does not to a button or a key),
+    ///   and what the log line says it was — because an action nobody can trace back to
+    ///   what triggered it is an action the user cannot argue with.
+    @discardableResult
+    func runVoiceCommand(_ requested: VoiceCommand, from source: VoiceCommandSource) -> String {
+        let context = voiceCommandContext(for: source)
+        let command = requested.resolved(in: context)
+        if command != requested {
+            Self.commandLog.notice("""
+                \(requested.toolName, privacy: .public) via \(source.rawValue, privacy: .public) \
+                → \(command.toolName, privacy: .public)
+                """)
+        }
+
+        let decision = VoiceCommandGate.decide(requested, in: context)
+        guard decision.isPerform else {
+            let why = decision.spoken ?? "Not now."
+            log(command: command, source: source, decision: decision, result: why)
+            // A blocked command is a thing the user has to fix — a permission, a switch —
+            // so it gets the banner. A redundant one is not: saying "stop recording"
+            // twice is not a problem to be reported, and a red bar for it would be the
+            // app scolding somebody for repeating themselves.
+            if case .blocked = decision { banner = why }
+            objectWillChange.send()
+            return why
+        }
+
+        let result: String
+        switch command {
+        case .startRecording:  result = startRecording()
+        case .stopRecording:   result = stopRecording()
+        case .pauseRecording:  result = setRecordingPaused(true)
+        case .resumeRecording: result = setRecordingPaused(false)
+        case .showFace:        result = showFace()
+        case .hideFace:        result = hideFace()
+        }
+        log(command: command, source: source, decision: decision, result: result)
+        return result
+    }
+
+    /// Two lines per command, always: one for Console (`log stream --predicate
+    /// 'category == "voice-command"'`) and one for the terminal a dev build is running
+    /// in. Both say the same thing, including the ones that did nothing — "ignored" is
+    /// the entry somebody debugging this actually needs, and it is the one a log that
+    /// only recorded successes would be missing.
+    private func log(command: VoiceCommand,
+                     source: VoiceCommandSource,
+                     decision: VoiceCommandDecision,
+                     result: String) {
+        Self.commandLog.notice("""
+            \(command.toolName, privacy: .public) via \(source.rawValue, privacy: .public) — \
+            \(decision.logToken, privacy: .public): \(result, privacy: .public)
+            """)
+        FileHandle.standardError.write(Data(
+            "[voice-command] \(command.toolName) via \(source.rawValue) — \(decision.logToken): \(result)\n".utf8))
+        // In the transcript too, but only for the spoken route: a tool call already
+        // leaves its own "⚒ Stop recording: …" line, and two entries for one sentence
+        // reads as it having happened twice.
+        guard source == .speech else { return }
+        note("\(command.summary) — \(result)")
+    }
+
+    /// The one place a recording ends, whoever ends it — the button, the voice tool, or
+    /// the session closing underneath it. Every outcome is named in the transcript,
+    /// because "nothing happened" was indistinguishable from "it worked" before.
+    @discardableResult
+    func finishRecording(reason: String? = nil) -> String {
+        let outcome = recorder.stop()
+        // Before the writer is dropped, or the bubble is left previewing a session that
+        // is being torn down and goes black.
+        cameraBubbleUse(session: nil)
+        releaseMicrophone(for: "recording")
+        // The writer has closed its file by now, so nothing else should be holding it —
+        // and a stale one would keep the storage meter reading a file that is finished.
+        activeVideo = nil
+        refreshFreeSpace()
+        objectWillChange.send()
+
+        let suffix = reason.map { " (\($0))" } ?? ""
+        switch outcome {
+        case .notRecording:
+            return "Not recording."
+
+        case .saved(let url, let seconds):
+            refreshRecordings()
+            // One `stat` rather than waiting for the rescan: the folder scan is async now
+            // (a movie's length has to be read out of the file), and a card that appears
+            // with no size on it and grows one a moment later reads as a glitch.
+            let bytes = (try? FileManager.default.attributesOfItem(atPath: url.path))
+                .flatMap { $0[.size] as? Int } ?? 0
+            lastRecording = SessionRecorder.Recording(url: url, createdAt: Date(),
+                                                      bytes: bytes, seconds: seconds)
+            let label = Self.clock(seconds)
+            note("Saved \(url.lastPathComponent) · \(label)\(suffix)")
+            Self.recordingLog.notice("saved \(url.lastPathComponent, privacy: .public) (\(label, privacy: .public))")
+            return "Saved \(label) as \(url.lastPathComponent)."
+
+        case .tooShort(let seconds):
+            note("Recording stopped after \(Self.clock(seconds)) — too short to keep.\(suffix)")
+            Self.recordingLog.notice("discarded — \(seconds, format: .fixed(precision: 2))s is under the minimum")
+            return "That was too short to save."
+
+        case .captureNeverStarted(let elapsed):
+            // The failure this whole path exists to make visible. Red for 40 seconds and
+            // a zero-length file is a bug report, not a user error, so it says so —
+            // but only once it has actually been red long enough to mean something.
+            guard elapsed >= 1 else {
+                note("Recording stopped before it captured anything.\(suffix)")
+                return "That stopped before it captured anything."
+            }
+            let msg = "Recording captured nothing in \(Self.clock(elapsed)) — no audio reached the recorder."
+            note(msg + suffix)
+            banner = msg + " The microphone tap may not be running; reconnect and try again."
+            Self.recordingLog.error("captured nothing over \(elapsed, format: .fixed(precision: 1))s")
+            return msg
+
+        case .writeFailed(let why):
+            note("Recording failed — \(why)\(suffix)")
+            banner = "Recording failed — \(why)"
+            Self.recordingLog.error("write failed: \(why, privacy: .public)")
+            return "Couldn't save that recording: \(why)"
+        }
+    }
+
+    private static func clock(_ seconds: TimeInterval) -> String {
+        let s = Int(seconds.rounded())
+        return s < 60 ? "\(s)s" : String(format: "%d:%02d", s / 60, s % 60)
+    }
+
+    /// Rescans the folder. Asynchronous because a movie's length has to be read out of
+    /// the file rather than computed from its size — see `SessionRecorder.library` — but
+    /// the callers are all "something changed, go and look again", so none of them wait.
+    func refreshRecordings() {
+        Task { [weak self] in
+            let found = await SessionRecorder.library()
+            self?.recordings = found
+        }
+    }
+
+    /// The button under the list: the recording you most likely mean, which is the one
+    /// that just finished, or failing that the newest on disk. With neither, it still
+    /// opens the folder rather than doing nothing.
+    func revealRecordings() {
+        reveal(lastRecording?.url ?? recordings.first?.url)
+    }
+
+    /// Selects one specific file in Finder.
+    ///
+    /// Every route into Finder goes through here — the result panel, a row in the
+    /// Settings list, the button under that list — so all of them behave the same way
+    /// when the file has been moved out from under them. That case is ordinary, not
+    /// exotic: `activateFileViewerSelecting` accepts a path to a file that is not there
+    /// and then does nothing at all, silently, which from the user's side is a dead
+    /// button. `RecordingLocation` decides what to open instead; this only does it.
+    @discardableResult
+    func reveal(_ url: URL?) -> Bool {
+        let fm = FileManager.default
+        let resolved = RecordingLocation.resolve(file: url,
+                                                 folder: SessionRecorder.directoryURL,
+                                                 exists: { fm.fileExists(atPath: $0.path) })
+        noteRecordingIssue(resolved.problem, about: url)
+
+        switch resolved.target {
+        case .selectFile(let file):
+            NSWorkspace.shared.activateFileViewerSelecting([file])
+            return true
+        case .openFolder(let folder):
+            NSWorkspace.shared.open(folder)
+            // Something the list believed in has gone; a rescan costs one directory read.
+            if resolved.problem != nil { refreshRecordings() }
+            return false
+        case .nothing:
+            refreshRecordings()
+            return false
+        }
+    }
+
+    /// Plays one, in whatever the user has set to open a WAV.
+    ///
+    /// It deliberately does not fall through to Finder when the file is missing — a Play
+    /// button that opens a folder instead is a different button — but it diagnoses the
+    /// same way, so the two never disagree about the same absent file.
+    @discardableResult
+    func play(_ url: URL) -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            noteRecordingIssue("\(url.lastPathComponent) has been moved, renamed or "
+                               + "deleted since it was recorded — there is nothing left to play.",
+                               about: url)
+            refreshRecordings()
+            return false
+        }
+        // A WAV opens in QuickTime or Music depending on what the user has set. Either
+        // way it plays, which beats a path they have to go and find.
+        guard NSWorkspace.shared.open(url) else {
+            noteRecordingIssue("Nothing on this Mac would open \(url.lastPathComponent).", about: url)
+            return false
+        }
+        recordingIssue = nil
+        return true
+    }
+
+    func dismissLastRecording() {
+        lastRecording = nil
+        recordingIssue = nil
+    }
+
+    /// Stops a running task. The subprocess gets SIGTERM; the run then falls out of its
+    /// stream with no result event, which is reported as "Stopped."
+    @discardableResult
+    func cancelTask(_ id: String) async -> String {
+        guard let t = devTasks.task(id) else { return "No task called \(id)." }
+
+        // A queued task has touched nothing yet, so dropping it is free — and a queue
+        // you cannot take something out of is a trap.
+        if t.status == .queued {
+            devTasks.cancel(id)
+            transcript.append(TranscriptItem(speaker: .system,
+                                             text: "■ \(id) \(t.label): taken out of the queue"))
+            objectWillChange.send()
+            return "Dropped \(id) (\(t.label)) from the queue. It never started, so there's nothing to undo."
+        }
+
+        guard t.status == .running else { return "\(id) isn't running." }
+        let killed = await claude.cancel(taskID: id)
+        devTasks.cancel(id)
+        // Stopping a task frees its repo, which is exactly what something in the queue
+        // may have been waiting for.
+        startQueuedTasks()
+        devTaskRunning = !devTasks.running.isEmpty
+        transcript.append(TranscriptItem(speaker: .system, text: "■ \(id) \(t.label): stopped"))
+        objectWillChange.send()
+        return killed
+            ? "Stopped \(id) (\(t.label)). Its edits so far are still on disk — say undo \(id) to roll them back."
+            : "\(id) had already finished."
+    }
+
+    /// Rolls the repo back to the restore point taken before the task started.
+    func undoTask(_ id: String) -> String {
+        guard let t = devTasks.task(id) else { return "No task called \(id)." }
+        if t.status == .running {
+            return "\(id) is still running — stop it first, then undo."
+        }
+        if t.status == .queued {
+            return "\(id) hasn't started yet, so there's nothing to undo. Say stop \(id) to drop it."
+        }
+        let msg = GitSnapshot.restore(repo: t.repo, taskID: id)
+        transcript.append(TranscriptItem(speaker: .system, text: "↩ \(id): \(msg)"))
+        objectWillChange.send()
+        return msg
+    }
+
+    /// Turn a native tool on or off, persist it, and tell a live session immediately.
+    func setToolEnabled(_ on: Bool, _ name: String) {
+        tools.setEnabled(on, for: name)
+        settings.disabledTools = tools.disabledNames
+        applySettingsLive()
+        objectWillChange.send()
+    }
+    private var devStepBuffer: [String] = []
+    private var devNarrateTimer: Timer?
+    private var devSpokenUpdates = 0
+    private var lastNarrationAt = Date.distantPast
+    private var screenTimer: Timer?
+    /// The assistant line currently being streamed into, by identity rather than by
+    /// position.
+    ///
+    /// It was an array index, which was only ever correct because nothing but `append`
+    /// ever touched the transcript. The moment a line can be *inserted* — which is what
+    /// putting the user's words in the right place requires — every index below it moves
+    /// and the next delta is appended to somebody else's sentence. An id cannot go
+    /// stale that way; it can only stop resolving, which is a case the code already has
+    /// to handle.
+    private var assistantItemID: UUID?
+    /// Placeholders on screen waiting for their text, and the deadline that says when
+    /// one is never coming. See `PendingTranscripts`.
+    private let pendingTranscripts = PendingTranscripts()
+    /// The user line currently waiting for its transcription, if any.
+    private var pendingUserItemID: UUID?
+    /// How long a placeholder may wait before it is given up on and reported.
+    ///
+    /// Transcription normally lands about a second after speech stops. Twelve seconds is
+    /// far past anything healthy and still short enough that a user staring at a blank
+    /// line gets an answer while they are still looking at it.
+    private static let transcriptCommitTimeout: TimeInterval = 12
+    /// Placeholders that were never filled in, this launch. Should be zero; shown in
+    /// Settings so that when it is not, somebody can see it.
+    @Published private(set) var abandonedTranscriptUpdates = 0
+    private var bag = Set<AnyCancellable>()
+
+    var settings: AppSettings {
+        get { settingsStore.settings }
+        set { settingsStore.settings = newValue }
+    }
+
+    /// The live instance, for the two things that exist outside the SwiftUI graph and
+    /// still have to reach it: the app delegate (which is built before the scene's
+    /// `@StateObject`) and `DeepLink`. Weak, and read only on the main actor — this is a
+    /// back reference, not an owner, and there is exactly one `AppState`.
+    private(set) static weak var current: AppState?
+
+    /// Reopens the main window after it has been closed.
+    ///
+    /// A SwiftUI `Window(id:)` scene has no AppKit handle once its window is gone —
+    /// there is nothing in `NSApp.windows` left to `makeKeyAndOrderFront`. The only way
+    /// back is `openWindow(id:)`, which is an environment value and therefore only
+    /// readable from inside a view, so `WindowReopener` captures it while the scene is
+    /// alive and leaves it here. The captured action stays valid after the window
+    /// closes, which is the entire point.
+    var reopenMainWindow: (() -> Void)?
+
+    init() {
+        Self.current = self
+        // Re-publish nested object changes so views refresh.
+        audio.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
+        settingsStore.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
+        // Without this the recording clock in the header never moved: views observe
+        // `AppState`, and a nested `ObservableObject` publishes to nobody unless its
+        // changes are re-sent from here. The red dot came on, the timer sat at 0:00, and
+        // the app looked like it was capturing nothing even once it was.
+        recorder.objectWillChange.sink { [weak self] _ in
+            guard let self else { return }
+            self.objectWillChange.send()
+            // The recorder's clock ticks four times a second, which makes it the cheapest
+            // place to keep the storage meter honest — but asking the volume how much is
+            // free four times a second would be absurd, so it is throttled to once every
+            // ten. A disk does not fill faster than that, and a stale "room for 3 hours"
+            // during an hour-long recording is exactly the reading that gets someone into
+            // trouble.
+            guard self.recorder.isRecording,
+                  Date().timeIntervalSince(self.lastFreeSpaceCheck) >= 10 else { return }
+            self.lastFreeSpaceCheck = Date()
+            self.refreshFreeSpace()
+        }.store(in: &bag)
+
+        client.onEvent = { [weak self] ev in self?.handle(ev) }
+
+        // The coordinator decides; the client is only ever the messenger.
+        responses.send = { [weak self] out in
+            guard let self else { return }
+            switch out {
+            case .create: self.client.createResponse()
+            case .cancel: self.client.cancelResponse()
+            }
+        }
+        responses.log = { [weak self] ev in self?.logResponse(ev) }
+        responses.onChange = { [weak self] in self?.syncResponseState() }
+
+        audio.onMicPCM = { [weak self] data, muted in
+            guard let self else { return }
+            // EVERYTHING below runs OFF the render thread.
+            //
+            // This closure is called from the capture tap, whose only job is to keep the
+            // buffer fed on time. What it was doing instead: sub-framing for the clap
+            // detector behind a lock the tuning panel also reads four times a second,
+            // base64-encoding every chunk for the socket, taking the recorder's lock, and
+            // appending to an array that reallocates. Allocation and lock contention on a
+            // render thread is what a crackle IS — the thread misses its deadline waiting
+            // on something of lower priority.
+            //
+            // None of this work is real-time. A serial queue keeps the chunks in order,
+            // which is the only guarantee any of these consumers actually needs.
+            Self.micQueue.async {
+            // Three consumers, one rule. `data` is already silence when `muted` is true —
+            // the engine substitutes it at the source, so nothing downstream can leak the
+            // real audio by forgetting to check the flag. See `MicMute`.
+            let route = MicMute.route(muted: muted, connected: self.client.isConnected)
+            // Metering happens whether or not the socket is up: the measurement is of
+            // what the user said, and it is not the network's business. The samples are
+            // not retained — `UtteranceRecorder` keeps a running total and nothing else.
+            // Muted, there is nothing to measure, and counting the silence would report
+            // a five-minute utterance to a transcript line nobody ever spoke.
+            //
+            // The second consumer this stream was always going to have. Only while no
+            // session is open: once there is one, the words are already going somewhere
+            // that understands them, and running a recogniser as well would be paying
+            // twice to hear the same sentence.
+            // Calibrating overrides the gate entirely. Measuring your clap is something
+            // you do while looking at the panel, which is usually mid-conversation — and
+            // the gate skipped the feed whenever a session was open, so "teach it my
+            // clap" heard silence and reported that the microphone was not working.
+            if self.wake.isCalibrating {
+                self.wake.feed(data)
+            } else if !muted, !self.client.isConnected, self.settings.wakeWord {
+                self.wake.feed(data)
+            }
+            if route.toMeasurement { self.utterance.ingest(pcm16: data) }
+            // The recording's other half, and its clock. This tee was missing, which is
+            // why the recorder could go red and still write nothing: the model's voice
+            // was fed in (see `.audio` in `handle`) but the microphone never was, so a
+            // conversation the user did most of the talking in came out as zero seconds
+            // and was then discarded as "too short". It is deliberately outside the
+            // `isConnected` gate below — the recorder decides for itself whether it is
+            // running, and a socket blip must not punch a hole in the timeline. It is
+            // outside the mute gate for the same reason, one step further: muting must
+            // leave a silent stretch in the file, not a splice.
+            if route.toRecorder { self.recorder.appendMic(data) }
+            guard route.toModel else { return }
+            self.client.appendAudio(data)
+            }
+        }
+
+        // The gate the user left closed last time they quit. Applied before anything can
+        // be captured, so a muted launch is muted from the first buffer rather than from
+        // whenever a view happens to read the setting.
+        audio.setMuted(settings.micMuted)
+
+        // What the user has agreed to keep. Read once here, and re-applied whenever
+        // Settings changes it — see `applyPrivacySettings()`.
+        conversation.privacy = settings.privacy
+        // And how many of them, and whether they are written at all without being asked.
+        conversation.retention = settings.retention
+        summaries = SummaryService(store: conversation, policy: settings.summaries)
+        summaries.onSummary = { [weak self] summary, delivery in
+            self?.handleSummary(summary, delivery)
+        }
+        // Every start and every end, including the ends that produce nothing — a button
+        // that says "Summarising…" has to hear about the failures too.
+        summaries.onActivity = { [weak self] in
+            guard let self else { return }
+            self.isSummarizing = self.summaries.isSummarizing
+            self.objectWillChange.send()
+        }
+
+        // Quitting mid-recording used to throw the whole thing away: the samples live in
+        // memory until `stop()` writes them, and the process exiting takes them with it.
+        // `willTerminate` is delivered synchronously on the main thread, so there is
+        // still time to turn what was captured into a file.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    if self.recorder.isRecording {
+                        self.finishRecording(reason: "the app quit")
+                    }
+                    self.releaseAudioHardware()
+                }
+            }
+
+        // And on SIGTERM, which is how this app is actually killed.
+        //
+        // `pkill` — which relaunch.sh uses on every rebuild — sends SIGTERM, and a
+        // Cocoa app never turns that into `willTerminate`. So every relaunch left the
+        // voice-processing unit live and orphaned inside coreaudiod. Enough of those
+        // and every sound on the Mac crackles, in every app, until the daemon is
+        // restarted. That is the recurring bug, and this is where it comes from.
+        let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        term.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                self?.releaseAudioHardware()
+                exit(0)
+            }
+        }
+        term.resume()
+        sigtermSource = term
+        signal(SIGTERM, SIG_IGN)      // the dispatch source handles it instead
+
+        // Which conversation we are in, before anything can be recorded into the wrong
+        // one. The store already minted a fresh session id in its own init, so the
+        // default — a new conversation every launch — needs nothing done to it.
+        restoreSessionOnLaunch()
+
+        // Same gate as the on-screen button, so ⌘⇧2 and the button never disagree about
+        // whether the app is accepting a new question.
+        GlobalHotkey.shared.register { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                guard !self.hasQueuedResponse else {
+                    self.note("A reply is already queued — ⌘⇧2 ignored until it goes out.")
+                    return
+                }
+                await self.captureAndSend(auto: false)
+            }
+        }
+
+        // Returning from System Settings is the moment the answer most often
+        // changes, and macOS gives us no TCC change notification — so re-read on
+        // every activation rather than trusting whatever we concluded last time.
+        // Escape belongs to whichever app is in front, so ours is handed back the moment
+        // we become that app and taken again when we stop being it. Cheap: for the
+        // modifier chords both of these return without doing anything.
+        for name in [NSApplication.didBecomeActiveNotification,
+                     NSApplication.didResignActiveNotification] {
+            NotificationCenter.default
+                .publisher(for: name)
+                .sink { [weak self] _ in
+                    Task { @MainActor in self?.refreshSessionScopedHotkeys() }
+                }
+                .store(in: &bag)
+        }
+
+        NotificationCenter.default
+            .publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor in
+                    self?.refreshScreenPermission(reason: "app-activated")
+                    await self?.refreshDisplays()
+                    // A camera plugged in, a camera unplugged, and — the common one — a
+                    // permission the user has just come back from granting.
+                    self?.cameras = CameraCapture.options()
+                    self?.cameraPermission = CameraCapture.permission()
+                    self?.refreshFreeSpace()
+                }
+            }
+            .store(in: &bag)
+
+        // Plugging a monitor in or out is the one moment the picker's contents are
+        // guaranteed to be wrong, and it is the only display change macOS does tell us
+        // about — so it is worth listening for rather than polling.
+        NotificationCenter.default
+            .publisher(for: NSApplication.didChangeScreenParametersNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor in await self?.refreshDisplays() }
+            }
+            .store(in: &bag)
+
+        // Dragging the window to another monitor changes what "follow the active display"
+        // captures. Without this the picker would keep naming the screen you left.
+        NotificationCenter.default
+            .publisher(for: NSWindow.didChangeScreenNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.refreshActiveDisplay() }
+            }
+            .store(in: &bag)
+
+        for name in settings.disabledTools { tools.setEnabled(false, for: name) }
+
+        // Before anything else can decide not to run: this dumps the tool schema and
+        // quits, and hanging it off a view's `.task` made it depend on a window existing,
+        // which is not reliable when the binary is run directly.
+        RecordingSmokeTest.dumpToolsIfRequested(state: self)
+
+        applySummonHotkey()
+        applyConnectHotkey()
+        applyRecordHotkey()
+        applyHushHotkey()
+        applyWakeHotkey()
+        // The system owns this, not the settings file: a login item can be switched off
+        // from System Settings, and a stale `true` here would claim the wake key survives
+        // a reboot when it does not.
+        if LoginItem.isAvailable { settings.startAtLogin = LoginItem.isEnabled }
+        // A `flowstate://connect` that arrived while this object was still being built —
+        // which is every cold start through the URL scheme, since the delegate receives
+        // the URL before the scene exists. See `DeepLink.pending`.
+        DeepLink.drainPending(into: self)
+        startOutreach()
+        applyWakeWord()
+        // NOT applyHUD() here. Building the widget's hosting view during init means
+        // constructing a view that observes this very object while SwiftUI is still
+        // assembling the scene graph, which crashes the app on launch. ContentView calls
+        // it once it is on screen.
+        startAmbientClock()
+
+        refreshScreenPermission(reason: "launch")
+        // Get listed in Privacy & Security > Screen & System Audio Recording.
+        //
+        // On current macOS there is no "Allow" button for screen recording: the system
+        // dialog only offers Open System Settings or Deny. An app appears in that list
+        // once it has ATTEMPTED a capture and been refused — and it is the real
+        // ScreenCaptureKit attempt that creates the record, not
+        // CGRequestScreenCaptureAccess(), which returns false in ~10ms without
+        // prompting. Measured on a never-before-seen bundle id: CGRequest returned
+        // false instantly, while SCShareableContent returned -3801 "declined", which
+        // is the refusal that registers the app.
+        //
+        // So: ask first (harmless, and correct if this Mac ever does prompt), then
+        // make a genuine attempt so the row exists when the user goes looking for it.
+        Task { @MainActor in
+            // A rendering run asks for nothing.
+            //
+            // `snapshot-ui.sh` launches the STAGING bundle in the source tree, which is a
+            // different path and therefore a different app to macOS — so every run put a
+            // screen-recording prompt on screen for an app the user has never heard of,
+            // sitting alongside the one they granted. A mode that renders images and
+            // quits has no business asking for the screen at all.
+            guard SettingsSnapshot.requested == nil else {
+                self.cameras = CameraCapture.options()
+                return
+            }
+            var s = await ScreenCapture.ensureAccess(reason: "launch")
+            if s != .granted {
+                s = await ScreenCapture.probe(reason: "launch-register")
+            }
+            self.screenPermission = s
+            await self.refreshDisplays()
+            // Now that the displays are known, the capture estimate can be a real number
+            // rather than the 16:9 stand-in. Cameras are enumerated here too — the list
+            // costs a device query, not a capture, so it is safe on launch and means the
+            // picker is populated before anyone opens it.
+            self.cameras = CameraCapture.options()
+            self.cameraPermission = CameraCapture.permission()
+            self.refreshFreeSpace()
+            self.activePlan = self.capturePlan(for: self.settings.captureMode)
+        }
+        note("Ready. Hit Connect and just talk. ⌘⇧2 shows me your screen.")
+
+    }
+
+    // MARK: - Connect
+
+    func toggleConnection() {
+        if case .live = connection { disconnect() }
+        else if case .connecting = connection { disconnect() }
+        else { Task { await connect() } }
+    }
+
+    func connect() async {
+        connection = .connecting
+        banner = nil
+        bannerAction = nil
+        terminalCause = nil
+
+        guard await AudioEngine.requestMicAccess() else {
+            connection = .error("Microphone access denied. Enable it in System Settings › Privacy & Security › Microphone.")
+            return
+        }
+
+        let key: String
+        do { key = try KeyStore.load() }
+        catch { connection = .error(error.localizedDescription); return }
+
+        // Mint an ephemeral ek_ token; only that goes onto the socket.
+        var token = key
+        do {
+            token = try await EphemeralToken.mint(apiKey: key, model: settings.model)
+            note("Minted ephemeral token (ek_…\(token.suffix(4)))")
+        } catch {
+            note("Ephemeral mint failed (\(error.localizedDescription)) — using standard key.")
+        }
+
+        // A conversation needs echo cancellation, and it can only be switched on before
+        // the engine starts. If the wake word had the microphone open without it, the
+        // engine is stopped and rebuilt rather than left in the wrong mode — the
+        // alternative is an assistant that hears itself and interrupts itself.
+        if audio.isCapturing && !audio.voiceProcessing {
+            audio.stop()
+        }
+        do { try audio.start(voiceProcessing: true) }
+        catch { connection = .error("Audio: \(error.localizedDescription)"); return }
+        // `start()` builds a new tap; the gate is engine state and survives it, but
+        // re-asserting from the setting here is what keeps the two from ever disagreeing
+        // if one of them is changed from somewhere else.
+        audio.setMuted(settings.micMuted)
+
+        client.connect(token: token, model: settings.model)
+    }
+
+    // MARK: - Mute
+
+    /// Whether the microphone is gated shut. The engine owns the flag; this is what the
+    /// views read.
+    var isMicMuted: Bool { audio.isMuted }
+
+    /// Set when a mute lands mid-utterance, so the `speech_stopped` the server sends
+    /// afterwards is understood as cleanup rather than as a turn the user took.
+    private var discardedUtteranceOnMute = false
+
+    func toggleMicMute() { setMicMuted(!audio.isMuted) }
+
+    /// Opens or closes the microphone.
+    ///
+    /// The gate itself is one line — everything else here is about the half-sentence that
+    /// was in flight when the button was pressed. Muting mid-utterance leaves a fragment
+    /// in three places at once: the server's input buffer, the local utterance meter, and
+    /// a pending transcript line on screen. Left alone, the server never hears the
+    /// trailing silence that would close the turn, so the fragment waits and is glued to
+    /// the front of whatever is said after the unmute.
+    func setMicMuted(_ on: Bool) {
+        guard on != audio.isMuted else { return }
+        audio.setMuted(on)
+        // Persisted immediately rather than on quit: the reason to mute is usually that
+        // someone has walked into the room, and that is not a moment to be relying on a
+        // clean shutdown.
+        settings.micMuted = on
+
+        if on, userSpeaking {
+            userSpeaking = false
+            utterance.discard()
+            pendingUtteranceAudio = nil
+            discardedUtteranceOnMute = true
+            if client.isConnected { client.clearInputAudio() }
+            // The coordinator is holding everything back until this turn finishes. It
+            // never will, so end it here or the next queued reply is stuck behind a
+            // sentence that no longer exists.
+            responses.userSpeechStopped()
+        }
+
+        // Filed only when there is something for it to explain. A note on every toggle
+        // would let someone flipping the button turn the transcript into a list of their
+        // own clicks; a silent stretch in a live conversation or in a recording, on the
+        // other hand, looks like a fault until something says otherwise.
+        if connection == .live || recorder.isRecording {
+            note(MicMute.note(muted: on))
+        } else {
+            FileHandle.standardError.write(Data("[app] \(MicMute.note(muted: on))\n".utf8))
+        }
+    }
+
+    func disconnect() {
+        // A hang-up cancels a voice switch that has not reconnected yet. The switch sets
+        // this again immediately after its own call to `disconnect()`, so the only thing
+        // cleared here is somebody else's — a manual disconnect, a dropped socket, a new
+        // conversation — and the user closing the session always wins over it.
+        awaitingVoiceReconnect = false
+        // Only when there was something to leave — `disconnect` is also the tidy-up path
+        // for a connection that never opened, and a farewell chime for a session that
+        // never happened is a lie about what just occurred.
+        if client.isConnected { sound(.sleep, "sleep") }
+        captions.clear()
+        stopScreenTimer()
+        stopResponseWatchdog()
+        // One recap of the WHOLE conversation, before the session id stops meaning
+        // anything — not a summary of the tail that happened not to be covered yet.
+        // This is the one that gets read, so it is the one that gets the better model
+        // and the whole transcript. Fire-and-forget: it lands in the note file and the
+        // panel even though the socket is gone.
+        summaries.summarizeSession(currentSessionID)
+        stopSummaryClock()
+        utterance.discard()
+        pendingUtteranceAudio = nil
+        discardedUtteranceOnMute = false
+        // The conversation is NOT ended here. A session is the app's own idea of a
+        // conversation now, not the socket's — closing the socket is putting the phone
+        // down, not throwing away what was said.
+        // Close the recording before the tap it feeds on goes away. Leaving it running
+        // is what left the button red with a dead timer after a disconnect: nothing more
+        // could ever arrive, but nothing said so, and the samples already captured were
+        // stranded in memory rather than written to disk.
+        if recorder.isRecording { finishRecording(reason: "the session ended") }
+        client.disconnect()
+
+        // Only if nothing else still wants the microphone.
+        //
+        // Hanging up used to close it unconditionally, which switched the wake phrase and
+        // the clap off until the app was restarted — "go to sleep" made it permanently
+        // deaf, so the one thing that could wake it again had no ears. The wake listener
+        // registers as a holder exactly so this can tell the difference between "the
+        // conversation is over" and "nobody needs the microphone".
+        if micHolders.isEmpty {
+            audio.stop()
+        } else if audio.voiceProcessing {
+            // Something still wants the microphone, but nothing is speaking any more.
+            // Rebuild it plain, so system audio stops going through the voice processor
+            // the moment the conversation ends rather than at the next launch.
+            audio.stop()
+            Task { @MainActor in
+                // A turn of the run loop between stop and start. The voice-processing
+                // audio unit does not finish tearing down synchronously, and starting on
+                // top of a half-stopped one throws — which, swallowed by `try?`, left the
+                // wake word with no microphone and no complaint.
+                try? await Task.sleep(for: .milliseconds(120))
+                do {
+                    try self.audio.start(voiceProcessing: false)
+                    self.audio.setMuted(self.settings.micMuted)
+                    if self.settings.wakeWord { self.wake.restart() }
+                } catch {
+                    Self.recordingLog.error(
+                        "could not reopen the microphone for the wake word — \(error.localizedDescription, privacy: .public)")
+                    self.banner = "The wake phrase stopped listening — \(error.localizedDescription)"
+                }
+            }
+        } else {
+            Self.recordingLog.notice(
+                "keeping the microphone open for \(self.micHolders.sorted().joined(separator: ", "), privacy: .public)")
+        }
+        connection = .idle
+        sessionID = nil
+        closeAssistantTurn()
+        // The tap survives, but the recogniser had been idle throughout the session —
+        // it is only fed while no session is open — so it is re-armed here rather than
+        // waiting up to fifty seconds for its own recycle.
+        if settings.wakeWord { wake.restart() }
+        // Nothing more is coming down a socket that is closed, so any line still waiting
+        // for its text is waiting forever. Say so now rather than leaving a blinking dot
+        // on screen until the app is quit.
+        resolveAllPending(reason: "the connection closed")
+        // Local-only: the socket is gone, so nothing may be sent — and a request left
+        // queued here would otherwise fire into the NEXT session.
+        responses.reset(reason: "disconnect")
+    }
+
+    func applySettingsLive() {
+        guard case .live = connection else { return }
+        client.sendSessionUpdate(settings, nativeTools: tools.realtimeTools())
+    }
+
+    // MARK: - Voice
+
+    /// QA — switching the voice.
+    ///
+    /// Picking a voice while a session is live must NOT require the user to disconnect
+    /// and reconnect by hand, and must not leave anything of the old voice behind: the
+    /// audio still queued for playback is dropped, the socket is closed, and a brand new
+    /// session is opened with the new voice in its `session.update`. Expect: one chime
+    /// down, one chime up, a `Live · session …` line with a NEW session id, and the very
+    /// next reply in the new voice. The transcript on screen is not cleared — it belongs
+    /// to the conversation, not to the socket.
+    ///
+    /// Things worth trying to break it with: switching twice quickly (only the last one
+    /// may survive, and there must never be two sockets), hitting Connect or Disconnect
+    /// during the swap (the user wins — a manual disconnect cancels the pending
+    /// reconnect), and switching while nothing is connected (stores it silently; no
+    /// session is opened just to apply a setting).
+    ///
+    /// One reconnect at a time. Bumped by every voice switch, so a swap that is still
+    /// waiting for the socket to close finds itself superseded and does nothing.
+    private var voiceReconnectGeneration = 0
+    /// True between a voice switch's disconnect and its reconnect. Cleared by ANY other
+    /// path through `disconnect()`, which is what makes a manual hang-up final.
+    private var awaitingVoiceReconnect = false
+
+    /// The one place the voice changes, whoever changed it — the picker or the model.
+    /// - Returns: what to say about it, for the spoken path. The transcript line is
+    ///   filed here either way.
+    @discardableResult
+    func setVoice(_ voice: String) -> String {
+        let live = connection == .live || connection == .connecting
+        let plan = VoiceSwitch.plan(from: settings.voice, to: voice, live: live, known: kVoices)
+        // The canonical spelling, so "Marin" from speech is stored the way the API
+        // spells it rather than the way it was said.
+        let resolved = VoiceSwitch.resolve(voice, known: kVoices) ?? settings.voice
+
+        switch plan {
+        case .unchanged, .unknown:
+            break
+        case .stored, .reconnect:
+            settings.voice = resolved
+        }
+
+        if let line = VoiceSwitch.note(plan, voice: resolved, known: kVoices) { note(line) }
+        objectWillChange.send()
+
+        if VoiceSwitch.needsReconnect(plan) { reconnectForVoice() }
+        return VoiceSwitch.spoken(plan, voice: resolved)
+    }
+
+    /// Take the session down and bring it straight back up in the new voice.
+    ///
+    /// Sequential, not overlapping: the old socket is closed before the new one is
+    /// opened. Two live sessions would both be billed, both hold the microphone, and
+    /// both answer — which is the failure this is arranged to make impossible.
+    private func reconnectForVoice() {
+        voiceReconnectGeneration &+= 1
+        let mine = voiceReconnectGeneration
+
+        // Whatever the old voice was still saying stops now. `disconnect()` closes the
+        // socket, but audio already handed to the engine keeps playing out of it — so
+        // without this the first thing you hear after switching is the end of a sentence
+        // in the voice you just left.
+        audio.flushPlayback()
+        disconnect()
+        // Set AFTER `disconnect()`, which clears it: the flag means "a voice switch owns
+        // the next connect", and the disconnect it performs itself is part of the switch.
+        awaitingVoiceReconnect = true
+
+        Task { @MainActor in
+            // Long enough for the socket to finish going away and — the real constraint —
+            // for `disconnect()`'s own 120 ms audio rebuild to have run, so `connect()`
+            // is not starting an engine on top of one that is half-way through starting.
+            try? await Task.sleep(for: .milliseconds(300))
+            // Superseded by a later switch, or cancelled by anything that closed the
+            // connection in the meantime.
+            guard mine == self.voiceReconnectGeneration, self.awaitingVoiceReconnect else { return }
+            self.awaitingVoiceReconnect = false
+            // Belt and braces against a second session: if a socket is up or on its way
+            // up — the user hit Connect during the swap — there is nothing to reconnect.
+            guard !self.client.isConnected,
+                  self.connection != .live, self.connection != .connecting else { return }
+            await self.connect()
+        }
+    }
+
+    /// The one place a cost mode is applied, so the header toggle and Settings cannot
+    /// drift apart. The mode is not a single flag — it rewrites the model, the frame
+    /// size and how much history is kept — so it always goes through `apply(to:)`.
+    func setQualityMode(_ mode: QualityMode) {
+        var s = settings
+        mode.apply(to: &s)
+        settings = s
+        applySettingsLive()
+    }
+
+    // MARK: - Response lifecycle
+
+    /// True while a turn is being generated — the window in which a second
+    /// `response.create` would be rejected by the API.
+    var isResponding: Bool { responsePhase == .requested || responsePhase == .active }
+
+    /// Set when the user talks over a reply, cleared when the next reply starts.
+    /// See `.speechStarted` for what it is for.
+    private var interruptedResponseIsMute = false
+
+    /// True while a cancel is in flight and has not been acknowledged.
+    var isCancellingResponse: Bool { responsePhase == .cancelling }
+
+    /// True when a turn has already been asked for and is waiting its turn to be sent.
+    var hasQueuedResponse: Bool { queuedResponses > 0 }
+
+    /// The user-facing Stop. Interrupts whatever is being generated and abandons
+    /// anything queued behind it. Pressing it again while the cancel is unacknowledged
+    /// forces the state back to idle, so the app can always be talked out of a stuck
+    /// "busy" state without disconnecting.
+    func stopResponse() {
+        guard case .live = connection else {
+            responses.reset(reason: "stop pressed while not live")
+            return
+        }
+        responses.cancel(reason: "user pressed Stop")
+    }
+
+    /// Asks for a spoken turn. The ONLY way this app requests one.
+    private func requestResponse(_ reason: String) {
+        responses.request(reason: reason)
+    }
+
+    private func syncResponseState() {
+        // Assign only on change: this runs from a 1 Hz watchdog, and an unconditional
+        // write would republish (and redraw) every second for nothing.
+        if responsePhase != responses.phase { responsePhase = responses.phase }
+        if queuedResponses != responses.queuedCount { queuedResponses = responses.queuedCount }
+    }
+
+    /// Every start, finish, cancel, timeout and recovery lands on stderr; the ones a
+    /// user could otherwise mistake for the app going silent also land in the
+    /// transcript. Routine chatter (queued/sent/started/finished) stays out of the UI.
+    private func logResponse(_ ev: ResponseCoordinator.Event) {
+        FileHandle.standardError.write(Data("[response] \(ev.line)\n".utf8))
+        switch ev.kind {
+        case .cancelRequested, .timedOut, .dropped, .recovered:
+            transcript.append(TranscriptItem(speaker: .system, text: "Response \(ev.kind.rawValue): \(ev.detail)"))
+        case .sent, .queued, .held, .started, .finished, .reset, .ignored:
+            break
+        }
+    }
+
+    private func startResponseWatchdog() {
+        stopResponseWatchdog()
+        let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.responses.tick()
+                // Same cadence, same reason: something that was promised and has not
+                // happened. A live session is the only time a placeholder can exist.
+                self?.sweepPendingTranscripts()
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        responseWatchdog = t
+    }
+
+    private func stopResponseWatchdog() {
+        responseWatchdog?.invalidate()
+        responseWatchdog = nil
+    }
+
+    // MARK: - Events
+
+    private func handle(_ ev: RealtimeEvent) {
+        switch ev {
+        case .sessionCreated(let id):
+            sessionID = id
+            connection = .live
+            frameItemIDs.removeAll()
+            // The API's id is recorded against the conversation rather than becoming
+            // its name. Reconnecting continues the same conversation — before this, a
+            // dropped socket silently started a second transcript file mid-sentence.
+            conversation.link(realtimeSession: id)
+            startSummaryClock()
+            cost.startSession()
+            client.sendSessionUpdate(settings, nativeTools: tools.realtimeTools())
+            // A fresh conversation has no response running, whatever the last one left
+            // behind — and this is the point where a stale queued request must not
+            // survive into the new session.
+            responses.reset(reason: "session \(id) created")
+            startResponseWatchdog()
+            note("Live · session \(id)")
+            deliverPendingOutreach()
+            syncScreenTimer()
+
+        case .responseStarted(let id):
+            responses.responseCreated(id: id)
+            // A new response is a new thing to say, so whatever was being suppressed
+            // from the interrupted one no longer applies.
+            interruptedResponseIsMute = false
+
+        case .sessionUpdated:
+            break
+
+        case .speechStarted:
+            userSpeaking = true
+            // A new utterance supersedes any fragment thrown away by a mute, whether or
+            // not the server ever got round to closing it. Without this the flag could
+            // outlive the event it was set for and swallow the end of a real turn.
+            discardedUtteranceOnMute = false
+            utterance.begin()
+            // Barge-in. The server already truncates its own response because
+            // turn_detection.interrupt_response is true, so sending response.cancel
+            // here just races it ("Cancellation failed: no active response found").
+            // All we owe the user is dropping the audio still queued locally.
+            if audio.isPlayingAudio {
+                audio.flushPlayback()
+                closeAssistantTurn()
+                // Flushing empties the queue; it does not stop the socket. The server
+                // truncates the response, but the audio it had already put on the wire
+                // keeps arriving for a moment afterwards, and enqueueing that is why
+                // the assistant appeared to carry on talking over an interruption —
+                // cut off, then resuming a beat later. Everything left from the
+                // interrupted response is dropped until the next one begins.
+                interruptedResponseIsMute = true
+            }
+            // Server VAD is about to open a turn of its own for this utterance, so
+            // nothing we have queued may go out until that has been and gone.
+            responses.userSpeechStarted()
+
+        case .speechStopped:
+            userSpeaking = false
+            // The user muted mid-sentence, so this is the server acknowledging an
+            // utterance that was already thrown away at both ends. Opening a transcript
+            // line for it would leave an empty pending bubble waiting forever on words
+            // that were deliberately never sent.
+            if discardedUtteranceOnMute {
+                discardedUtteranceOnMute = false
+                responses.userSpeechStopped()
+                return
+            }
+            // Parked until the transcript for this utterance arrives, which is a
+            // separate event and usually about a second later.
+            pendingUtteranceAudio = utterance.end()
+            // The line goes on screen NOW, stamped with when they actually started
+            // talking. Waiting for the words would put the user's turn below the reply
+            // to it — the model starts answering long before the transcription lands.
+            openPendingUserLine(at: pendingUtteranceAudio?.startedAt ?? Date())
+            responses.userSpeechStopped()
+
+        case .userTranscript(let t):
+            let clean = t.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Seeing your own words is half the value: a misheard sentence explains an
+            // answer to a question you did not ask.
+            captions.say(.user, clean, done: true)
+            // The time they SPOKE, not the time the words arrived. This is what puts the
+            // line in the right place both on screen and in the file — the two used to
+            // disagree, because the screen ordered by arrival and the file by timestamp.
+            let spokenAt = pendingUtteranceAudio?.startedAt ?? pendingUserLineAt ?? Date()
+            if clean.isEmpty {
+                // The utterance was heard and held no words. Whatever is on screen for it
+                // must be closed out — this is one of the two ways the placeholder ends.
+                resolvePendingUserLine(unheard: "nothing was said in that one")
+            } else {
+                // The durable record first, because it is the one that can be refused:
+                // whatever comes back is what was actually kept, redactions and all.
+                let entry = conversation.record(speaker: .user,
+                                                text: clean,
+                                                source: .realtimeAPI,
+                                                audio: pendingUtteranceAudio,
+                                                at: spokenAt)
+                commitPendingUserLine(text: clean, at: spokenAt, entryID: entry?.id)
+                lastUserSaid = clean
+                reconsiderDevOffer()
+            }
+            pendingUtteranceAudio = nil
+
+        case .userTranscriptFailed(let why):
+            // The other way it ends. Without this the placeholder waits out the whole
+            // watchdog for an event that has already been and gone.
+            resolvePendingUserLine(unheard: "that one could not be transcribed")
+            FileHandle.standardError.write(Data("[transcript] user transcription failed: \(why)\n".utf8))
+            pendingUtteranceAudio = nil
+
+        case .assistantDelta(let d):
+            if let id = assistantItemID, let i = transcript.firstIndex(where: { $0.id == id }) {
+                transcript[i].text += d
+                // `done: true` on every delta looks wrong and is not: the flag starts the
+                // linger clock, and each delta restarts it. A reply therefore stays up
+                // while it streams and disappears a few seconds after the last word,
+                // without needing to be told the turn ended.
+                captions.say(.assistant, transcript[i].text, done: true)
+            } else {
+                captions.say(.assistant, d, done: true)
+                let item = TranscriptItem(speaker: .assistant, text: d, streaming: true,
+                                          sessionID: currentSessionID)
+                insertOrdered(item)
+                assistantItemID = item.id
+            }
+
+        case .responseDone(let status):
+            closeAssistantTurn()
+            assistantTurns += 1
+            reconsiderDevOffer()
+            // Releases the lock and flushes at most one deferred request. Runs for every
+            // status, including cancelled and failed — a response that ends badly still
+            // ends, and treating it as still-running is what leaves the app mute.
+            responses.responseFinished(status: status)
+
+        case .audio(let pcm):
+            // In flight when the user interrupted — see `.speechStarted`. Not recorded
+            // either: it was never heard, and a recording of what was not heard is the
+            // thing the speaker capture exists to stop producing.
+            guard !interruptedResponseIsMute else { break }
+            audio.enqueue(pcm16: pcm)
+            recorder.appendAssistant(pcm)
+
+        case .toolCall(let callID, let name, let argumentsJSON):
+            handleToolCall(callID: callID, name: name, argumentsJSON: argumentsJSON)
+
+        case .usage(let u):
+            cost.add(usage: u, rates: Rates.of(settings.model))
+
+        case .imageItemCreated(let id):
+            frameItemIDs.append(id)
+            let keep = settings.maxScreenFrames
+            guard keep > 0 else { break }
+            // Evict oldest frames. Every frame left in context is re-billed as image
+            // tokens on EVERY later turn, so an unbounded history makes a long session
+            // cost far more than the frame count suggests.
+            while frameItemIDs.count > keep {
+                client.deleteItem(id: frameItemIDs.removeFirst())
+            }
+
+        case .apiError(let msg):
+            // Response-lifecycle errors are ours to repair, not the user's to read. The
+            // coordinator re-takes the lock (or releases it) and re-queues whatever was
+            // rejected; only errors it does not recognise reach the banner.
+            if responses.apiError(msg) {
+                note("Handled a response-lifecycle error: \(msg)")
+            } else {
+                note("API error: \(msg)")
+                let action = BannerAction.forAPIError(msg)
+                // Don't let the socket dying on top of a real cause overwrite it.
+                if terminalCause != nil && action == nil && Self.isTransportNoise(msg) {
+                    break
+                }
+                // Out-of-credit is the error that actually stops a session, and the raw
+                // API text does not tell you where to fix it. Offer the page directly.
+                let friendly = BannerAction.explanation(for: msg) ?? msg
+                if action != nil || terminalCause == nil {
+                    terminalCause = (friendly, action)
+                }
+                bannerAction = action ?? bannerAction
+                banner = friendly
+            }
+
+        case .closed(let why):
+            // Prefer the cause we already know over the symptom the socket reports.
+            let reason = terminalCause?.message
+                ?? (Self.isTransportNoise(why) ? "The connection dropped." : why)
+            if let c = terminalCause {
+                banner = c.message
+                bannerAction = c.action ?? bannerAction
+            }
+            if case .live = connection {
+                connection = .error(reason)
+            } else if case .connecting = connection {
+                connection = .error(reason)
+            }
+            audio.stop()
+            stopScreenTimer()
+            stopDevNarration()
+            stopResponseWatchdog()
+            // Same close-out as a deliberate disconnect: a dropped socket ends the
+            // conversation just as thoroughly, and leaving the clock ticking would keep
+            // summarising a session that is over.
+            summaries.summarizeSession(currentSessionID)
+            stopSummaryClock()
+            utterance.discard()
+            pendingUtteranceAudio = nil
+            // Whatever the model had said so far is still what it said. Recording it
+            // here is the difference between a dropped connection costing half a
+            // sentence and costing the whole turn.
+            closeAssistantTurn()
+            // The transcription for the utterance in flight is coming down a socket that
+            // no longer exists. Nothing else will ever close that line.
+            resolveAllPending(reason: "the connection dropped")
+            responses.reset(reason: "socket closed: \(why)")
+            cost.endSession()
+        }
+    }
+
+    // MARK: - Dev Mode
+
+    /// Answers the tool call IMMEDIATELY, then does the work in the background.
+    ///
+    /// Claude Code routinely takes minutes. Blocking here would leave the voice session
+    /// in dead silence for the whole run — so the model is told "dispatched" right away
+    /// (it says "on it"), and the finished result is filed later as a new turn, which
+    /// makes it announce the outcome unprompted.
+    private func handleToolCall(callID: String, name: String, argumentsJSON: String) {
+        // Dev Mode gates ONLY the Claude Code dispatcher — native tools are unrelated
+        // to it and must keep working with Dev Mode off.
+        guard settings.devMode || tools.spec(name) != nil else {
+            client.sendToolOutput(callID: callID,
+                                  output: ["status": "refused", "reason": "Dev Mode is off."])
+            requestResponse("tool-refused")
+            return
+        }
+        // Native tools return fast enough to answer in this same turn, so there is no
+        // dispatch-and-report-back dance — just run it and hand back the result.
+        if let spec = tools.spec(name) {
+            let args = (try? JSONSerialization.jsonObject(with: Data(argumentsJSON.utf8))) as? [String: Any] ?? [:]
+            note("tool \(name)")
+            Task { @MainActor in await self.runNativeTool(spec: spec, name: name,
+                                                          args: args, callID: callID) }
+            return
+        }
+
+        guard name == "dispatch_to_claude_code" else {
+            client.sendToolOutput(callID: callID,
+                                  output: ["status": "error", "reason": "Unknown tool \(name)."])
+            requestResponse("tool-unknown")
+            return
+        }
+        dispatchToClaudeCode(callID: callID, argumentsJSON: argumentsJSON)
+    }
+
+    // MARK: - Native tools, and what to do when one is slow
+
+    /// Runs a native tool and answers the call — in this turn if it is quick, and with a
+    /// holding line if it is not.
+    ///
+    /// The model is mute from the moment it calls a tool until the output comes back. A
+    /// clipboard read is invisible; a `web_search` or a cold Notion read is four seconds
+    /// of a conversation where the assistant appears to have hung up. So the work is
+    /// raced against `SlowToolPolicy.budget`, and a tool that loses gets the same
+    /// treatment Dev Mode already gives a Claude Code run: answer now, report back later.
+    ///
+    /// A tool that has been slow twice this session skips the race entirely — the holding
+    /// line goes out immediately, so the second slow Notion read costs no silence at all.
+    private func runNativeTool(spec: ToolSpec, name: String,
+                               args: [String: Any], callID: String) async {
+        let started = Date()
+        let work = Task { @MainActor in await self.nativeToolResult(name, args: args) }
+
+        let budget = SlowToolPolicy.budget(for: name)
+        let quick: String?
+        if !SlowToolPolicy.canBeSlow(name) {
+            // Answered from memory or a file read. Racing it against a clock would cost
+            // more than it could ever save.
+            quick = await work.value
+        } else if toolLatency.expectsSlow(name, budget: budget) {
+            quick = nil
+        } else {
+            quick = await firstResult(of: work, within: budget)
+        }
+
+        if let result = quick {
+            toolLatency.record(name, seconds: Date().timeIntervalSince(started))
+            transcript.append(TranscriptItem(
+                speaker: .system, text: "⚒ \(spec.summary): \(result.prefix(160))"))
+            client.sendToolOutput(callID: callID, output: ["status": "ok", "result": result])
+            requestResponse("native-tool-\(name)")
+            return
+        }
+
+        // Still going. Hand the turn back so the model can say four words, and file the
+        // real answer when it arrives.
+        transcript.append(TranscriptItem(speaker: .system, text: "⏳ \(spec.summary): still going…"))
+        client.sendToolOutput(callID: callID,
+                              output: ["status": "working", "note": SlowToolPolicy.holdingNote(for: name)])
+        requestResponse("native-tool-slow-\(name)")
+
+        let result = await work.value
+        let took = Date().timeIntervalSince(started)
+        toolLatency.record(name, seconds: took)
+        transcript.append(TranscriptItem(
+            speaker: .system, text: "⚒ \(spec.summary) (\(String(format: "%.1f", took))s): \(result.prefix(160))"))
+
+        // The socket can die while a tool is still out. Filing into a dead session would
+        // throw, and the result is not worth reconnecting for.
+        guard case .live = connection else {
+            note("\(name) came back after the session ended; not filing it.")
+            return
+        }
+        client.sendSystemNote(SlowToolPolicy.lateNote(tool: spec.summary, result: result))
+        requestResponse("native-tool-late-\(name)")
+    }
+
+    /// The result if it lands inside `seconds`, otherwise nil — and `work` keeps running
+    /// either way, because the answer is still wanted, just no longer in this turn.
+    private func firstResult(of work: Task<String, Never>, within seconds: TimeInterval) async -> String? {
+        await withTaskGroup(of: String?.self) { group in
+            group.addTask { await work.value }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            // Cancels the sleeper, or the wait on `work` — never `work` itself, which is
+            // a handle to a task this group does not own.
+            group.cancelAll()
+            return first
+        }
+    }
+
+    /// Every native tool, in one place. Returns the line that is about to be spoken.
+    private func nativeToolResult(_ name: String, args: [String: Any]) async -> String {
+        let result: String
+        switch name {
+        case "stop_task":
+            result = await self.cancelTask((args["task_id"] as? String) ?? "")
+        case "undo_task":
+            result = self.undoTask((args["task_id"] as? String) ?? "")
+        case "set_queue_paused":
+            result = self.setQueuePaused((args["paused"] as? Bool) ?? true)
+        case "summarize_conversation":
+            result = self.summarizeSessionNow(showPanel: false)
+        case "change_setting":
+            result = self.changeSetting(name: args["setting"] as? String ?? "",
+                                        to: args["value"] as? String ?? "")
+        case "open_settings":
+            result = self.openSettings(tab: args["tab"] as? String)
+        case "go_to_sleep":
+            result = self.goToSleep()
+        case "memory_status":
+            result = self.conversation.spokenStatus
+        case "stop_transcript":
+            result = self.setTranscriptKeeping(paused: true)
+        case "resume_transcript":
+            result = self.setTranscriptKeeping(paused: false)
+        case "forget_conversation":
+            result = self.forgetThisConversation()
+        default:
+            // The recorder's transport and the camera go through the same gate
+            // the spoken route uses — a model that decides to stop a recording
+            // nobody is making is told so in the same words, and the refusal is
+            // logged the same way.
+            if let command = VoiceCommand(toolName: name) {
+                result = self.runVoiceCommand(command, from: .model)
+            } else {
+                result = await NativeTools.run(name, args: args)
+            }
+        }
+        return result
+    }
+
+    /// Hands a coding task to Claude Code, or queues it. Split out of `handleToolCall`
+    /// so the native path above reads as the fast path it is.
+    private func dispatchToClaudeCode(callID: String, argumentsJSON: String) {
+        let args = (try? JSONSerialization.jsonObject(with: Data(argumentsJSON.utf8))) as? [String: Any]
+        let instruction = (args?["task"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !instruction.isEmpty else {
+            client.sendToolOutput(callID: callID,
+                                  output: ["status": "error", "reason": "Empty task."])
+            requestResponse("tool-empty-task")
+            return
+        }
+
+        let repo = (args?["repo"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty ?? settings.devRepo
+        let label = (args?["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty ?? String(instruction.prefix(40))
+        let mode = settings.devPermissionMode
+
+        // A follow-up ("make that faster") continues an existing conversation rather
+        // than starting a fresh one that knows nothing about the earlier work.
+        let resumeID = (args?["resume_task"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        let resuming = resumeID.flatMap { devTasks.task($0) }
+
+        // Capacity and repo-exclusivity are still the registry's call — but the answer
+        // to "not now" is a queue rather than a refusal. Two runs in one checkout shred
+        // each other's builds, which is why the rule exists; making the user personally
+        // wait for the first one is not what the rule was for.
+        let blocker = devTasks.rejectionFor(repo: repo)
+        let mayStartNow: Bool
+        if let r = resuming {
+            // Continuing a task that is STILL RUNNING would put a second `claude`
+            // process under one task id — same repo, same session, both writing.
+            switch (r.status, blocker) {
+            case (.running, _):                 mayStartNow = false
+            case (_, .none):                    mayStartNow = true
+            case (_, .repoBusy(let id, _)):     mayStartNow = id == r.id
+            case (_, .atCapacity):              mayStartNow = false
+            }
+        } else {
+            mayStartNow = blocker == nil
+        }
+
+        guard mayStartNow else {
+            let request = DevTaskRequest(instruction: instruction,
+                                         permissionMode: mode,
+                                         resumeTaskID: resuming?.id)
+            let queuedTask = devTasks.enqueue(label: resuming?.label ?? label,
+                                              repo: repo,
+                                              request: request)
+            let position = devTasks.queuePosition(queuedTask.id) ?? devTasks.queued.count
+            let why = blocker?.queuedExplanation
+                ?? "\(resuming?.id ?? "That task") is still running, so this follow-up is "
+                 + "queued behind it and starts when it finishes."
+            transcript.append(TranscriptItem(
+                speaker: .system,
+                text: "⋯ \(queuedTask.id) queued #\(position) · \(label) · \(repo): \(instruction)"))
+            objectWillChange.send()
+
+            client.sendToolOutput(callID: callID, output: [
+                "status": "queued",
+                "task_id": queuedTask.id,
+                "position": position,
+                "reason": why,
+                "note": "Task \(queuedTask.id) is QUEUED at position \(position) and starts BY "
+                      + "ITSELF as soon as it can. Tell the user in one sentence that it is "
+                      + "queued and what it is waiting on. Do not offer to wait or to retry — "
+                      + "it is automatic, and it reports back when it finishes like any other "
+                      + "task. They can reorder the queue in the tasks panel."
+            ])
+            requestResponse("tool-queued")
+            return
+        }
+
+        let task: DevTask
+        if let r = resuming {
+            task = r
+            devTasks.reopen(r.id)
+            transcript.append(TranscriptItem(speaker: .system,
+                                             text: "→ \(r.id) (continuing): \(instruction)"))
+        } else {
+            task = devTasks.start(label: label, repo: repo)
+            transcript.append(TranscriptItem(speaker: .system,
+                                             text: "→ \(task.id) \(label) · \(repo): \(instruction)"))
+        }
+        objectWillChange.send()
+
+        launchDevTask(task,
+                      instruction: instruction,
+                      mode: mode,
+                      resumeSessionID: resuming?.claudeSessionID)
+
+        client.sendToolOutput(callID: callID, output: [
+            "status": "dispatched",
+            "task_id": task.id,
+            "repo": repo,
+            "note": "Task \(task.id) is now RUNNING in \(repo). It keeps running until you receive "
+                  + "a message saying it finished or failed. Other tasks may be running or queued "
+                  + "too — refer to them by id. If the user asks what is happening, answer from the "
+                  + "most recent progress note. Tell the user you're on it in a few words now."
+        ])
+        requestResponse("tool-dispatched")
+    }
+
+    /// Actually starts a job: restore point, process, progress feed, and the queue drain
+    /// that follows it.
+    ///
+    /// Split out of the tool call because it now has two callers — a dispatch that could
+    /// run immediately, and the queue starting the next task on its own minutes later.
+    /// Both need identically the same before-and-after, and a queue whose jobs skipped
+    /// the git snapshot would be a queue whose jobs cannot be undone.
+    private func launchDevTask(_ task: DevTask,
+                               instruction: String,
+                               mode: String,
+                               resumeSessionID: String?) {
+        let taskID = task.id
+        let label = task.label
+        let repo = task.repo
+
+        // Restore point BEFORE anything is touched, so "undo that" is one sentence.
+        if GitSnapshot.take(repo: repo, taskID: taskID) == nil {
+            note("\(taskID): no git repo at \(repo) — this task has no undo.")
+        }
+
+        // How to launch it: which model, how much thinking, and whether this Mac's MCP
+        // servers are worth the three seconds they cost to connect. Read from the words
+        // of the instruction, and logged, because a task that came back oddly shallow
+        // should be traceable to the plan that ran it.
+        let plan = DevTaskPlan.plan(for: instruction, fastStart: settings.devFastStart)
+        note("\(taskID) running on \(plan.summary)")
+
+        devTaskRunning = true
+        devTaskSummary = label
+        startDevNarration()
+        objectWillChange.send()
+
+        Task { [weak self] in
+            guard let self else { return }
+            let r = await self.claude.run(taskID: taskID,
+                                          task: instruction,
+                                          repo: repo,
+                                          permissionMode: mode,
+                                          plan: plan,
+                                          resumeSessionID: resumeSessionID) { step in
+                Task { @MainActor [weak self] in self?.appendDevStep(step, taskID: taskID) }
+            }
+            await MainActor.run {
+                self.devTasks.setSessionID(r.sessionID, for: taskID)
+                self.devTasks.finish(taskID, ok: r.ok, result: r.text, deniedTools: r.deniedTools)
+
+                // Record the work so it is visible beyond this Mac. Only on success:
+                // committing a failed or permission-blocked run would put a half-finished
+                // change into history and, worse, onto the remote.
+                var commitNote = ""
+                if r.ok && r.deniedTools.isEmpty && self.settings.devAutoCommit {
+                    let out = GitCommitter.commitTaskChanges(
+                        repo: repo, taskID: taskID, label: label,
+                        summary: r.text, push: self.settings.devAutoPush)
+                    if out.committed {
+                        commitNote = " " + out.note
+                        self.transcript.append(TranscriptItem(
+                            speaker: .system,
+                            text: "⎇ \(taskID): \(out.note)"
+                                + (out.branchRef.map { " · \($0)" } ?? "")))
+                    } else if out.note != "task changed nothing" {
+                        self.transcript.append(TranscriptItem(
+                            speaker: .system, text: "⎇ \(taskID): not committed — \(out.note)"))
+                    }
+                }
+                self.devTasks.pruneFinished()
+                if let c = r.costUSD { self.cost.addClaudeCode(c) }
+
+                let mark = r.deniedTools.isEmpty ? (r.ok ? "✓" : "✗") : "⚠︎"
+                self.transcript.append(TranscriptItem(
+                    speaker: .system, text: "\(mark) \(taskID) \(label): " + r.text))
+
+                // Worth interrupting for: a job the user asked for by voice, minutes ago,
+                // has an answer. Whether it is actually said now is `Outreach`'s call.
+                if self.settings.proactive {
+                    let outcome = r.deniedTools.isEmpty
+                        ? (r.ok ? "finished" : "failed")
+                        : "stopped and needs permission"
+                    self.outreach.raise("the task \(label) \(outcome). \(r.text)")
+                }
+
+                // The freed repo (or slot) is exactly what the queue was waiting for, so
+                // the next job starts here — before the summary of what just happened is
+                // written, so that summary can say what is running now.
+                let started = self.startQueuedTasks()
+
+                let still = self.devTasks.running
+                self.devTaskRunning = !still.isEmpty
+                self.devTaskSummary = still.first?.label
+                if still.isEmpty { self.stopDevNarration(); self.devStepBuffer.removeAll() }
+
+                var note: String
+                if !r.deniedTools.isEmpty {
+                    let tools = r.deniedTools.joined(separator: ", ")
+                    note = "[Task \(taskID) (\(label)) was BLOCKED from using: \(tools). It could not "
+                        + "finish. Tell the user which tool was blocked and that they can turn on "
+                        + "auto-allow in Settings under Dev Mode, then ask if they want you to retry.] "
+                        + "Partial result: \(r.text)"
+                } else if r.ok {
+                    note = "[Task \(taskID) (\(label)) FINISHED. Result: \(r.text)"
+                        + (commitNote.isEmpty ? "" : " Git:\(commitNote).")
+                        + "] Tell the user what changed, in one or two sentences. If it was "
+                        + "committed and pushed, say so in a few words. Name the task if "
+                        + "others are still running."
+                } else {
+                    note = "[Task \(taskID) (\(label)) FAILED. Error: \(r.text)] Tell the user it failed "
+                        + "and why, briefly."
+                }
+                if !started.isEmpty {
+                    note += " The queue moved on by itself: "
+                        + started.map { "\($0.id) (\($0.label))" }.joined(separator: ", ")
+                        + " just started. Mention that in a few words."
+                }
+                let waiting = self.devTasks.queued
+                if !waiting.isEmpty {
+                    note += " Still queued: " + waiting.map(\.id).joined(separator: ", ") + "."
+                }
+                if !still.isEmpty {
+                    note += " Still running: " + still.map { "\($0.id) (\($0.label))" }.joined(separator: ", ") + "."
+                }
+                self.client.sendSystemNote(note)
+                self.requestResponse("claude-code-finished")
+                self.objectWillChange.send()
+            }
+        }
+    }
+
+    /// Starts every queued task that may now run, and returns the ones that did.
+    ///
+    /// The registry decides what "may run" means — one job per repo, `maxConcurrent`
+    /// overall — so this cannot start a second job in a checkout however it is called.
+    @discardableResult
+    private func startQueuedTasks() -> [DevTask] {
+        var started: [DevTask] = []
+        while let next = devTasks.startNextQueued() {
+            guard let request = next.request else {
+                // Cannot happen through `enqueue`, and if it ever did, a task stuck in
+                // `running` with nothing running would be far worse than a failure.
+                devTasks.finish(next.id, ok: false, result: "Lost what this task was meant to do.")
+                continue
+            }
+            let resumeSession = request.resumeTaskID.flatMap { devTasks.task($0)?.claudeSessionID }
+            transcript.append(TranscriptItem(
+                speaker: .system,
+                text: "▶ \(next.id) \(next.label) · \(next.repo): starting (was queued)"))
+            launchDevTask(next,
+                          instruction: request.instruction,
+                          mode: request.permissionMode,
+                          resumeSessionID: resumeSession)
+            started.append(next)
+        }
+        if !started.isEmpty { objectWillChange.send() }
+        return started
+    }
+
+    /// Reorders the queue. `-1` is sooner, `+1` is later.
+    func moveQueuedTask(_ id: String, by delta: Int) {
+        guard devTasks.moveQueued(id, by: delta) else { return }
+        objectWillChange.send()
+    }
+
+    /// Appends one live Claude Code step to the transcript, collapsing consecutive
+    /// duplicates so a tool called repeatedly does not spam the view.
+    private func appendDevStep(_ label: String, taskID: String) {
+        devTasks.addStep(label, to: taskID)
+        devTaskSummary = label
+        objectWillChange.send()
+        let line = "   · \(taskID) " + label
+        if let last = transcript.last, last.speaker == .system, last.text == line { return }
+        transcript.append(TranscriptItem(speaker: .system, text: line))
+        // Buffered rather than sent per-step: Claude Code emits steps in bursts, and one
+        // conversation item per step would flood the session for no benefit.
+        devStepBuffer.append(label)
+    }
+
+    /// Starts the progress feed for a Claude Code run.
+    ///
+    /// Two separate things happen here, and keeping them separate is the point:
+    ///
+    /// - Every step is filed into the conversation as SILENT context (no response
+    ///   requested). That costs a handful of text tokens and means the model can answer
+    ///   "what are you doing?" at any moment, instead of knowing nothing until the run
+    ///   ends.
+    /// - Only every `devNarrateInterval` does it additionally ask for a spoken turn.
+    ///   Each spoken update is real audio output, so this is the cost dial, and
+    ///   `devNarrateMax` caps how many a single long task can produce.
+    private func startDevNarration() {
+        stopDevNarration()
+        devStepBuffer.removeAll()
+        devSpokenUpdates = 0
+        lastNarrationAt = Date()
+
+        let t = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.flushDevSteps() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        devNarrateTimer = t
+    }
+
+    private func stopDevNarration() {
+        devNarrateTimer?.invalidate()
+        devNarrateTimer = nil
+    }
+
+    private func flushDevSteps() {
+        guard devTaskRunning, case .live = connection, !devStepBuffer.isEmpty else { return }
+
+        // Keep the note short — the last few steps are what matter, not the whole log.
+        let live = devTasks.running
+        let prefix = live.count > 1
+            ? "(" + live.map { "\($0.id) \($0.label)" }.joined(separator: ", ") + ") "
+            : ""
+        let steps = prefix + devStepBuffer.suffix(6).joined(separator: "; ")
+        devStepBuffer.removeAll()
+
+        let elapsed = Date().timeIntervalSince(lastNarrationAt)
+        // A progress update is the least important thing on this socket, so unlike a
+        // finished result it is NOT queued behind a running response — if the model is
+        // already talking, this update simply becomes silent context and the next one
+        // gets its chance. `responses.isBusy` covers the create-in-flight window too,
+        // which a plain "is a response streaming" flag does not.
+        let maySpeak = settings.devNarrate
+            && devSpokenUpdates < settings.devNarrateMax
+            && elapsed >= settings.devNarrateInterval
+            && !userSpeaking          // never talk over the user
+            && !responses.isBusy
+            && !responses.hasQueuedRequest
+
+        if maySpeak {
+            devSpokenUpdates += 1
+            lastNarrationAt = Date()
+            client.sendSystemNote(
+                "[Claude Code is STILL RUNNING. Latest steps: \(steps)] Give the user a "
+                + "one-sentence update on what it is doing right now. Plain language, no file "
+                + "paths, no code. Do not repeat an earlier update.")
+            requestResponse("claude-code-progress")
+        } else {
+            // Context only. The model now knows, and will say so if asked.
+            client.sendSystemNote(
+                "[Claude Code is STILL RUNNING. Latest steps: \(steps)] "
+                + "Context only — do not reply to this message.")
+        }
+    }
+
+    // MARK: - Putting a line in the transcript
+
+    /// Adds a line where its timestamp says it belongs.
+    ///
+    /// Everything that reaches the transcript goes through here. Appending was only ever
+    /// right because every line happened to be stamped `now` at the moment it was
+    /// appended — and the user's own words are the one thing that is not: they are
+    /// stamped when they were spoken and arrive a second or two later, by which time the
+    /// reply to them may already be on screen.
+    private func insertOrdered(_ item: TranscriptItem) {
+        let i = TranscriptOrder.insertionIndex(for: item.at, in: transcript.map(\.at))
+        transcript.insert(item, at: i)
+    }
+
+    /// Puts a line back in order after its timestamp changed under it.
+    private func settleLine(at index: Int) {
+        guard transcript.indices.contains(index) else { return }
+        guard !TranscriptOrder.isSettled(index: index, in: transcript.map(\.at)) else { return }
+        let item = transcript.remove(at: index)
+        insertOrdered(item)
+    }
+
+    // MARK: - The user's line, before its words exist
+
+    /// When the line currently waiting for a transcription says it was spoken.
+    private var pendingUserLineAt: Date? {
+        guard let id = pendingUserItemID else { return nil }
+        return transcript.first { $0.id == id }?.at
+    }
+
+    /// Shows the user's turn the instant they stop talking, with nothing in it yet.
+    ///
+    /// Skipped entirely when transcription is off: nothing will ever arrive to fill it
+    /// in, and a placeholder that is guaranteed to be abandoned is worse than no line at
+    /// all.
+    private func openPendingUserLine(at spokenAt: Date) {
+        guard settings.transcribeUser else { return }
+        // Two speech_stopped events without a transcription between them. The older line
+        // is not going to be filled in by the newer utterance's words.
+        if pendingUserItemID != nil {
+            resolvePendingUserLine(unheard: "that one was never transcribed")
+        }
+        var item = TranscriptItem(speaker: .user,
+                                  text: "",
+                                  at: spokenAt,
+                                  sessionID: currentSessionID)
+        item.pending = true
+        insertOrdered(item)
+        pendingUserItemID = item.id
+        pendingTranscripts.open(id: item.id, label: "user transcript", at: spokenAt)
+    }
+
+    /// Fills the placeholder in with what was actually said.
+    ///
+    /// Falls back to inserting a fresh line when there is no placeholder to fill —
+    /// transcription was switched on mid-session, or the watchdog gave up a moment before
+    /// the words arrived. Either way the line lands in time order rather than at the end.
+    private func commitPendingUserLine(text: String, at spokenAt: Date, entryID: UUID?) {
+        defer { pendingUserItemID = nil }
+
+        if let id = pendingUserItemID, let i = transcript.firstIndex(where: { $0.id == id }) {
+            pendingTranscripts.commit(id: id)
+            transcript[i].text = text
+            transcript[i].pending = false
+            transcript[i].unheard = false
+            transcript[i].at = spokenAt
+            transcript[i].sessionID = currentSessionID
+            transcript[i].entryID = entryID
+            settleLine(at: i)
+            return
+        }
+
+        if let id = pendingUserItemID {
+            // The ledger and the transcript disagree, which they never should: the row
+            // was removed without going through `resolvePendingUserLine`.
+            pendingTranscripts.abandon(id: id)
+            logTranscriptFault("committed a user line whose row is gone (id \(id))")
+        }
+        var item = TranscriptItem(speaker: .user,
+                                  text: text,
+                                  at: spokenAt,
+                                  sessionID: currentSessionID,
+                                  entryID: entryID)
+        item.pending = false
+        insertOrdered(item)
+    }
+
+    /// Closes out a placeholder that is never getting its words.
+    ///
+    /// The line stays. They did speak, the assistant is about to reply to whatever it
+    /// was, and deleting the row would leave an answer to a question that appears never
+    /// to have been asked.
+    private func resolvePendingUserLine(unheard reason: String) {
+        guard let id = pendingUserItemID else { return }
+        pendingUserItemID = nil
+        pendingTranscripts.abandon(id: id)
+        abandonedTranscriptUpdates = pendingTranscripts.abandonedCount
+        guard let i = transcript.firstIndex(where: { $0.id == id }) else { return }
+        // An empty placeholder becomes a visible statement of what is missing. One that
+        // somehow already has text is left alone — text on screen is never thrown away.
+        if transcript[i].text.isEmpty {
+            transcript[i].text = "…\u{2009}(\(reason))"
+            transcript[i].unheard = true
+        }
+        transcript[i].pending = false
+    }
+
+    /// Closes out every outstanding placeholder. Used when the ground moves under the
+    /// whole transcript: a disconnect, a new conversation, a session switch.
+    private func resolveAllPending(reason: String, announce: Bool = true) {
+        let stranded = pendingTranscripts.takeAll()
+        abandonedTranscriptUpdates = pendingTranscripts.abandonedCount
+        pendingUserItemID = nil
+        guard !stranded.isEmpty else { return }
+        for p in stranded {
+            guard let i = transcript.firstIndex(where: { $0.id == p.id }) else { continue }
+            if transcript[i].text.isEmpty {
+                if announce {
+                    transcript[i].text = "…\u{2009}(not transcribed — \(reason))"
+                    transcript[i].unheard = true
+                    transcript[i].pending = false
+                } else {
+                    transcript.remove(at: i)
+                }
+            } else {
+                transcript[i].pending = false
+            }
+        }
+        logTranscriptFault("\(stranded.count) transcript update(s) left unfilled — \(reason)")
+    }
+
+    /// The watchdog. Runs at 1 Hz off the response watchdog for as long as a session is
+    /// live, which is exactly as long as placeholders can exist.
+    ///
+    /// This is the backstop for the case the events cannot cover: no `completed`, no
+    /// `failed`, no close — the update was queued and simply never committed. Without it
+    /// that line blinks on screen for the rest of the session.
+    private func sweepPendingTranscripts(now: Date = Date()) {
+        let stale = pendingTranscripts.takeOverdue(now: now,
+                                                   timeout: Self.transcriptCommitTimeout)
+        guard !stale.isEmpty else { return }
+        abandonedTranscriptUpdates = pendingTranscripts.abandonedCount
+        for p in stale {
+            if p.id == pendingUserItemID { pendingUserItemID = nil }
+            logTranscriptFault(String(format: "%@ never arrived after %.1fs",
+                                      p.label, p.waited(now)))
+            guard let i = transcript.firstIndex(where: { $0.id == p.id }) else { continue }
+            if transcript[i].text.isEmpty {
+                transcript[i].text = "…\u{2009}(that one never came back transcribed)"
+                transcript[i].unheard = true
+            }
+            transcript[i].pending = false
+        }
+    }
+
+    /// One place for "the transcript did something it should not have been able to do".
+    ///
+    /// Always stderr, so it is in the log of a build somebody is running. An assertion
+    /// only when `VIBEVOICE_STRICT_TRANSCRIPT` is set: these faults are provoked by a
+    /// dropped socket as readily as by a bug, and a debug build that dies whenever the
+    /// wifi hiccups teaches people to stop running debug builds.
+    private func logTranscriptFault(_ message: String) {
+        FileHandle.standardError.write(Data("[transcript] FAULT: \(message)\n".utf8))
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["VIBEVOICE_STRICT_TRANSCRIPT"] == "1" {
+            assertionFailure("[transcript] \(message)")
+        }
+        #endif
+    }
+
+    private func closeAssistantTurn() {
+        if let id = assistantItemID, let i = transcript.firstIndex(where: { $0.id == id }) {
+            transcript[i].streaming = false
+            let said = transcript[i].text.trimmingCharacters(in: .whitespaces)
+            if said.isEmpty {
+                transcript.remove(at: i)
+            } else {
+                // Recorded once, when the turn is complete — not per delta. A barge-in
+                // closes the turn early, and the partial text is still what was spoken,
+                // so it is still the truth of the conversation.
+                let entry = conversation.record(speaker: .assistant,
+                                                text: said,
+                                                source: .assistantStream)
+                transcript[i].sessionID = currentSessionID
+                transcript[i].entryID = entry?.id
+            }
+        }
+        assistantItemID = nil
+    }
+
+    private func note(_ s: String) {
+        insertOrdered(TranscriptItem(speaker: .system, text: s, sessionID: currentSessionID))
+        FileHandle.standardError.write(Data("[app] \(s)\n".utf8))
+    }
+
+    // MARK: - Conversations
+
+    /// Every saved conversation, most recently used first.
+    var sessions: [SessionMeta] { conversation.sessions }
+
+    /// What the conversation being looked at is called.
+    var currentSessionTitle: String { conversation.currentTitle }
+
+    var currentSessionID: String { conversation.currentSessionID }
+
+    /// Titles for the switcher, with same-named conversations told apart by time.
+    var sessionTitles: [String: String] { conversation.displayTitles() }
+
+    /// Start a fresh conversation.
+    ///
+    /// Nothing is deleted and nothing is lost: the conversation being left is on disk,
+    /// in the list, and one click from being reopened exactly where it stopped.
+    ///
+    /// The socket goes down first when one is up, and that is not a technicality worth
+    /// hiding. The realtime model carries the previous conversation in its own context —
+    /// keeping the socket open across a switch would mean a conversation called "new"
+    /// that still remembers the old one, which is the kind of quiet lie that makes people
+    /// stop trusting an app. A new socket is a genuinely clean slate.
+    func newConversation() {
+        let wasLive = connection == .live || connection == .connecting
+        if wasLive { disconnect() }
+        let left = conversation.currentSessionID
+        conversation.startNewSession()
+        summaries.begin(session: conversation.currentSessionID)
+        resolveAllPending(reason: "the conversation was closed", announce: false)
+        TranscriptLog.event(.cleared, session: left,
+                            "\(TranscriptLog.lines(transcript.count)) off screen — the "
+                            + "conversation itself is saved and reopenable")
+        transcript.removeAll()
+        assistantItemID = nil
+        latestSummary = nil
+        summaryProblem = nil
+        cost.reset()
+        note(wasLive
+             ? "New conversation. The previous one is saved — hit Connect to start talking."
+             : "New conversation. The previous one is saved under its own name.")
+        objectWillChange.send()
+    }
+
+    /// Reopen a saved conversation, with its history.
+    func openConversation(_ id: String) {
+        guard id != conversation.currentSessionID else { return }
+        let wasLive = connection == .live || connection == .connecting
+        if wasLive { disconnect() }
+
+        let load = conversation.openSession(id)
+        summaries.begin(session: id)
+        summaryProblem = nil
+        cost.reset()
+
+        guard let archive = load.archive else {
+            // The file is there and would not open. Do NOT blank the screen and do NOT
+            // claim the conversation is empty — that is a lie about somebody's history.
+            // Clear what belongs to the conversation being left, say what happened, and
+            // go and read it again.
+            transcript.removeAll { $0.sessionID != nil && $0.sessionID != id }
+            assistantItemID = nil
+            note("Opening \(conversation.currentTitle) — its transcript would not open just "
+                 + "now (\(load.error ?? "read failed")). Trying again…")
+            objectWillChange.send()
+            retryLoad(session: id, reason: "openConversation")
+            return
+        }
+
+        rebuildTranscript(from: archive)
+        latestSummary = archive.summaries.last
+
+        let kept = archive.entries.filter(\.isConversational).count
+        if kept == 0 {
+            note("Opened \(conversation.currentTitle). Nothing was kept of it — check "
+                 + "Memory & privacy in Settings if you expected a transcript.")
+        } else {
+            note("Opened \(conversation.currentTitle) · \(kept) line\(kept == 1 ? "" : "s") restored."
+                 + (wasLive ? " Hit Connect to carry on out loud." : ""))
+        }
+        objectWillChange.send()
+    }
+
+    // MARK: - Re-reading a conversation
+
+    /// Reads the conversation on screen back off disk and folds in anything missing.
+    ///
+    /// Safe to call at any time, from anywhere, as many times as you like. It merges by
+    /// record id rather than replacing, so a transcript that is already complete is left
+    /// bit-for-bit alone — no reordering, no re-animating, no scroll jump — and a
+    /// transcript that is missing lines gets exactly those lines back, in the right
+    /// places. That is what makes it usable as a repair for a load that failed, as a
+    /// refresh after the files changed underneath, and as the retry the open path calls.
+    func refreshTranscript() {
+        let id = currentSessionID
+        Task { @MainActor in await reloadTranscript(session: id, reason: "refresh") }
+    }
+
+    /// The retry behind a failed open. Same merge, minus the note when it works.
+    private func retryLoad(session id: String, reason: String) {
+        Task { @MainActor in await reloadTranscript(session: id, reason: reason, announce: true) }
+    }
+
+    private func reloadTranscript(session id: String,
+                                  reason: String,
+                                  announce: Bool = false) async {
+        let load = await conversation.reloadArchive(for: id)
+        // The user can switch conversations while the disk is being read. Whatever came
+        // back describes a conversation they are no longer looking at.
+        guard id == currentSessionID else {
+            FileHandle.standardError.write(
+                Data("[transcript] \(reason): dropped a load for \(id) — moved on\n".utf8))
+            return
+        }
+        switch load {
+        case .loaded(let archive):
+            let added = mergeTranscript(from: archive, session: id)
+            conversation.log.restore(entries: archive.entries, summaries: archive.summaries)
+            if let last = archive.summaries.last { latestSummary = last }
+            if added > 0 {
+                note("Restored \(added) line\(added == 1 ? "" : "s") from the saved transcript.")
+            } else if announce {
+                note("Read \(conversation.currentTitle) back — everything was already here.")
+            }
+            objectWillChange.send()
+        case .missing:
+            if announce {
+                note("There is no saved transcript for this conversation.")
+            }
+        case .failed(let why):
+            // Every attempt is spent. Say so once, in the transcript, rather than
+            // retrying forever behind the user's back.
+            logTranscriptFault("\(reason): could not read \(id) — \(why)")
+            note("Could not read the saved transcript (\(why)). What is on screen is "
+                 + "still here; the file has not been touched.")
+            objectWillChange.send()
+        }
+    }
+
+    /// Folds a conversation read off disk into what is already on screen.
+    ///
+    /// Matched on the durable record id, so a line that is already showing keeps the
+    /// identity it has — SwiftUI does not re-create the row, the scroll position holds,
+    /// and a streaming line in progress is not disturbed. Lines that only ever existed
+    /// on screen (system notes, Claude Code steps, the placeholder waiting for its
+    /// words) are never removed: the file does not know about them, and treating the
+    /// file as the whole truth would delete them on every refresh.
+    ///
+    /// - Returns: how many lines were actually put back.
+    @discardableResult
+    private func mergeTranscript(from archive: ConversationArchive.Archive,
+                                 session id: String) -> Int {
+        let known = Set(transcript.compactMap(\.entryID))
+        var added = 0
+
+        for entry in archive.entries where !known.contains(entry.id) {
+            insertOrdered(TranscriptItem(speaker: entry.speaker.asSpeaker,
+                                         text: entry.text,
+                                         at: entry.at,
+                                         sessionID: entry.sessionID,
+                                         entryID: entry.id))
+            added += 1
+        }
+
+        // Summaries have no record id on the view model, so they are matched on what
+        // actually identifies one: when it was written and what it says.
+        let seenSummaries = Set(transcript.filter { $0.speaker == .system }
+                                          .map { "\($0.at.timeIntervalSince1970)|\($0.text)" })
+        for summary in archive.summaries {
+            let text = "\u{270E} summary: " + summary.text
+            let key = "\(summary.createdAt.timeIntervalSince1970)|\(text)"
+            guard !seenSummaries.contains(key) else { continue }
+            insertOrdered(TranscriptItem(speaker: .system,
+                                         text: text,
+                                         at: summary.createdAt,
+                                         sessionID: summary.sessionID))
+            added += 1
+        }
+
+        if !TranscriptOrder.isOrdered(transcript.map(\.at)) {
+            logTranscriptFault("transcript is out of order after merging \(id)")
+            transcript.sort { $0.at < $1.at }
+        }
+        return added
+    }
+
+    /// The user's own name for a conversation. An empty string gives the title back to
+    /// the generator rather than leaving a blank row.
+    func renameConversation(_ id: String, to title: String) {
+        conversation.rename(session: id, to: title)
+        objectWillChange.send()
+    }
+
+    /// Deletes one conversation outright — memory, file and row.
+    ///
+    /// Deleting the one being looked at leaves the user somewhere, which has to be a new
+    /// conversation rather than nowhere.
+    func deleteConversation(_ id: String) {
+        let wasCurrent = id == conversation.currentSessionID
+        let dropped = conversation.forget(session: id)
+        if wasCurrent {
+            newConversation()
+            note(dropped > 0
+                 ? "Deleted that conversation — \(dropped) line\(dropped == 1 ? "" : "s") and the file with them."
+                 : "Deleted that conversation.")
+        } else {
+            transcript.removeAll { $0.sessionID == id }
+            objectWillChange.send()
+        }
+    }
+
+    /// Rebuilds the on-screen transcript from a conversation read back off disk.
+    ///
+    /// Summaries are put back in the flow at the point they were written, exactly as
+    /// they appeared live — a recap that only exists in the panel after a restart, when
+    /// it was in the transcript before one, would be a history that does not match what
+    /// the user remembers seeing.
+    private func rebuildTranscript(from archive: ConversationArchive.Archive) {
+        assistantItemID = nil
+        resolveAllPending(reason: "the conversation was switched", announce: false)
+
+        var items: [TranscriptItem] = archive.entries.map { entry in
+            TranscriptItem(speaker: entry.speaker.asSpeaker,
+                           text: entry.text,
+                           at: entry.at,
+                           sessionID: entry.sessionID,
+                           entryID: entry.id)
+        }
+        items += archive.summaries.map { summary in
+            TranscriptItem(speaker: .system,
+                           text: "\u{270E} summary: " + summary.text,
+                           at: summary.createdAt,
+                           sessionID: summary.sessionID)
+        }
+        transcript = items.sorted { $0.at < $1.at }
+    }
+
+    /// Which conversation to be in on launch. See `AppSettings.resumeLastSession` for
+    /// what the two answers mean and why the default is the one it is.
+    private func restoreSessionOnLaunch() {
+        // A pinned conversation is reopened whether or not "pick up where I left off" is
+        // on: pinning is the more specific instruction, and it was given about this
+        // conversation rather than about launches in general.
+        let last = conversation.mostRecentSession
+        if settings.resumeLastSession || last?.pinned == true, let last {
+            let load = conversation.openSession(last.id)
+            if let archive = load.archive {
+                rebuildTranscript(from: archive)
+                latestSummary = archive.summaries.last
+                let kept = archive.entries.filter(\.isConversational).count
+                TranscriptLog.event(.restored, session: last.id,
+                                    "launch · \(TranscriptLog.lines(archive.entries.count)) on screen"
+                                    + (last.pinned ? " · pinned" : ""))
+                note("Picking up \(conversation.currentTitle) · \(kept) line\(kept == 1 ? "" : "s") restored."
+                     + (last.pinned ? " Pinned, so it is what opens." : ""))
+            } else {
+                // A transcript that would not open on launch is the worst moment to give
+                // up on: there is nothing on screen for the user to fall back to.
+                note("Picking up \(conversation.currentTitle) — reading its transcript…")
+                retryLoad(session: last.id, reason: "launch")
+            }
+        }
+        summaries.begin(session: conversation.currentSessionID)
+    }
+
+    // MARK: - Conversation memory
+
+    /// Ticks the summariser. Slow on purpose — `SummaryJob` decides whether anything is
+    /// due, and the answer is almost always no, so this only has to be often enough that
+    /// a summary is not noticeably late.
+    private func startSummaryClock() {
+        stopSummaryClock()
+        let t = Timer(timeInterval: 15, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                // Never summarise into the middle of a turn: it competes for the moment
+                // the app should be listening, and the last line is usually incomplete.
+                let busy = self.userSpeaking || self.isResponding || self.audio.isPlayingAudio
+                self.summaries.tick(busy: busy)
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        summaryTimer = t
+    }
+
+    private func stopSummaryClock() {
+        summaryTimer?.invalidate()
+        summaryTimer = nil
+    }
+
+    /// A finished summary: onto the screen, into the note, and back into the model's
+    /// context so it can refer to what was said an hour ago without the whole history
+    /// still being on the wire.
+    private func handleSummary(_ summary: ConversationSummary, _ delivery: SummaryService.Delivery) {
+        var line = "✎ summary: " + summary.text
+        if let receipt = delivery.noteReceipt { line += " (" + receipt + ")" }
+        // Leaving a conversation writes one last summary of it, and that summary can land
+        // after the user is already looking at a different one. It belongs in the file it
+        // names and in the panel either way — but not on screen in a conversation it is
+        // not about.
+        // Only the recap goes on screen.
+        //
+        // The rolling summaries are context compression: they exist so the model can
+        // refer to an hour ago without the whole history still being on the wire. Every
+        // one of them was also being printed into the transcript, so a long conversation
+        // filled up with summaries of itself — the thing the user is reading, interrupted
+        // every few minutes by a paraphrase of what they just said. They still run, they
+        // are still filed, they are still in the panel; they just stop shouting.
+        if summary.sessionID == currentSessionID {
+            if delivery.isFinal {
+                transcript.append(TranscriptItem(speaker: .system, text: line,
+                                                 sessionID: summary.sessionID))
+            }
+            latestSummary = summary
+        }
+        summaryProblem = nil
+        isSummarizing = summaries.isSummarizing
+
+        // A fresh summary is the best material a title will ever have, so retitle from it.
+        // Only while the title is still auto-generated: renaming a conversation the user
+        // named themselves would be the app outvoting its owner.
+        retitleFromSummary(sessionID: summary.sessionID, summary: summary.text)
+
+        // Context only — filed WITHOUT asking for a spoken turn. A summary that made the
+        // assistant start talking unprompted every few minutes would be a worse app.
+        if delivery.fileIntoChat, case .live = connection {
+            client.sendSystemNote(
+                "[Running summary of this conversation so far: \(summary.text)] "
+                + "Context only — do not reply to this message.")
+        }
+        objectWillChange.send()
+    }
+
+    // MARK: - The summary panel
+
+    /// The session the Summary button acts on: the live one, or the last one recorded.
+    var summarySession: String? { conversation.summarizableSessionID }
+
+    /// Every summary held this launch, newest first. Not filtered to the current session
+    /// on purpose — the reason to open this panel is usually to re-read the recap of a
+    /// conversation that has already ended.
+    /// The summaries of the conversation the panel says it is showing.
+    ///
+    /// This was `allSummaries` — every summary ever written, across every session. The
+    /// panel header is scoped correctly ("This conversation · 24 turns · sess_…"), so the
+    /// header named one conversation while the list underneath showed all of them. Start
+    /// a new conversation, open Summary, and the previous one's notes were still sitting
+    /// there, which is exactly the kind of thing that makes someone stop trusting what an
+    /// app tells them.
+    /// Names a conversation from its summary, in the background.
+    ///
+    /// Deliberately fire-and-forget: a title is worth having and never worth waiting for,
+    /// and the deterministic one is already in place, so a failure here changes nothing
+    /// the user can see.
+    private func retitleFromSummary(sessionID: String, summary: String) {
+        guard conversation.titleIsAuto(session: sessionID) else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let entries = self.conversation.entries(inSession: sessionID)
+            guard let title = await ModelTitler.title(summary: summary, entries: entries) else { return }
+            guard self.conversation.titleIsAuto(session: sessionID) else { return }  // renamed while we asked
+            self.conversation.setGeneratedTitle(title, session: sessionID)
+            self.objectWillChange.send()
+        }
+    }
+
+    var visibleSummaries: [ConversationSummary] {
+        guard let id = summarySession else { return [] }
+        return conversation.allSummaries.filter { $0.sessionID == id }
+    }
+
+    /// Enough has been said to be worth summarising, and the user is not mid-sentence.
+    var canSummarizeSession: Bool {
+        guard !isSummarizing, !userSpeaking, let id = summarySession else { return false }
+        return conversation.conversationalCount(inSession: id) >= SummaryJob.minimumForRecap
+    }
+
+    var summaryButtonHelp: String {
+        if isSummarizing { return "Writing a summary of this conversation…" }
+        if userSpeaking { return "Finish what you're saying and it'll summarise the whole thing." }
+        if settings.privacy.paused {
+            return "Recording is paused, so there's nothing kept to summarise. Turn it back on in Settings."
+        }
+        guard let id = summarySession,
+              conversation.conversationalCount(inSession: id) >= SummaryJob.minimumForRecap else {
+            return "Talk for a bit first — there's nothing to summarise yet."
+        }
+        return "Summarise this conversation, save it as a note, and keep it here to re-read."
+    }
+
+    /// "Summarise what we've been talking about" — the button, and the spoken request.
+    ///
+    /// One implementation for both, so the two can never disagree about what "this
+    /// conversation" means. Answers immediately; the summary itself lands a moment later
+    /// through `handleSummary`.
+    ///
+    /// - Parameter showPanel: the button opens the panel, because "nothing happened" is
+    ///   a worse answer than a panel saying why. A spoken request does not: the answer
+    ///   is going to be read aloud, and a sheet appearing over an ambient scene because
+    ///   somebody said a sentence is the app interrupting itself.
+    @discardableResult
+    func summarizeSessionNow(showPanel: Bool = true) -> String {
+        if showPanel { showSummary = true }
+        guard let id = summarySession else {
+            summaryProblem = "Nothing has been recorded yet, so there's nothing to summarise."
+            return summaryProblem!
+        }
+        let said = summaries.summarizeSession(id)
+        isSummarizing = summaries.isSummarizing
+        // A request that did not start is a request that was refused, and the reason is
+        // the only useful thing to show.
+        summaryProblem = isSummarizing ? nil : said
+        objectWillChange.send()
+        return said
+    }
+
+    /// Re-reads the privacy and summary settings after the user changes them. Called
+    /// from Settings rather than observed, so the moment a switch is flipped is the
+    /// moment it takes effect — including retention, which deletes on the way down.
+    func applyPrivacySettings() {
+        conversation.privacy = settings.privacy
+        conversation.retention = settings.retention
+        summaries.policy = settings.summaries
+        conversation.purgeExpiredFiles()
+        objectWillChange.send()
+    }
+
+    // MARK: - Keeping a transcript in front of you
+
+    /// Whether the conversation on screen is locked.
+    var transcriptIsPinned: Bool { conversation.currentIsPinned }
+
+    /// Locks or unlocks the conversation on screen.
+    ///
+    /// A lock is a standing instruction about one conversation: retention leaves it
+    /// alone, the keep-last limit does not count it, launch reopens it, and — in
+    /// manual-save mode — it is written to disk immediately rather than waiting to be
+    /// saved. It does not defend against the user: Delete still deletes.
+    @discardableResult
+    func toggleTranscriptPin() -> Bool {
+        let id = currentSessionID
+        let nowPinned = conversation.setPinned(!conversation.isPinned(id), session: id)
+        note(nowPinned
+             ? "Transcript pinned. It stays saved, it is skipped by the retention limits, "
+               + "and \(kAssistantDisplayName) opens it next time."
+             : "Transcript unpinned. It is kept like any other conversation now.")
+        objectWillChange.send()
+        return nowPinned
+    }
+
+    /// Hides or shows the transcript column. Nothing is recorded, deleted or paused —
+    /// see `AppSettings.transcriptHidden`.
+    @discardableResult
+    func toggleTranscriptHidden() -> Bool {
+        settings.transcriptHidden.toggle()
+        let hidden = settings.transcriptHidden
+        TranscriptLog.event(hidden ? .hidden : .shown, session: currentSessionID,
+                            hidden
+                            ? "\(TranscriptLog.lines(transcript.count)) hidden from view — nothing was deleted"
+                            : "\(TranscriptLog.lines(transcript.count)) back on screen")
+        objectWillChange.send()
+        return hidden
+    }
+
+    /// Writes the conversation on screen to disk now, whatever the retention mode says.
+    /// The button behind "Only what I save", and the repair for a write that failed.
+    @discardableResult
+    func saveTranscriptNow() -> String {
+        let id = currentSessionID
+        guard settings.privacy.persistToDisk else {
+            let said = "Nothing was saved — \"Save to disk\" is off in Memory & privacy."
+            note(said)
+            return said
+        }
+        guard let count = conversation.save(session: id) else {
+            let said = "Could not write the transcript" +
+                (conversation.lastWriteError.map { " — " + $0 } ?? ".")
+            note(said)
+            return said
+        }
+        let said = count == 0
+            ? "Nothing said yet — there is nothing to save."
+            : "Saved \(TranscriptLog.lines(count)) to \(conversation.transcriptURL(for: id).lastPathComponent)."
+        note(said)
+        objectWillChange.send()
+        return said
+    }
+
+    /// Rewrites one line of the transcript, on screen and in the record.
+    ///
+    /// Only lines that came from a person or the assistant can be edited — the app's own
+    /// narration is not a conversation, and letting it be rewritten would make the
+    /// system notes unreliable as evidence of what the app actually did.
+    @discardableResult
+    func editTranscriptLine(_ id: UUID, to text: String) -> Bool {
+        guard let i = transcript.firstIndex(where: { $0.id == id }) else { return false }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, transcript[i].speaker != .system else { return false }
+        guard trimmed != transcript[i].text else { return false }
+
+        // The record first: it applies redaction, and the screen should show what was
+        // actually kept rather than what was typed.
+        if let entryID = transcript[i].entryID,
+           let stored = conversation.edit(entryID: entryID, to: trimmed) {
+            transcript[i].text = stored.text
+        } else {
+            transcript[i].text = trimmed
+            TranscriptLog.event(.edited, session: transcript[i].sessionID,
+                                "on screen only — this line was never recorded")
+        }
+        // An edited placeholder is no longer waiting for anything, and no longer unheard:
+        // the user has just said what it should have said.
+        transcript[i].pending = false
+        transcript[i].unheard = false
+        objectWillChange.send()
+        return true
+    }
+
+    /// Deletes one line, on screen and in the record.
+    @discardableResult
+    func deleteTranscriptLine(_ id: UUID) -> Bool {
+        guard let i = transcript.firstIndex(where: { $0.id == id }) else { return false }
+        let item = transcript[i]
+        if let entryID = item.entryID {
+            conversation.removeEntry(entryID)
+        } else {
+            TranscriptLog.event(.removed, session: item.sessionID,
+                                "screen-only line removed — nothing was on disk")
+        }
+        transcript.remove(at: i)
+        objectWillChange.send()
+        return true
+    }
+
+    /// Deletes this conversation, on screen and on disk.
+    @discardableResult
+    func forgetThisConversation() -> String {
+        let id = conversation.currentSessionID
+        let dropped = conversation.forget(session: id)
+        transcript.removeAll { $0.sessionID == id && $0.speaker != .system }
+        objectWillChange.send()
+        return dropped > 0
+            ? "Forgotten — \(dropped) line\(dropped == 1 ? "" : "s") deleted, and the file with them."
+            : "Nothing was being kept for this conversation."
+    }
+
+    /// The voice-reachable privacy switch. Pausing takes effect on the next line
+    /// recorded, which is the next thing either of us says.
+    /// Applies a spoken settings change. See `SettingsTools` for what is reachable and
+    /// `SettingCommand` for how the words are matched.
+    func changeSetting(name: String, to spoken: String) -> String {
+        let catalogue = SettingsTools.catalogue()
+        // The present value, so "a bit faster" has something to be faster than.
+        let now = SettingCommand.find(name, in: catalogue).map { number(of: $0.key) } ?? 0
+        switch SettingCommand.resolve(setting: name, value: spoken,
+                                      catalogue: catalogue, current: now) {
+        case .failed(let why):
+            return why.spoken
+        case .ok(let choice, let value):
+            let said = apply(choice.key, value)
+            objectWillChange.send()
+            return said
+        case .number(let choice, let value):
+            let said = applyNumber(choice, value)
+            objectWillChange.send()
+            return said
+        }
+    }
+
+    /// Turn-taking lives on the server, so changing it means telling the session.
+    private func pushSessionUpdate() {
+        guard client.isConnected else { return }
+        client.sendSessionUpdate(settings, nativeTools: tools.realtimeTools())
+    }
+
+    private func number(of key: String) -> Double {
+        switch key {
+        case "speed":              return settings.speed
+        case "screenInterval":     return settings.screenInterval
+        case "motionIntensity":    return settings.motionIntensity
+        case "clapSensitivity":    return settings.clapSensitivity
+        case "vadThreshold":       return settings.vadThreshold
+        case "silenceDurationMs":  return settings.silenceDurationMs
+        case "maxScreenFrames":    return Double(settings.maxScreenFrames)
+        case "screenshotSize":     return Double(settings.screenshotSize)
+        case "photoRotateSeconds": return settings.photoRotateSeconds
+        default:                   return 0
+        }
+    }
+
+    private func applyNumber(_ choice: SettingChoice, _ v: Double) -> String {
+        switch choice.key {
+        case "speed":              settings.speed = v
+        case "screenInterval":     settings.screenInterval = v; syncScreenTimer()
+        case "motionIntensity":    settings.motionIntensity = v
+        case "clapSensitivity":    settings.clapSensitivity = v; wake.clapSensitivity = Float(v)
+        case "vadThreshold":       settings.vadThreshold = v; pushSessionUpdate()
+        case "silenceDurationMs":  settings.silenceDurationMs = v; pushSessionUpdate()
+        case "maxScreenFrames":    settings.maxScreenFrames = Int(v.rounded())
+        case "screenshotSize":     settings.screenshotSize = Int(v.rounded())
+        case "photoRotateSeconds": settings.photoRotateSeconds = v
+        default: return "I couldn't change that one."
+        }
+        let name = choice.spoken.prefix(1).uppercased() + choice.spoken.dropFirst()
+        return "\(name): \(SettingCommand.say(v, choice))."
+    }
+
+    /// One switch statement rather than key paths and reflection: every one of these has
+    /// something to do afterwards — repaint, re-register a hotkey, open a microphone —
+    /// and a generic setter would still need this list to know which.
+    private func apply(_ key: String, _ value: String) -> String {
+        let on = value == "on"
+        switch key {
+        case "voice":
+            // NOT a plain assignment, and not a `session.update` either. The output voice
+            // is fixed for the life of a realtime session once the model has spoken, so
+            // the only honest way to change it mid-conversation is a reconnect — which
+            // `setVoice` performs. See `VoiceSwitch`.
+            return setVoice(value)
+        case "backdrop":
+            if let b = Backdrop.allCases.first(where: { $0.label.lowercased() == value }) {
+                settings.backdrop = b
+                applyEffectiveAppearance()
+            }
+            return "Backdrop is \(value)."
+        case "motionStyle":
+            if let m = MotionStyle.allCases.first(where: { $0.label.lowercased() == value }) {
+                settings.motionStyle = m
+                // Choosing a moving background and not seeing one is the obvious trap.
+                if settings.backdrop != .motion {
+                    settings.backdrop = .motion
+                    applyEffectiveAppearance()
+                    return "Moving background is \(value), and I switched the backdrop to it."
+                }
+            }
+            return "Moving background is \(value)."
+        case "appearance":
+            settings.appearance = AppearanceMode.allCases.first { $0.label.lowercased() == value } ?? .system
+            applyEffectiveAppearance()
+            return "Appearance is \(value)."
+        case "captureMode":
+            if let m = CaptureMode.allCases.first(where: { $0.label.lowercased() == value }) {
+                settings.captureMode = m
+            }
+            return "Recordings will capture \(value)."
+        case "cameraSize":
+            if let z = CameraSize.allCases.first(where: { $0.label.lowercased() == value }) {
+                setCameraSize(z)
+            }
+            return "Camera is \(value)."
+        case "cameraShape":
+            if let sh = CameraShape.allCases.first(where: { $0.label.lowercased() == value }) {
+                setCameraShape(sh)
+            }
+            return "Camera is a \(value)."
+        case "qualityMode":
+            setQualityMode(value == "budget" ? .budget : .quality)
+            return "\(value.capitalized) mode."
+        case "hudEnabled":       settings.hudEnabled = on; applyHUD();          return widgetSaid(on)
+        case "cameraBubble":     settings.cameraBubble = on; applyCameraBubble(); return "Camera bubble \(value)."
+        case "continuousScreen": settings.continuousScreen = on; syncScreenTimer(); return "Screen watching \(value)."
+        case "wakeWord":         settings.wakeWord = on; applyWakeWord();        return "Wake phrase \(value)."
+        case "clapToWake":       settings.clapToWake = on; applyWakeWord();      return "Clap to wake \(value)."
+        case "voiceCommands":    settings.voiceCommands = on; applyWakeWord()
+                                 // Said in full because "off" here is easy to misread as
+                                 // "the app stopped listening", which it is not — the
+                                 // wake phrase is a separate switch and is untouched.
+                                 return on ? "Recording commands on — say start recording, pause recording, or show my face."
+                                           : "Recording commands off. The wake phrase still works."
+        case "proactive":        settings.proactive = on;                        return "Proactive updates \(value)."
+        case "ambientMode":      settings.ambientMode = on;                      return "Ambient mode \(value)."
+        case "devMode":          settings.devMode = on;                          return "Dev Mode \(value)."
+        case "devNarrate":       settings.devNarrate = on;                       return "Narration \(value)."
+        case "menuBarEnabled":   settings.menuBarEnabled = on;                   return "Menu bar icon \(value)."
+        default:                 return "I couldn't change that one."
+        }
+    }
+
+    private func widgetSaid(_ on: Bool) -> String {
+        on ? "Floating widget on." : "Floating widget off."
+    }
+
+
+    func openSettings(tab: String?) -> String {
+        if let raw = tab?.lowercased(),
+           let t = SettingsTab.allCases.first(where: { $0.rawValue.lowercased() == raw
+                                                     || $0.label.lowercased() == raw }) {
+            // The pane keeps its tab in AppStorage, so this is where it lives.
+            UserDefaults.standard.set(t.rawValue, forKey: "settings.tab")
+        }
+        showSettings = true
+        objectWillChange.send()
+        return tab.map { "Settings, on the \($0) tab." } ?? "Settings is open."
+    }
+
+    /// "You can go to sleep." Hangs up, after letting the goodbye finish.
+    ///
+    /// The delay is the whole difference between this feeling like an answer and feeling
+    /// like a dropped call: the tool result is handed back while the model is still
+    /// speaking its farewell, and tearing the socket down there cuts it off mid-word.
+    /// Two seconds is longer than any goodbye worth saying and shorter than a pause
+    /// anyone would notice.
+    func goToSleep() -> String {
+        Task { @MainActor in
+            // Wait for the goodbye to START, then for it to finish.
+            //
+            // The first version only did the second half, and cut the sentence off every
+            // time: a tool result is handed back BEFORE the model says anything about it,
+            // so "while audio is playing" is false at that moment and the loop fell
+            // straight through. Nothing was playing yet — that was the point.
+            for _ in 0..<50 {                       // up to 5s for it to begin
+                if self.audio.isPlayingAudio || self.isResponding { break }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            // Then let it run out. Two consecutive quiet checks rather than one, because
+            // the queue empties briefly between the audio chunks of a single sentence.
+            var quiet = 0
+            for _ in 0..<300 {                      // up to 30s of goodbye
+                if self.audio.isPlayingAudio || self.isResponding {
+                    quiet = 0
+                } else {
+                    quiet += 1
+                    if quiet >= 4 { break }
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            try? await Task.sleep(for: .milliseconds(250))
+            self.disconnect()
+        }
+        // Deliberately nothing worth saying out loud.
+        //
+        // This used to be a sentence explaining what was about to happen, and the model
+        // did the obvious thing with a sentence: it read it back. Two announcements about
+        // going to sleep, either side of the tool call, when what was wanted was "see you
+        // later". A tool result is a fact for the model, not a line for it to deliver.
+        return "ok"
+    }
+
+    /// The transcript, not the recorder. See `stop_transcript` in `NativeTools`, and
+    /// `setRecordingPaused` for the other one — the two were both called
+    /// `setRecording(paused:)` and `pause_recording` until the recorder itself became
+    /// sayable, at which point one name for two ideas stopped being merely untidy.
+    func setTranscriptKeeping(paused: Bool) -> String {
+        settings.privacy.paused = paused
+        applyPrivacySettings()
+        return paused
+            ? "Recording paused. Nothing else from this conversation will be kept until you say resume."
+            : "Recording again. " + settings.privacy.summaryLine
+    }
+
+    // MARK: - Screen
+
+    /// Cheap, non-prompting re-read of the live TCC state.
+    @discardableResult
+    func refreshScreenPermission(reason: String) -> ScreenPermission {
+        let before = screenPermission
+        let now = ScreenCapture.refresh(reason: reason)
+        screenPermission = now
+        if now.canCapture, before.blocksCapture {
+            // The block cleared — drop its banner and resume watching if it was on.
+            if banner == before.bannerText { banner = nil }
+            note("Screen Recording permission is now granted.")
+            syncScreenTimer()
+            // The display list is empty while permission blocks capture, so this is the
+            // first moment it can be populated at all.
+            Task { await refreshDisplays() }
+        }
+        return now
+    }
+
+    /// The "Check again" button: asks ScreenCaptureKit itself, not just TCC, so a
+    /// process that is stale despite an on toggle is correctly named as such.
+    func recheckScreenPermission() async {
+        note("Re-checking Screen Recording permission…")
+        let before = screenPermission
+        // ensureAccess before probing: probing only reads state, while this is what
+        // actually registers the app in the privacy list if it is not there yet.
+        _ = await ScreenCapture.ensureAccess(reason: "user-recheck")
+        let now = await ScreenCapture.probe(reason: "user-recheck")
+        screenPermission = now
+        switch now {
+        case .granted:
+            if banner == before.bannerText { banner = nil }
+            note("Screen Recording is granted and this process can capture.")
+            syncScreenTimer()
+            await refreshDisplays()
+        case .needsRestart:
+            banner = now.bannerText
+            note("Screen Recording is granted, but this process was launched before the grant — relaunch to use it.")
+        case .denied, .unknown:
+            banner = now.bannerText
+            note("Screen Recording is still \(now.logToken).")
+        }
+    }
+
+    func openScreenPrivacySettings() { ScreenCapture.openPrivacySettings() }
+
+    func relaunchForScreenPermission() { ScreenCapture.relaunch() }
+
+    // MARK: - Which screen
+
+    /// The saved pick, if it is still attached. `nil` means "follow the active display",
+    /// which is both the default and where an unplugged pick lands.
+    var selectedDisplay: DisplayOption? {
+        guard settings.screenDisplayID != DisplayOption.followsActiveID else { return nil }
+        return displays.first { $0.displayID == settings.screenDisplayID }
+    }
+
+    /// What the pick resolves to right now — the display a capture would actually use.
+    var activeDisplay: DisplayOption? {
+        if let picked = selectedDisplay { return picked }
+        guard let id = windowDisplayID else { return displays.first }
+        return displays.first { $0.displayID == id } ?? displays.first
+    }
+
+    var isFollowingActiveDisplay: Bool { settings.screenDisplayID == DisplayOption.followsActiveID }
+
+    /// The id to hand the capture layer: the raw saved pick, not `selectedDisplay`.
+    ///
+    /// The two differ before the display list has loaded — the first seconds after launch,
+    /// and any moment permission was blocked — and in that window `selectedDisplay` is nil
+    /// while a perfectly valid pin is sitting in settings. Capture resolves an unattached
+    /// id by falling back on its own, so the raw value is both safe and more faithful.
+    private var requestedDisplayID: CGDirectDisplayID? {
+        isFollowingActiveDisplay ? nil : settings.screenDisplayID
+    }
+
+    /// Re-reads which display this window is on.
+    ///
+    /// Published rather than computed on demand: `NSScreen.main` is not observable, so a
+    /// label derived straight from it would keep showing the old screen after you drag
+    /// the window to another one, right up until something unrelated redrew the view.
+    func refreshActiveDisplay() {
+        let id = displayWatcher.current ?? ScreenCapture.activeDisplayID()
+        if windowDisplayID != id { windowDisplayID = id }
+    }
+
+    /// Pick a display, or pass `nil` to go back to following the active one.
+    ///
+    /// Deliberately does not touch the watch timer: the interval and the on/off state are
+    /// unchanged by this, and tearing the timer down would drop a frame for no reason.
+    /// The next tick simply captures the newly chosen screen.
+    func selectDisplay(_ displayID: CGDirectDisplayID?) {
+        let target = displayID ?? DisplayOption.followsActiveID
+        guard settings.screenDisplayID != target else { return }
+        settings.screenDisplayID = target
+        if let d = displays.first(where: { $0.displayID == target }) {
+            note("Now showing \(d.name) (\(d.resolution)) when you ask about my screen.")
+        } else {
+            note("Now following whichever display FlowState is on.")
+        }
+    }
+
+    /// Re-reads the attached displays and re-validates the saved pick against them.
+    ///
+    /// A saved display id is only meaningful while that display is attached — CoreGraphics
+    /// reissues ids across unplug and reboot — so a pick that no longer matches anything is
+    /// dropped back to the active display rather than left pointing at nothing. Silent when
+    /// permission is blocked: the list is empty for a reason the permission card already
+    /// explains, and clearing a valid pick over it would lose the user's choice.
+    func refreshDisplays() async {
+        refreshActiveDisplay()
+        guard !screenPermission.blocksCapture else { return }
+        let found = await ScreenCapture.displays()
+        guard !found.isEmpty else {
+            // The capture layer just contradicted what the UI is claiming — re-read
+            // rather than leaving a stale "granted" on screen with an empty picker.
+            refreshScreenPermission(reason: "display-scan")
+            return
+        }
+        displays = found
+
+        let picked = settings.screenDisplayID
+        guard picked != DisplayOption.followsActiveID,
+              !found.contains(where: { $0.displayID == picked })
+        else { return }
+        settings.screenDisplayID = DisplayOption.followsActiveID
+        note("The screen you had picked is no longer attached — following the active display again.")
+    }
+
+    func captureAndSend(auto: Bool) async {
+        // Permission FIRST, connection second. ensureAccess() is what fires
+        // CGRequestScreenCaptureAccess() and therefore what puts FlowState in the
+        // Screen & System Audio Recording list at all. Gating it behind "must be
+        // connected" created a deadlock: you cannot grant screen access until you
+        // connect, but you naturally want to fix permissions before connecting, and
+        // pressing Show screen while idle silently did nothing.
+        let pre: ScreenPermission
+        if auto {
+            pre = refreshScreenPermission(reason: "pre-capture(auto)")
+        } else {
+            pre = await ScreenCapture.ensureAccess(reason: "pre-capture(manual)")
+            screenPermission = pre
+        }
+
+        guard case .live = connection else {
+            banner = pre.blocksCapture
+                ? pre.bannerText
+                : "Screen access is ready — hit Connect and I can look at your screen."
+            if pre.blocksCapture { handleScreenBlock(pre, auto: auto) }
+            return
+        }
+        if pre.blocksCapture {
+            handleScreenBlock(pre, auto: auto)
+            return
+        }
+
+        // Re-read which screen the pointer is on immediately before capturing, so a frame
+        // can never come from the screen you just left. Polling alone can lag a move.
+        if isFollowingActiveDisplay { refreshActiveDisplay() }
+
+        do {
+            let frame = try await ScreenCapture.capture(
+                displayID: requestedDisplayID,
+                maxWidth: CGFloat(settings.screenshotSize))
+            screenPermission = .granted
+            // Auto frames are context, not questions. They are filed silently so the
+            // model simply knows what is on screen when you next speak to it.
+            //
+            // The display is named in both prompts because with more than one screen the
+            // model otherwise has no way to know it is being shown one of several, and
+            // will happily answer "your screen" questions about the wrong one.
+            let screen = displays.count > 1 ? " (\(frame.display.menuLabel))" : ""
+            let prompt = auto
+                ? "[Screen update\(screen) — context only. Do not reply to this.]"
+                : "Here's my screen\(screen). What do you see?"
+            client.sendImage(dataURI: frame.dataURI, prompt: prompt)
+            // The frame lands in the conversation either way. Only a MANUAL capture is
+            // a question, and even then the turn is requested through the coordinator —
+            // pressing ⌘⇧2 while the model is mid-sentence used to put a second
+            // response.create straight on the wire, which is the exact rejection this
+            // whole path now avoids.
+            if !auto { requestResponse("screenshot") }
+            let label = displays.count > 1 ? " · \(frame.display.name)" : ""
+            let caption = (auto ? "Screen frame (auto)" : "Sent a screenshot") + label
+            // A manual capture is a turn — the user asked something by showing it, and a
+            // summary that omits "they shared their screen" is missing the reason the
+            // next three lines happened. Continuous-mode frames are not: one every few
+            // seconds would bury the conversation in its own wallpaper.
+            let entry = auto ? nil
+                             : conversation.record(speaker: .user, text: caption, source: .app)
+            transcript.append(TranscriptItem(
+                speaker: .user,
+                text: caption,
+                image: frame.thumbnail,
+                sessionID: currentSessionID,
+                entryID: entry?.id))
+            // A pick that silently fell back (display unplugged between the pick and the
+            // capture) is corrected here rather than left to lie in the picker.
+            if let wanted = requestedDisplayID, wanted != frame.display.displayID {
+                await refreshDisplays()
+            }
+        } catch ScreenCaptureError.permissionDenied(let p) {
+            screenPermission = p
+            handleScreenBlock(p, auto: auto)
+        } catch {
+            banner = "Capture failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Reports a permission block ONCE and stops the watch loop.
+    ///
+    /// The old code let the continuous-screen timer re-stamp "Screen Recording is
+    /// off" every few seconds forever, which is what made the message keep coming
+    /// back after the user had already fixed it. Nothing here re-fires on a timer:
+    /// the state only changes on an explicit re-check, on app activation, or on a
+    /// relaunch.
+    private func handleScreenBlock(_ p: ScreenPermission, auto: Bool) {
+        let wasWatching = screenTimer != nil
+        if wasWatching {
+            stopScreenTimer()
+            note("Paused continuous screen — \(p.logToken). It resumes on its own once permission is usable.")
+        }
+        guard banner != p.bannerText else { return }   // don't re-stamp the same line
+        banner = p.bannerText
+        if !auto || !wasWatching { note("Screen Recording: \(p.logToken).") }
+    }
+
+    func syncScreenTimer() {
+        stopScreenTimer()
+        guard settings.continuousScreen, case .live = connection else { return }
+        // Never start a loop that is only going to fail: a blocked permission would
+        // just re-raise the same error on every tick.
+        guard !screenPermission.blocksCapture else {
+            note("Continuous screen stays paused until Screen Recording is usable (\(screenPermission.logToken)).")
+            return
+        }
+        // Send a frame NOW, not one interval from now. A repeating Timer first fires
+        // after its interval, so connecting with a 10s interval left the model blind for
+        // ten seconds — long enough to ask "what am I looking at?" and be told nothing.
+        Task { @MainActor [weak self] in await self?.captureAndSend(auto: true) }
+
+        let t = Timer(timeInterval: settings.screenInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.captureAndSend(auto: true) }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        screenTimer = t
+    }
+
+    private func stopScreenTimer() {
+        screenTimer?.invalidate(); screenTimer = nil
+    }
+
+    var isWatching: Bool { screenTimer != nil }
+}
