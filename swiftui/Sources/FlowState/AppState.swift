@@ -2828,6 +2828,12 @@ final class AppState: ObservableObject {
             result = self.setTranscriptKeeping(paused: false)
         case "forget_conversation":
             result = self.forgetThisConversation()
+        case "quick_edit":
+            // Handled here rather than in NativeTools because it needs `devRepo` to
+            // resolve a relative path, and NativeTools deliberately cannot see settings.
+            result = await self.runQuickEdit(
+                file: args["file"] as? String ?? "",
+                change: args["change"] as? String ?? "")
         default:
             // The recorder's transport and the camera go through the same gate
             // the spoken route uses — a model that decides to stop a recording
@@ -2840,6 +2846,61 @@ final class AppState: ObservableObject {
             }
         }
         return result
+    }
+
+    /// The fast lane. One model call rewrites one file — see `QuickEdit`.
+    ///
+    /// Reports the elapsed time in the spoken result on purpose. The whole claim of this
+    /// tool is that it is quick, and a claim the user has to take on trust is one that
+    /// quietly stops being true.
+    func runQuickEdit(file: String, change: String) async -> String {
+        guard !file.isEmpty, !change.isEmpty else {
+            return "I need both a file and a change."
+        }
+        // Relative paths resolve inside the repo Dev Mode is pointed at, so the model can
+        // say "Hotkey.swift" the way a person would.
+        var path = (file as NSString).expandingTildeInPath
+        if !path.hasPrefix("/") {
+            let root = (settings.devRepo as NSString).expandingTildeInPath
+            let direct = (root as NSString).appendingPathComponent(path)
+            if FileManager.default.fileExists(atPath: direct) {
+                path = direct
+            } else if let found = Self.findFile(named: path, under: root) {
+                path = found
+            } else {
+                return "I couldn't find \(file) in \(settings.devRepo)."
+            }
+        }
+        let out = await QuickEditRunner.run(path: path, task: change,
+                                            model: settings.quickEditModel)
+        print(out.ok ? "[quick-edit] \(out.spoken)"
+                     : "[quick-edit] refused: \(out.spoken)")
+        guard out.ok else {
+            return "QUICK EDIT DID NOT HAPPEN — nothing was written and nothing changed. "
+                 + "Say so plainly, in your own words: \(out.spoken)"
+        }
+        return "\(out.spoken) Tell them what changed in one short sentence, and that they "
+             + "can try it after a rebuild."
+    }
+
+    /// Finds a file by name anywhere under the repo, so a bare "Hotkey.swift" resolves.
+    ///
+    /// First match wins and ambiguity is not reported — which is fine here only because
+    /// the edit is shown, backed up and syntax-checked before it counts as done.
+    static func findFile(named name: String, under root: String) -> String? {
+        let fm = FileManager.default
+        guard let e = fm.enumerator(atPath: root) else { return nil }
+        let target = (name as NSString).lastPathComponent
+        for case let rel as String in e {
+            if rel.contains("/.git/") || rel.hasPrefix(".git/") || rel.contains("/.build/") {
+                e.skipDescendants()
+                continue
+            }
+            if (rel as NSString).lastPathComponent == target {
+                return (root as NSString).appendingPathComponent(rel)
+            }
+        }
+        return nil
     }
 
     /// Hands a coding task to Claude Code, or queues it. Split out of `handleToolCall`

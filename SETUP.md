@@ -38,8 +38,8 @@ for an app built and run on the same Mac.
 ## First launch
 
 The app opens and asks for the OpenAI key itself — the user pastes it into the
-welcome sheet, and it goes into the macOS Keychain. Don't write it to a file, and
-don't type it for them.
+welcome sheet, and it is written to `~/.config/vibe-voice/config.json`, mode 0600,
+outside the repo. Don't write that file yourself, and don't type the key for them.
 
 Then macOS asks, once each, as features get used. The user must click these; you
 cannot:

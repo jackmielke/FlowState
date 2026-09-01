@@ -198,6 +198,27 @@ enum NativeTools {
             description: "Read the text of a Notion page. Pass the page title as the user said "
                        + "it — the title is looked up, so never ask them for an id.",
             parameters: [ToolParameter("page", description: "Page title, or a Notion page id.", required: true)]),
+
+        ToolSpec(
+            name: "quick_edit",
+            summary: "Quick edit (fast lane)",
+            description: "Make ONE small, well-understood change to ONE file, in seconds "
+                       + "rather than minutes. Use this instead of dispatching a coding "
+                       + "task whenever the change is something you could describe in a "
+                       + "sentence and point at a single file for: rename a thing, change "
+                       + "a constant, flip a default, fix a typo, adjust a string, tweak a "
+                       + "threshold. It has no ability to look around the codebase — it "
+                       + "sees only the file you name — so if you are not sure WHICH file, "
+                       + "or the change touches more than one, dispatch a coding task "
+                       + "instead. Getting that wrong is the one way this is worse than "
+                       + "the slow lane.",
+            parameters: [
+                ToolParameter("file", description: "Path to the one file to change. Absolute, "
+                                                 + "or relative to the app's repo.", required: true),
+                ToolParameter("change", description: "The change, in a sentence, as if to a "
+                                                   + "colleague looking at that file.", required: true),
+            ],
+            effect: .writes(confirmation: "Want me to make that change now?")),
     ]
 
     /// Settings, changeable out loud. Answered by `AppState` — they mutate app state,

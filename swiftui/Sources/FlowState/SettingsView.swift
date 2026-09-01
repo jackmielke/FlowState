@@ -971,6 +971,14 @@ struct SettingsView: View {
                     onSave: { try? KeyStore.setSecret($0, forKey: "NOTION_TOKEN") })
                 caption("Create an internal integration at notion.so/my-integrations, then share the pages you want \(kAssistantDisplayName) to see with it — it can only read what you share. The token is written to the same 0600 file as your OpenAI key, outside the repo.")
             }
+
+            section("Quick edits") {
+                SecureTokenField(
+                    placeholder: "sk-ant-… Anthropic API key",
+                    isSet: KeyStore.secret(forKey: "ANTHROPIC_API_KEY") != nil,
+                    onSave: { try? KeyStore.setSecret($0, forKey: "ANTHROPIC_API_KEY") })
+                caption("The fast lane. With this set, small one-file changes — a constant, a default, a string — are made in about two seconds by a single model call, instead of the minutes a full coding task takes. Anything larger still goes to Claude Code. Get a key at console.anthropic.com; it is billed separately from your Claude subscription, and a quick edit costs a fraction of a cent.")
+            }
     }
 
     /// The one tab where a switch can change files on this Mac. Kept on its own for that

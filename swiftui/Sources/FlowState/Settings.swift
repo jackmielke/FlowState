@@ -54,6 +54,10 @@ struct AppSettings: Codable, Equatable {
     /// misheard sentence can change your code.
     var devMode: Bool = false
     var devRepo: String = "~/dev/vibe-voice"
+    /// Which model the fast lane uses. Sonnet 5 by default because it measured faster
+    /// than Haiku 4.5 on this exact job and also got it right — at one-file size the
+    /// latency is round trip rather than tokens, so the cheaper model bought nothing.
+    var quickEditModel: String = "claude-sonnet-5"
 
     /// How much Claude Code is allowed to do without asking.
     ///
@@ -399,6 +403,7 @@ struct AppSettings: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case voice, model, systemPrompt, speed, continuousScreen, screenInterval
         case vadThreshold, silenceDurationMs, transcribeUser, micMuted, devMode, devRepo
+        case quickEditModel
         case maxScreenFrames, screenshotSize, qualityMode, appearance, screenDisplayID
         case devNarrate, devNarrateInterval, devNarrateMax, devPermissionMode, devFastStart
         case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
@@ -446,6 +451,7 @@ extension AppSettings {
         micMuted          = v(.micMuted, d.micMuted)
         devMode           = v(.devMode, d.devMode)
         devRepo           = v(.devRepo, d.devRepo)
+        quickEditModel    = v(.quickEditModel, d.quickEditModel)
         devNarrate        = v(.devNarrate, d.devNarrate)
         devPermissionMode = v(.devPermissionMode, d.devPermissionMode)
         devFastStart      = v(.devFastStart, d.devFastStart)
