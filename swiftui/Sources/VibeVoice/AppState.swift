@@ -58,7 +58,15 @@ struct TranscriptItem: Identifiable {
 @MainActor
 final class AppState: ObservableObject {
 
-    @Published var connection: ConnectionState = .idle
+    @Published var connection: ConnectionState = .idle {
+        didSet {
+            // The deactivate key is bound to a moment, not to the app — see
+            // `applyHushHotkey`. Opening and closing a session is half of what moves
+            // that moment; the other half is which app is in front.
+            guard connection != oldValue else { return }
+            refreshSessionScopedHotkeys()
+        }
+    }
     @Published var transcript: [TranscriptItem] = []
     @Published var userSpeaking = false
     @Published var banner: String?
@@ -377,11 +385,14 @@ final class AppState: ObservableObject {
     func applySummonHotkey() {
         guard !settings.summonHotkey.isEmpty else {
             GlobalHotkey.shared.unregisterSummon()
+            report(.summon, taken: false, combo: nil)
             return
         }
-        GlobalHotkey.shared.registerSummon(HotkeyCombo.named(settings.summonHotkey)) {
+        let combo = HotkeyCombo.named(settings.summonHotkey)
+        let ok = GlobalHotkey.shared.registerSummon(combo) {
             Task { @MainActor in Summon.toggle() }
         }
+        report(.summon, taken: !ok, combo: combo)
     }
 
     /// Connect or hang up without going to find the window.
@@ -392,19 +403,24 @@ final class AppState: ObservableObject {
     func applyConnectHotkey() {
         guard !settings.connectHotkey.isEmpty else {
             GlobalHotkey.shared.unregisterConnect()
+            report(.connect, taken: false, combo: nil)
             return
         }
-        GlobalHotkey.shared.registerConnect(HotkeyCombo.named(settings.connectHotkey)) { [weak self] in
+        let combo = HotkeyCombo.named(settings.connectHotkey)
+        let ok = GlobalHotkey.shared.registerConnect(combo) { [weak self] in
             Task { @MainActor in self?.toggleConnection() }
         }
+        report(.connect, taken: !ok, combo: combo)
     }
 
     func applyRecordHotkey() {
         guard !settings.recordHotkey.isEmpty else {
             GlobalHotkey.shared.unregisterRecord()
+            report(.record, taken: false, combo: nil)
             return
         }
-        GlobalHotkey.shared.registerRecord(HotkeyCombo.named(settings.recordHotkey)) { [weak self] in
+        let combo = HotkeyCombo.named(settings.recordHotkey)
+        let ok = GlobalHotkey.shared.registerRecord(combo) { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
                 // Through the same door as the spoken route, so the key and the sentence
@@ -422,16 +438,66 @@ final class AppState: ObservableObject {
                 }
             }
         }
+        report(.record, taken: !ok, combo: combo)
     }
 
+    /// The deactivate key. Escape by default. See `HotkeyCombo.escape`.
+    ///
+    /// Every other shortcut in here is bound once and left alone. This one is re-applied
+    /// whenever the session opens or closes and whenever Flow comes forward or goes
+    /// away, because the default chord has no modifier on it: Escape is the key that
+    /// cancels a dialog, leaves an insert mode, closes this app's own settings panel.
+    /// Owning it process-wide all day would be theft. Owning it for the minute somebody
+    /// is in a conversation, from any app but this one, is the feature.
+    ///
+    /// A chord *with* modifiers — the three alternates — skips all of that and stays
+    /// bound, including while idle, where it still silences the wake phrase.
     func applyHushHotkey() {
         guard !settings.hushHotkey.isEmpty else {
             GlobalHotkey.shared.unregisterHush()
+            report(.hush, taken: false, combo: nil)
             return
         }
-        GlobalHotkey.shared.registerHush(HotkeyCombo.named(settings.hushHotkey)) { [weak self] in
+        let combo = HotkeyCombo.named(settings.hushHotkey)
+        guard !combo.isSessionScoped || hushWindowIsOpen else {
+            // Not a failure: the key is simply not wanted right now. Any problem
+            // recorded for this row is cleared with it, so the pane does not keep
+            // warning about a registration that is no longer being attempted.
+            GlobalHotkey.shared.unregisterHush()
+            report(.hush, taken: false, combo: combo)
+            return
+        }
+        let ok = GlobalHotkey.shared.registerHush(combo) { [weak self] in
             Task { @MainActor in self?.hush() }
         }
+        report(.hush, taken: !ok, combo: combo)
+    }
+
+    /// Whether a modifier-less deactivate key should be listening at this instant.
+    ///
+    /// Both halves matter. Without the first, Escape is stolen from the whole machine
+    /// for as long as Flow runs. Without the second, Escape stops cancelling a
+    /// transcript edit or closing the settings panel — Carbon registers ahead of every
+    /// app *including this one*, so the in-window shortcut would lose to our own hotkey
+    /// and the user would be left pressing a key that does the wrong thing in the one
+    /// place they can see us.
+    private var hushWindowIsOpen: Bool {
+        let live: Bool
+        switch connection {
+        case .live, .connecting: live = true
+        case .idle, .error:      live = false
+        }
+        return SessionScopedHotkey.shouldBind(sessionLive: live,
+                                              appIsFrontmost: NSApplication.shared.isActive)
+    }
+
+    /// Re-bind the deactivate key when the conditions it depends on move.
+    ///
+    /// Cheap and idempotent: `applyHushHotkey` unbinds before it binds, and for the
+    /// modifier chords this returns immediately without touching Carbon at all.
+    func refreshSessionScopedHotkeys() {
+        guard HotkeyCombo.named(settings.hushHotkey).isSessionScoped else { return }
+        applyHushHotkey()
     }
 
     /// Registers or removes the login item, and puts the setting back if macOS refused.
@@ -451,23 +517,73 @@ final class AppState: ObservableObject {
 
     /// The wake key. ⌃Q by default. See `HotkeyCombo.ctrlQ`.
     ///
-    /// The same combo now carries three gestures rather than one, so this registers the
+    /// The same combo now carries two gestures rather than one, so this registers the
     /// dictation slot (which reports key-up as well as key-down) instead of the wake slot.
-    /// `DictationDriver` decides which gesture happened; wake is what a double press
-    /// resolves to, so the old behaviour is still in there, just no longer the only one.
+    /// `DictationDriver` decides which gesture happened: hold it to dictate, tap it once
+    /// to toggle a session on or off.
     func applyWakeHotkey() {
         guard !settings.wakeHotkey.isEmpty else {
             GlobalHotkey.shared.unregisterDictation()
             GlobalHotkey.shared.unregisterWake()
+            report(.wake, taken: false, combo: nil)
             return
         }
         GlobalHotkey.shared.unregisterWake()
         wireDictationDriver()
         let combo = HotkeyCombo.named(settings.wakeHotkey)
-        GlobalHotkey.shared.registerDictation(
+        let ok = GlobalHotkey.shared.registerDictation(
             combo,
             down: { [weak self] in Task { @MainActor in self?.dictation.keyDown() } },
             up:   { [weak self] in Task { @MainActor in self?.dictation.keyUp() } })
+        report(.wake, taken: !ok, combo: combo)
+    }
+
+    // MARK: - When a shortcut does not work
+
+    /// Why each shortcut is not working, when it is not, keyed by role.
+    ///
+    /// A hotkey that failed to register is indistinguishable from one that works until
+    /// somebody presses it and nothing happens — at which point the app looks broken and
+    /// the actual cause (Raycast owns ⌥Space) is invisible. This is that cause, carried
+    /// from `RegisterEventHotKey`'s status code to the row in Settings that set it.
+    @Published var hotkeyProblems: [HotkeyRole: String] = [:]
+
+    /// Every rebindable shortcut as it is currently set, for the conflict rules in
+    /// `HotkeyConflict`.
+    var hotkeyBindings: [HotkeyBinding] {
+        let ids: [(HotkeyRole, String)] = [
+            (.summon, settings.summonHotkey), (.wake, settings.wakeHotkey),
+            (.connect, settings.connectHotkey), (.hush, settings.hushHotkey),
+            (.record, settings.recordHotkey),
+        ]
+        return ids.map { role, id in
+            HotkeyBinding(role: role.title, comboID: id,
+                          label: id.isEmpty ? "Off" : HotkeyCombo.named(id).label)
+        }
+    }
+
+    /// Everything worth saying about one row's shortcut: what the OS refused, or which
+    /// other row is fighting it for the same chord.
+    ///
+    /// Both at once is possible and both are shown — a chord can be taken by another app
+    /// *and* be double-booked in here, and fixing only the half you were told about
+    /// leaves a key that still does nothing.
+    func hotkeyWarnings(for role: HotkeyRole) -> [String] {
+        var out: [String] = []
+        if let taken = hotkeyProblems[role] { out.append(taken) }
+        if let clash = HotkeyConflict.clash(for: role.title, among: hotkeyBindings) {
+            out.append(clash.message)
+        }
+        return out
+    }
+
+    /// Record — or clear — the outcome of one registration.
+    private func report(_ role: HotkeyRole, taken: Bool, combo: HotkeyCombo?) {
+        if taken, let combo {
+            hotkeyProblems[role] = HotkeyConflict.refused(role: role.title, label: combo.label)
+        } else {
+            hotkeyProblems[role] = nil
+        }
     }
 
     /// Hand the driver the four things it cannot know on its own.
@@ -491,7 +607,7 @@ final class AppState: ObservableObject {
             }
         }
         dictation.onStartVoiceMode = { [weak self] in
-            self?.wakeAndConnect(from: "double press")
+            self?.wakeAndConnect(from: "tap")
         }
         dictation.onStopVoiceMode = { [weak self] in
             _ = self?.hush()
@@ -981,6 +1097,10 @@ final class AppState: ObservableObject {
         RunLoop.main.add(t, forMode: .common)
         ambientTimer = t
     }
+
+    /// What each native tool has actually cost lately. Not persisted: a session starts
+    /// optimistic, because yesterday's bad Wi-Fi is not evidence about today's.
+    let toolLatency = ToolLatencyBook()
 
     /// Tools answered natively, in-process, without Claude Code.
     let tools = ToolRegistry(specs: NativeTools.specs
@@ -1868,6 +1988,19 @@ final class AppState: ObservableObject {
         // Returning from System Settings is the moment the answer most often
         // changes, and macOS gives us no TCC change notification — so re-read on
         // every activation rather than trusting whatever we concluded last time.
+        // Escape belongs to whichever app is in front, so ours is handed back the moment
+        // we become that app and taken again when we stop being it. Cheap: for the
+        // modifier chords both of these return without doing anything.
+        for name in [NSApplication.didBecomeActiveNotification,
+                     NSApplication.didResignActiveNotification] {
+            NotificationCenter.default
+                .publisher(for: name)
+                .sink { [weak self] _ in
+                    Task { @MainActor in self?.refreshSessionScopedHotkeys() }
+                }
+                .store(in: &bag)
+        }
+
         NotificationCenter.default
             .publisher(for: NSApplication.didBecomeActiveNotification)
             .sink { [weak self] _ in
@@ -2575,49 +2708,8 @@ final class AppState: ObservableObject {
         if let spec = tools.spec(name) {
             let args = (try? JSONSerialization.jsonObject(with: Data(argumentsJSON.utf8))) as? [String: Any] ?? [:]
             note("tool \(name)")
-            Task { @MainActor in
-                let result: String
-                switch name {
-                case "stop_task":
-                    result = await self.cancelTask((args["task_id"] as? String) ?? "")
-                case "undo_task":
-                    result = self.undoTask((args["task_id"] as? String) ?? "")
-                case "set_queue_paused":
-                    result = self.setQueuePaused((args["paused"] as? Bool) ?? true)
-                case "summarize_conversation":
-                    result = self.summarizeSessionNow(showPanel: false)
-                case "change_setting":
-                    result = self.changeSetting(name: args["setting"] as? String ?? "",
-                                                to: args["value"] as? String ?? "")
-                case "open_settings":
-                    result = self.openSettings(tab: args["tab"] as? String)
-                case "go_to_sleep":
-                    result = self.goToSleep()
-                case "memory_status":
-                    result = self.conversation.spokenStatus
-                case "stop_transcript":
-                    result = self.setTranscriptKeeping(paused: true)
-                case "resume_transcript":
-                    result = self.setTranscriptKeeping(paused: false)
-                case "forget_conversation":
-                    result = self.forgetThisConversation()
-                default:
-                    // The recorder's transport and the camera go through the same gate
-                    // the spoken route uses — a model that decides to stop a recording
-                    // nobody is making is told so in the same words, and the refusal is
-                    // logged the same way.
-                    if let command = VoiceCommand(toolName: name) {
-                        result = self.runVoiceCommand(command, from: .model)
-                    } else {
-                        result = await NativeTools.run(name, args: args)
-                    }
-                }
-                self.transcript.append(TranscriptItem(
-                    speaker: .system, text: "⚒ \(spec.summary): \(result.prefix(160))"))
-                self.client.sendToolOutput(callID: callID,
-                                           output: ["status": "ok", "result": result])
-                self.requestResponse("native-tool-\(name)")
-            }
+            Task { @MainActor in await self.runNativeTool(spec: spec, name: name,
+                                                          args: args, callID: callID) }
             return
         }
 
@@ -2627,7 +2719,132 @@ final class AppState: ObservableObject {
             requestResponse("tool-unknown")
             return
         }
+        dispatchToClaudeCode(callID: callID, argumentsJSON: argumentsJSON)
+    }
 
+    // MARK: - Native tools, and what to do when one is slow
+
+    /// Runs a native tool and answers the call — in this turn if it is quick, and with a
+    /// holding line if it is not.
+    ///
+    /// The model is mute from the moment it calls a tool until the output comes back. A
+    /// clipboard read is invisible; a `web_search` or a cold Notion read is four seconds
+    /// of a conversation where the assistant appears to have hung up. So the work is
+    /// raced against `SlowToolPolicy.budget`, and a tool that loses gets the same
+    /// treatment Dev Mode already gives a Claude Code run: answer now, report back later.
+    ///
+    /// A tool that has been slow twice this session skips the race entirely — the holding
+    /// line goes out immediately, so the second slow Notion read costs no silence at all.
+    private func runNativeTool(spec: ToolSpec, name: String,
+                               args: [String: Any], callID: String) async {
+        let started = Date()
+        let work = Task { @MainActor in await self.nativeToolResult(name, args: args) }
+
+        let budget = SlowToolPolicy.budget(for: name)
+        let quick: String?
+        if !SlowToolPolicy.canBeSlow(name) {
+            // Answered from memory or a file read. Racing it against a clock would cost
+            // more than it could ever save.
+            quick = await work.value
+        } else if toolLatency.expectsSlow(name, budget: budget) {
+            quick = nil
+        } else {
+            quick = await firstResult(of: work, within: budget)
+        }
+
+        if let result = quick {
+            toolLatency.record(name, seconds: Date().timeIntervalSince(started))
+            transcript.append(TranscriptItem(
+                speaker: .system, text: "⚒ \(spec.summary): \(result.prefix(160))"))
+            client.sendToolOutput(callID: callID, output: ["status": "ok", "result": result])
+            requestResponse("native-tool-\(name)")
+            return
+        }
+
+        // Still going. Hand the turn back so the model can say four words, and file the
+        // real answer when it arrives.
+        transcript.append(TranscriptItem(speaker: .system, text: "⏳ \(spec.summary): still going…"))
+        client.sendToolOutput(callID: callID,
+                              output: ["status": "working", "note": SlowToolPolicy.holdingNote(for: name)])
+        requestResponse("native-tool-slow-\(name)")
+
+        let result = await work.value
+        let took = Date().timeIntervalSince(started)
+        toolLatency.record(name, seconds: took)
+        transcript.append(TranscriptItem(
+            speaker: .system, text: "⚒ \(spec.summary) (\(String(format: "%.1f", took))s): \(result.prefix(160))"))
+
+        // The socket can die while a tool is still out. Filing into a dead session would
+        // throw, and the result is not worth reconnecting for.
+        guard case .live = connection else {
+            note("\(name) came back after the session ended; not filing it.")
+            return
+        }
+        client.sendSystemNote(SlowToolPolicy.lateNote(tool: spec.summary, result: result))
+        requestResponse("native-tool-late-\(name)")
+    }
+
+    /// The result if it lands inside `seconds`, otherwise nil — and `work` keeps running
+    /// either way, because the answer is still wanted, just no longer in this turn.
+    private func firstResult(of work: Task<String, Never>, within seconds: TimeInterval) async -> String? {
+        await withTaskGroup(of: String?.self) { group in
+            group.addTask { await work.value }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            // Cancels the sleeper, or the wait on `work` — never `work` itself, which is
+            // a handle to a task this group does not own.
+            group.cancelAll()
+            return first
+        }
+    }
+
+    /// Every native tool, in one place. Returns the line that is about to be spoken.
+    private func nativeToolResult(_ name: String, args: [String: Any]) async -> String {
+        let result: String
+        switch name {
+        case "stop_task":
+            result = await self.cancelTask((args["task_id"] as? String) ?? "")
+        case "undo_task":
+            result = self.undoTask((args["task_id"] as? String) ?? "")
+        case "set_queue_paused":
+            result = self.setQueuePaused((args["paused"] as? Bool) ?? true)
+        case "summarize_conversation":
+            result = self.summarizeSessionNow(showPanel: false)
+        case "change_setting":
+            result = self.changeSetting(name: args["setting"] as? String ?? "",
+                                        to: args["value"] as? String ?? "")
+        case "open_settings":
+            result = self.openSettings(tab: args["tab"] as? String)
+        case "go_to_sleep":
+            result = self.goToSleep()
+        case "memory_status":
+            result = self.conversation.spokenStatus
+        case "stop_transcript":
+            result = self.setTranscriptKeeping(paused: true)
+        case "resume_transcript":
+            result = self.setTranscriptKeeping(paused: false)
+        case "forget_conversation":
+            result = self.forgetThisConversation()
+        default:
+            // The recorder's transport and the camera go through the same gate
+            // the spoken route uses — a model that decides to stop a recording
+            // nobody is making is told so in the same words, and the refusal is
+            // logged the same way.
+            if let command = VoiceCommand(toolName: name) {
+                result = self.runVoiceCommand(command, from: .model)
+            } else {
+                result = await NativeTools.run(name, args: args)
+            }
+        }
+        return result
+    }
+
+    /// Hands a coding task to Claude Code, or queues it. Split out of `handleToolCall`
+    /// so the native path above reads as the fast path it is.
+    private func dispatchToClaudeCode(callID: String, argumentsJSON: String) {
         let args = (try? JSONSerialization.jsonObject(with: Data(argumentsJSON.utf8))) as? [String: Any]
         let instruction = (args?["task"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !instruction.isEmpty else {
@@ -2748,6 +2965,13 @@ final class AppState: ObservableObject {
             note("\(taskID): no git repo at \(repo) — this task has no undo.")
         }
 
+        // How to launch it: which model, how much thinking, and whether this Mac's MCP
+        // servers are worth the three seconds they cost to connect. Read from the words
+        // of the instruction, and logged, because a task that came back oddly shallow
+        // should be traceable to the plan that ran it.
+        let plan = DevTaskPlan.plan(for: instruction, fastStart: settings.devFastStart)
+        note("\(taskID) running on \(plan.summary)")
+
         devTaskRunning = true
         devTaskSummary = label
         startDevNarration()
@@ -2759,6 +2983,7 @@ final class AppState: ObservableObject {
                                           task: instruction,
                                           repo: repo,
                                           permissionMode: mode,
+                                          plan: plan,
                                           resumeSessionID: resumeSessionID) { step in
                 Task { @MainActor [weak self] in self?.appendDevStep(step, taskID: taskID) }
             }

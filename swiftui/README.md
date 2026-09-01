@@ -336,8 +336,10 @@ is the whole claim `VideoTrackWriter.setPaused` makes.
 | Barge-in | `input_audio_buffer.speech_started` → flush the local playback queue. The server truncates its own turn (`turn_detection.interrupt_response: true`), so no `response.cancel` is sent — that only races and returns "no active response found". |
 | Response lifecycle | `ResponseCoordinator` (`VibeVoiceCore`) owns every `response.create` / `response.cancel`. One response at a time, deadlines on every phase, a Stop button that always works. See below. |
 | Screen | ScreenCaptureKit — `SCShareableContent` + `SCContentFilter` + `SCScreenshotManager.captureImage`, downscaled to 1280px wide, JPEG q0.7, sent as a `data:` URI per contract §3. One display at a time — see below |
-| Hotkey | Carbon `RegisterEventHotKey`, six slots (no Accessibility permission needed): ⌘⇧2 screenshot, summon, connect, record, hush, and the wake key |
-| Wake key | ⌃Q — turn it on, from anywhere, with no off. Launch-at-login (`SMAppService`) keeps the process alive so the key has something to fire in; `flowstate://connect` is the cold-start route for when it does not. See below |
+| Hotkey | Carbon `RegisterEventHotKey`, seven slots (no Accessibility permission needed): ⌘⇧2 screenshot, summon, connect, record, hush, wake, and the dictation slot (the only one that also reports key-up). Every registration is checked — a chord another app owns fails with an `OSStatus`, and that failure is carried up to the row in Settings that set it rather than dying in stderr |
+| Wake key | ⌃Q — a tap toggles a session on or off, from anywhere; hold it to dictate. Launch-at-login (`SMAppService`) keeps the process alive so the key has something to fire in; `flowstate://connect` is the cold-start route for when it does not. See below |
+| Deactivate key | Esc — turn it off, from anywhere. The one binding that is not permanent: a modifier-less chord is registered only while a session is live *and* FlowState is not the app in front. See below |
+| Shortcut conflicts | `HotkeyConflict` (`VibeVoiceCore`) — two rows on one chord, a chord macOS refused, and a chord that already means something elsewhere (⌃Q is XON, ⌥Space is Raycast's). All three are said out loud under the picker that set them |
 | Settings | JSON at `~/Library/Application Support/VibeVoice/settings.json` |
 | Settings pane | A floating, draggable pane with six tabs that sizes itself to whichever is open (`FloatingPanel.swift`; geometry in `PanelLayout`, `VibeVoiceCore`) |
 | Theme | One `Theme` token = one dynamic `NSColor`, resolved per effective appearance (`Theme.swift`) |
@@ -345,11 +347,13 @@ is the whole claim `VideoTrackWriter.setPaused` makes.
 
 ### The wake key (⌃Q)
 
-One key, one direction: **turn it on**. It brings FlowState forward, ends any hush
-snooze, unmutes the microphone and opens a session — and if a session is already open it
-does nothing at all. That last part is the point. The connect key (⌃⇧F) *toggles*, which
-means using it requires already knowing what state the app is in, and half the time
-nobody does. `AppState.wakeAndConnect` is idempotent, so the key can be leaned on.
+One key, one gesture, two directions: **a tap toggles**. If nothing is running, it brings
+FlowState forward, ends any hush snooze, unmutes the microphone and opens a session; if a
+session is already open, that same tap hangs it up. `HotkeyGesture.Recognizer` resolves the
+tap the instant the key comes back up — no double-press window, no lag either direction —
+and `AppState.wakeAndConnect`/`hush` are each idempotent, so leaning on the key or firing it
+from a deep link at the same moment never costs a live session. Holding the key instead
+dictates; see `DictationDriver` and `HotkeyGesture.swift`.
 
 **"Even when the app is closed" is a claim with a catch, and it is worth being straight
 about it.** `RegisterEventHotKey` binds a hotkey to a *running process*. macOS has no
@@ -384,6 +388,51 @@ iTerm and tmux. ⌃⇧Q and ⌃⌥Space are offered beside it for anyone who use
 Nothing here needs Accessibility. A bare modifier chord (hold ⌃⇧, the way Wispr Flow
 does) would need an event tap, and that means a permission prompt this app has already
 spent enough of its owner's patience on.
+
+### The deactivate key (Esc)
+
+The mirror of the wake key, and the same one-direction rule: it only ever **stops**. It
+hangs up, clears the captions and keeps the wake phrase and the clap quiet for
+`hushSeconds` afterwards — because whatever set the session off by accident is usually
+still happening. It never connects, which is what makes it safe to hit without knowing
+what state anything is in. The connect key (⌃⇧F) *toggles*, and a toggle is the wrong
+shape for a panic key.
+
+**Escape is not bound the way the other chords are, and it must not be.** Carbon
+registers ahead of every app, so a permanent process-wide Escape would break dismissing a
+dialog, leaving a vim insert, cancelling a Spotlight query and closing FlowState's own
+settings panel — for the whole time the app is running, which is all day. So it is bound
+to a *moment* instead. `HotkeyCombo.isSessionScoped` is true for any chord with no
+modifier on it, and `AppState.applyHushHotkey` registers such a chord only while both of
+these hold:
+
+1. **A session is live or connecting.** The 99% of the day with nothing running, Escape
+   is nobody's but the user's.
+2. **FlowState is not the frontmost app.** Inside our own window Escape already means
+   "cancel this edit" and "close this panel", and Carbon would beat those — the user
+   would be pressing a key that does the wrong thing in the one place they can see us.
+   The Disconnect button, ⌃Q on it, and the Session menu cover stopping from in here.
+
+`AppState.refreshSessionScopedHotkeys` re-applies on the `connection` `didSet` and on
+`NSApplication.didBecomeActive` / `didResignActive` — the four edges where either
+condition can move. It is a no-op for the three modifier alternates (⌃⇧Esc, ⌘⇧Esc, ⌘⇧.),
+which stay bound permanently and therefore also work while idle, where they still start
+the wake-phrase snooze without a session having to exist.
+
+### When a shortcut does not work
+
+Every rebindable row can fail in three different ways, and they need different words:
+
+| What happened | How it is found | What is shown |
+|---|---|---|
+| Another app owns the chord | `RegisterEventHotKey` returns non-`noErr`; `bind` reports it up through `AppState.report` | "⌥Space could not be registered for Show the window — another app already owns it." |
+| Two FlowState rows on one chord | `HotkeyConflict.clashes(among:)`, from settings alone — before anything is pressed | "⌃Q is set for both Wake it up and Stop everything…" |
+| The chord works but costs something | `HotkeyConflict.advisory(for:)` | ⌃Q is XON in a terminal; ⌥Space is Alfred's and Raycast's default |
+
+The second case has no runtime symptom at all — Carbon refuses the second registration
+and the pane goes on showing both rows set — so it is detected from the settings rather
+than waited for. No winner is named: which of the two survives depends on the order the
+slots happened to be bound in, and guessing would be a fact-shaped guess.
 
 
 Sample rates are logged and shown in the UI footer at runtime, e.g.
@@ -553,7 +602,7 @@ Six tabs, in the order the questions arrive:
 | **General** | Personality prompt, voice, model, speaking speed, turn detection, cost mode |
 | **Look** | Appearance, backdrops, moving backgrounds, the floating widget |
 | **Screen** | Continuous screen mode, permission, which display |
-| **Access** | Menu bar, wake key, start at login, summon/connect/record/stop shortcuts, native tools, Notion |
+| **Access** | Menu bar, wake key (⌃Q), deactivate key (Esc), start at login, summon/connect/record shortcuts — each with its conflicts and costs named under it — native tools, Notion |
 | **Dev** | Dev Mode — the one tab where a switch can change files on this Mac |
 | **Data** | Recordings, conversations, retention, summaries |
 

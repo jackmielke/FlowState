@@ -1,17 +1,16 @@
 import XCTest
 @testable import VibeVoiceCore
 
-/// Telling a hold from a double press on one key.
+/// Telling a hold from a tap on one key.
 ///
 /// The bug this file exists to prevent: acting on key-down. It looks correct in a demo
-/// because a single hold works, and it is wrong for every double press — the first press
-/// opens the mic, the second toggles voice mode, and the user is left dictating into a
-/// conversation they did not mean to start. Every test below is a shape that a
-/// key-down-triggered implementation gets wrong.
+/// because a single hold works, and it is wrong for every tap — the mic would open on the
+/// way to a toggle the user only meant to fire once released. Every test below is a shape
+/// that a key-down-triggered implementation gets wrong.
 final class HotkeyGestureTests: XCTestCase {
 
     private func recognizer() -> HotkeyGesture.Recognizer {
-        HotkeyGesture.Recognizer(holdThreshold: 0.25, doubleTapWindow: 0.35)
+        HotkeyGesture.Recognizer(holdThreshold: 0.25)
     }
 
     // MARK: - Hold
@@ -28,10 +27,11 @@ final class HotkeyGestureTests: XCTestCase {
     func test_releasingBeforeThresholdIsNotAHold() {
         var r = recognizer()
         r.keyDown(at: 0)
-        XCTAssertNil(r.keyUp(at: 0.1))
+        // A release before the threshold is a tap, not a hold — it toggles immediately
+        // rather than beginning dictation.
+        XCTAssertEqual(r.keyUp(at: 0.1), .startVoiceMode)
         XCTAssertFalse(r.isDictating)
-        // And the lone tap expires into nothing rather than firing late.
-        XCTAssertNil(r.tick(at: 0.5))
+        XCTAssertNil(r.tick(at: 0.5), "nothing left pending once the tap has resolved")
     }
 
     /// Key repeat fires many downs while held. Restarting the clock on each one would mean
@@ -44,41 +44,35 @@ final class HotkeyGestureTests: XCTestCase {
         XCTAssertEqual(r.tick(at: 0.25), .beginDictation)
     }
 
-    // MARK: - Double press
+    // MARK: - Tap toggles
 
-    func test_twoQuickTapsToggleVoiceMode() {
-        var r = recognizer()
-        r.keyDown(at: 0)
-        XCTAssertNil(r.keyUp(at: 0.08), "first tap must stay pending")
-        XCTAssertEqual(r.keyDown(at: 0.20), .startVoiceMode)
-    }
-
-    /// The whole point of rule 1: the first press of a double press must not have started
-    /// dictation on its way through.
-    func test_doublePressNeverBeginsDictation() {
+    func test_tapNeverBeginsDictation() {
         var r = recognizer()
         XCTAssertNil(r.keyDown(at: 0))
-        XCTAssertNil(r.keyUp(at: 0.08))
-        XCTAssertEqual(r.keyDown(at: 0.20), .startVoiceMode)
+        XCTAssertEqual(r.keyUp(at: 0.08), .startVoiceMode)
         XCTAssertFalse(r.isDictating, "the mic must never have opened")
     }
 
-    func test_secondTapArrivingTooLateStartsOver() {
+    /// A second tap right after the first is just another toggle — off again — not a
+    /// distinct "double press" gesture.
+    func test_secondQuickTapTogglesBackOff() {
         var r = recognizer()
+        r.isVoiceModeActive = false
         r.keyDown(at: 0)
-        r.keyUp(at: 0.08)
-        XCTAssertNil(r.tick(at: 0.43), "window expired, lone tap discarded")
-        XCTAssertNil(r.keyDown(at: 0.50), "this is a new first press, not a double")
+        XCTAssertEqual(r.keyUp(at: 0.08), .startVoiceMode)
+        r.isVoiceModeActive = true
+        r.keyDown(at: 0.20)
+        XCTAssertEqual(r.keyUp(at: 0.28), .stopVoiceMode)
     }
 
-    /// Rule 2. Hold, release, then press again quickly is two intentions, not a double
-    /// press — the user dictated and then wanted voice mode.
-    func test_holdFollowedByQuickPressIsNotADoublePress() {
+    /// Hold, release, then press again quickly is two intentions, not one gesture — the
+    /// user dictated and then wants to toggle voice mode.
+    func test_holdFollowedByQuickTapIsASeparatePress() {
         var r = recognizer()
         r.keyDown(at: 0)
         XCTAssertEqual(r.tick(at: 0.25), .beginDictation)
         XCTAssertEqual(r.keyUp(at: 1.0), .endDictation)
-        XCTAssertNil(r.keyDown(at: 1.05), "must begin a fresh press, not start voice mode")
+        XCTAssertNil(r.keyDown(at: 1.05), "must begin a fresh press")
         XCTAssertEqual(r.tick(at: 1.30), .beginDictation, "and it can become another hold")
     }
 
@@ -100,16 +94,6 @@ final class HotkeyGestureTests: XCTestCase {
         XCTAssertNil(r.nextDeadline, "back to idle")
     }
 
-    func test_deadlineAfterATapIsTheDoubleTapWindow() throws {
-        var r = recognizer()
-        r.keyDown(at: 5)
-        r.keyUp(at: 5.1)
-        // accuracy rather than equality: 5.1 + 0.35 is 5.449999999999999 in binary
-        // floating point, and a deadline is a moment to schedule a timer for, not a value
-        // anyone compares exactly.
-        XCTAssertEqual(try XCTUnwrap(r.nextDeadline), 5.45, accuracy: 0.0001)
-    }
-
     // MARK: - Reset
 
     func test_resetWhileHoldingReportsCancellation() {
@@ -125,11 +109,10 @@ final class HotkeyGestureTests: XCTestCase {
         XCTAssertNil(r.reset())
     }
 
-    // MARK: - Stopping a running session
+    // MARK: - Toggling a running session
 
-    /// Jack's rule: double press to start, press once to stop. While a session is running
-    /// there is nothing to disambiguate, so the tap must act on key-up rather than waiting
-    /// out the double-press window — a hang-up key with 350ms of lag feels broken.
+    /// Jack's rule: one press toggles. While a session is running the tap must act on
+    /// key-up with no delay — a hang-up key with any lag feels broken.
     func test_singleTapWhileVoiceModeRunningStopsItImmediately() {
         var r = recognizer()
         r.isVoiceModeActive = true
@@ -138,14 +121,13 @@ final class HotkeyGestureTests: XCTestCase {
         XCTAssertNil(r.nextDeadline, "no timer should be left armed")
     }
 
-    /// The same tap with nothing running must stay silent, or every stray press opens a
-    /// session.
-    func test_singleTapWhileIdleStillDoesNothing() {
+    /// The mirror image: the same tap with nothing running starts it, just as promptly.
+    func test_singleTapWhileIdleStartsItImmediately() {
         var r = recognizer()
         r.isVoiceModeActive = false
         r.keyDown(at: 0)
-        XCTAssertNil(r.keyUp(at: 0.08))
-        XCTAssertNil(r.tick(at: 0.5))
+        XCTAssertEqual(r.keyUp(at: 0.08), .startVoiceMode)
+        XCTAssertNil(r.nextDeadline, "no timer should be left armed")
     }
 
     /// Holding still dictates even mid-session — only the tap path changes behaviour.

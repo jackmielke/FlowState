@@ -742,7 +742,9 @@ struct SettingsView: View {
                                     get: { state.settings.summonHotkey },
                                     set: { state.settings.summonHotkey = $0; state.applySummonHotkey() }),
                                 accessibilityPrefix: "Summon shortcut")
-                caption("Summons \(kAssistantDisplayName) from any app, and hides it again if it is already in front. ⌘⇧2 still sends a screenshot from anywhere. If a shortcut does nothing, another app already owns it — pick a different one.")
+                    .help("Brings \(kAssistantDisplayName)'s window forward from any app, and hides it again if it is already in front.")
+                caption("Summons \(kAssistantDisplayName) from any app, and hides it again if it is already in front. ⌘⇧2 still sends a screenshot from anywhere. If a shortcut does nothing, another app already owns it — \(kAssistantDisplayName) says so under the row that set it.")
+                shortcutNotes(.summon, comboID: state.settings.summonHotkey)
 
                 HStack {
                     Text("Wake it up").font(.system(size: 12.5)).foregroundStyle(Theme.text)
@@ -754,13 +756,18 @@ struct SettingsView: View {
                                     get: { state.settings.wakeHotkey },
                                     set: { state.settings.wakeHotkey = $0; state.applyWakeHotkey() }),
                                 accessibilityPrefix: "Wake shortcut")
-                caption("The one key with no off. It brings \(kAssistantDisplayName) forward, unmutes the microphone and opens a session — and if a session is already open it does nothing, so it can be hit without first working out what state anything is in. That is the difference between it and the connect shortcut below, which toggles.")
-                caption("⌃Q is also XON in a terminal — the key that resumes output after ⌃S. Binding it here takes it from Terminal, iTerm and tmux, so pick ⌃⇧Q or ⌃⌥Space instead if you use flow control.")
+                    .help("Toggle: brings \(kAssistantDisplayName) forward, unmutes the microphone and opens a session — or hangs one up if it is already open. Hold it to dictate instead.")
+                caption("One press toggles: if nothing is running, it brings \(kAssistantDisplayName) forward, unmutes the microphone and opens a session; if a session is already open, that same press hangs it up. Hold it instead to dictate.")
+                // The XON warning and its two siblings live in `HotkeyConflict` rather
+                // than in this string, so the same sentence can be shown wherever the
+                // chord turns up — and so a chord nobody has selected does not get a
+                // paragraph explaining a problem they do not have.
+                shortcutNotes(.wake, comboID: state.settings.wakeHotkey)
                 // Two things want ⌃Q and only one can have it. The wake key is asked
                 // first, because it is the one the user chose; leaving the other side
                 // unexplained is how a shortcut becomes "broken" rather than "taken".
                 caption(state.settings.wakeHotkey == HotkeyCombo.ctrlQ.id
-                        ? "While the wake key is ⌃Q, that chord always means wake. Move it here and ⌃Q hangs up a live session instead, from anywhere in the window."
+                        ? "While the wake key is ⌃Q, that chord always means toggle. Move it here and ⌃Q hangs up a live session instead, from anywhere in the window."
                         : "⌃Q is free, so inside \(kAssistantDisplayName)'s window it hangs up a live session — the Disconnect button, without reaching for the pointer. It does nothing while idle, so it can never start a session by accident.")
 
                 HStack {
@@ -790,6 +797,8 @@ struct SettingsView: View {
                                     get: { state.settings.connectHotkey },
                                     set: { state.settings.connectHotkey = $0; state.applyConnectHotkey() }),
                                 accessibilityPrefix: "Connect shortcut")
+                    .help("Opens a session, or hangs up if one is already open. Unlike the wake key, this one toggles.")
+                shortcutNotes(.connect, comboID: state.settings.connectHotkey)
                 HStack {
                     Text("Stop everything")
                         .font(.system(size: 12.5)).foregroundStyle(Theme.text)
@@ -801,6 +810,15 @@ struct SettingsView: View {
                                     get: { state.settings.hushHotkey },
                                     set: { state.settings.hushHotkey = $0; state.applyHushHotkey() }),
                                 accessibilityPrefix: "Stop shortcut")
+                    .help("Deactivate: hangs up whatever is running and keeps it quiet for \(Int(state.settings.hushSeconds)) seconds. It never starts anything.")
+                shortcutNotes(.hush, comboID: state.settings.hushHotkey)
+                if HotkeyCombo.named(state.settings.hushHotkey).isSessionScoped {
+                    // The paragraph above already says when Esc is listened for — it is
+                    // the advisory `HotkeyConflict` attaches to the chord itself. What
+                    // is left is the part only this pane can answer: what to press
+                    // instead, and how to opt out of the arrangement entirely.
+                    caption("So inside \(kAssistantDisplayName)'s own window, stop with the Disconnect button, ⌃Q on it, or Session › Stop Everything. Pick one of the chords beside it if you want a stop key that is always listening — including while idle, where it starts the quiet period with no session open.")
+                }
                 caption("Hangs up, and never starts anything — that is the difference between it and the connect shortcut, which toggles. Somebody reaching for silence in a hurry does not know what state the app is in, and a key that might connect is worse than no key. It also keeps the wake phrase and the clap quiet for \(Int(state.settings.hushSeconds)) seconds, because whatever set it off by accident is usually still happening.")
 
                 HStack {
@@ -814,6 +832,8 @@ struct SettingsView: View {
                                     get: { state.settings.recordHotkey },
                                     set: { state.settings.recordHotkey = $0; state.applyRecordHotkey() }),
                                 accessibilityPrefix: "Record shortcut")
+                    .help("Starts or stops a screen recording from any app.")
+                shortcutNotes(.record, comboID: state.settings.recordHotkey)
                 caption("The one a screen recorder cannot do without: what you want to record is, by definition, not this window, so reaching for the button means leaving the thing you were about to capture. A short sound confirms it started, since you will not be looking.")
 
                 caption("Control-Shift-F by default. (⌃ is Control, ⇧ is Shift, ⌘ is Command.) Connects from anywhere, and hangs up if a session is already open — without going to find the window first. The point of something always there is that reaching it is not a task. A bare chord like holding ⌃⇧ on its own would need an event tap, and that means an Accessibility prompt, so this asks for a real key instead.")
@@ -1037,6 +1057,16 @@ struct SettingsView: View {
                             get: { state.settings.devPermissionMode == "bypassPermissions" },
                             set: { state.settings.devPermissionMode = $0 ? "bypassPermissions" : "acceptEdits" }),
                           tint: Theme.bad)
+
+                devToggle("Start fast",
+                          "Skips connecting this Mac's MCP servers — about three seconds of "
+                          + "startup on every task, paid again on every follow-up — unless what "
+                          + "you asked for actually names one (\"put it in Notion\"). Turn this "
+                          + "off if tasks here need a connector without saying its name.",
+                          isOn: Binding(
+                            get: { state.settings.devFastStart },
+                            set: { state.settings.devFastStart = $0 }),
+                          tint: Theme.voice)
 
                 devToggle("Narrate progress out loud",
                           "Steps are always fed to the model silently, so you can ask \"what are "
@@ -1671,6 +1701,37 @@ struct SettingsView: View {
             .font(.system(size: 11))
             .foregroundStyle(Theme.textFaint)
             .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// A shortcut that is not going to work, said out loud under the row that set it.
+    ///
+    /// Louder than a caption on purpose. Everything else in this pane describes what a
+    /// setting does; this one says the setting is currently a lie, and somebody skimming
+    /// past it will go on believing the key works.
+    private func shortcutWarning(_ s: String) -> some View {
+        HStack(alignment: .top, spacing: 7) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(Theme.badInk)
+                .padding(.top, 1.5)
+            Text(s)
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.textDim)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// Everything one shortcut row has to say about itself: what is broken, then what
+    /// the chord it is on already means elsewhere.
+    ///
+    /// Order matters. A registration that failed is actionable now; an advisory is
+    /// something to know. Reversing them buries the first under the second.
+    @ViewBuilder
+    private func shortcutNotes(_ role: HotkeyRole, comboID: String) -> some View {
+        ForEach(state.hotkeyWarnings(for: role), id: \.self) { shortcutWarning($0) }
+        if let note = HotkeyConflict.advisory(for: comboID) { caption(note) }
     }
 
     private func sliderRow(_ b: Binding<Double>, _ r: ClosedRange<Double>, _ label: String,

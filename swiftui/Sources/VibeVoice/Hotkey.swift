@@ -65,6 +65,24 @@ struct HotkeyCombo: Equatable, Identifiable {
         id: "cmdShiftPeriod", label: "⌘⇧.",
         keyCode: UInt32(kVK_ANSI_Period), modifiers: UInt32(cmdKey | shiftKey))
 
+    /// Bare Escape — the deactivate key.
+    ///
+    /// The key everybody already presses to make a thing stop, which is exactly why it
+    /// cannot be registered the way every other chord here is. Carbon binds ahead of
+    /// every app, so a permanent global Escape would break dismissing a dialog, leaving
+    /// a vim insert, cancelling a Spotlight query and closing this app's own panels —
+    /// for the entire time Flow is running, which is all day.
+    ///
+    /// So it is registered *conditionally*: see `isSessionScoped` and
+    /// `AppState.applyHushHotkey`. Only while a session is live, and only while Flow is
+    /// not the app in front. Both halves of that are needed. The first keeps Escape
+    /// ordinary for the 99% of the day with nothing running; the second keeps it
+    /// ordinary inside Flow's own window, where it already means "cancel this edit" and
+    /// "close this panel".
+    static let escape = HotkeyCombo(
+        id: "escape", label: "Esc",
+        keyCode: UInt32(kVK_Escape), modifiers: 0)
+
     /// The wake key. ⌃Q by default.
     ///
     /// A bare Control chord rather than one of the ⌘⇧ pairs because this is the key
@@ -88,8 +106,18 @@ struct HotkeyCombo: Equatable, Identifiable {
         id: "ctrlOptionSpace", label: "⌃⌥Space",
         keyCode: UInt32(kVK_Space), modifiers: UInt32(controlKey | optionKey))
 
+    /// True for a chord with no modifier on it.
+    ///
+    /// A modifier-less key belongs to whatever app is in front — it is the app's to
+    /// spend on cancelling, deleting, typing. Taking one process-wide for the whole
+    /// session is the kind of thing that makes a Mac feel broken with no clue as to why,
+    /// so these are bound only for the stretch of time they are actually wanted, and
+    /// released again after. Currently that is Escape; the rule is written against the
+    /// property rather than the id so the next one costs nothing.
+    var isSessionScoped: Bool { modifiers == 0 }
+
     static let summonChoices = [cmdShiftSpace, optionSpace, cmdShiftF]
-    static let hushChoices = [ctrlShiftEscape, cmdShiftEscape, cmdShiftPeriod]
+    static let hushChoices = [escape, ctrlShiftEscape, cmdShiftEscape, cmdShiftPeriod]
     static let recordChoices = [cmdShiftR, ctrlShiftR, optionShiftR]
     static let connectChoices = [ctrlShiftF, ctrlShiftSpace, cmdShiftL]
     static let wakeChoices = [ctrlQ, ctrlShiftQ, ctrlOptionSpace]
@@ -98,6 +126,26 @@ struct HotkeyCombo: Equatable, Identifiable {
 
     static func named(_ id: String) -> HotkeyCombo {
         all.first { $0.id == id } ?? .cmdShiftSpace
+    }
+}
+
+/// The five rebindable shortcuts, named the way the Settings pane names them.
+///
+/// One vocabulary, used three places: the picker heading, the warning under it, and the
+/// message `HotkeyConflict` builds when two of them collide. A shortcut that is called
+/// "Wake it up" in the pane and "wakeHotkey" in the warning underneath is two things to
+/// the person reading, and they have to work out that it is one.
+enum HotkeyRole: String, CaseIterable {
+    case summon, wake, connect, hush, record
+
+    var title: String {
+        switch self {
+        case .summon:  return "Show the window"
+        case .wake:    return "Wake it up"
+        case .connect: return "Talk to it"
+        case .hush:    return "Stop everything"
+        case .record:  return "Start or stop recording"
+        }
     }
 }
 
@@ -130,7 +178,8 @@ final class GlobalHotkey {
 
     /// The summon key. Rebinding replaces whatever was there, so switching combos in
     /// Settings does not leave the old one live.
-    func registerSummon(_ combo: HotkeyCombo, action: @escaping () -> Void) {
+    @discardableResult
+    func registerSummon(_ combo: HotkeyCombo, action: @escaping () -> Void) -> Bool {
         bind(id: 2, keyCode: combo.keyCode, modifiers: combo.modifiers, action: action)
     }
 
@@ -141,7 +190,8 @@ final class GlobalHotkey {
     /// A separate slot from summon on purpose: bringing the window forward and opening a
     /// session are different intentions, and the one worth having under a finger is the
     /// one that does not require finding the window first.
-    func registerConnect(_ combo: HotkeyCombo, action: @escaping () -> Void) {
+    @discardableResult
+    func registerConnect(_ combo: HotkeyCombo, action: @escaping () -> Void) -> Bool {
         bind(id: 3, keyCode: combo.keyCode, modifiers: combo.modifiers, action: action)
     }
 
@@ -152,7 +202,8 @@ final class GlobalHotkey {
     /// The one a screen recorder cannot do without: what you want to record is, by
     /// definition, not this app's window, so reaching for it means leaving the thing you
     /// were about to capture.
-    func registerRecord(_ combo: HotkeyCombo, action: @escaping () -> Void) {
+    @discardableResult
+    func registerRecord(_ combo: HotkeyCombo, action: @escaping () -> Void) -> Bool {
         bind(id: 4, keyCode: combo.keyCode, modifiers: combo.modifiers, action: action)
     }
 
@@ -163,7 +214,8 @@ final class GlobalHotkey {
     /// Separate from the connect key on purpose: that one toggles, and a toggle is the
     /// wrong shape for a panic key. Somebody reaching for silence in a hurry does not
     /// know what state the app is in, and a key that might CONNECT is worse than no key.
-    func registerHush(_ combo: HotkeyCombo, action: @escaping () -> Void) {
+    @discardableResult
+    func registerHush(_ combo: HotkeyCombo, action: @escaping () -> Void) -> Bool {
         bind(id: 5, keyCode: combo.keyCode, modifiers: combo.modifiers, action: action)
     }
 
@@ -175,7 +227,8 @@ final class GlobalHotkey {
     /// reason hush is: connect TOGGLES, and a toggle cannot answer "just be on". Someone
     /// hitting this has already decided what they want, and half the time they do not
     /// know whether a session is open — so a key that might hang up is the wrong key.
-    func registerWake(_ combo: HotkeyCombo, action: @escaping () -> Void) {
+    @discardableResult
+    func registerWake(_ combo: HotkeyCombo, action: @escaping () -> Void) -> Bool {
         bind(id: 6, keyCode: combo.keyCode, modifiers: combo.modifiers, action: action)
     }
 
@@ -185,11 +238,12 @@ final class GlobalHotkey {
     ///
     /// Its own slot rather than an option on the wake key because the two answer different
     /// questions, and because this is the only slot in the app that needs key-up at all.
-    /// The gesture — hold to dictate, double press to open a session, tap to hang one up —
-    /// is decided by `HotkeyGesture.Recognizer`; this just reports the raw edges.
+    /// The gesture — hold to dictate, tap once to toggle a session on or off — is decided
+    /// by `HotkeyGesture.Recognizer`; this just reports the raw edges.
+    @discardableResult
     func registerDictation(_ combo: HotkeyCombo,
                            down: @escaping () -> Void,
-                           up: @escaping () -> Void) {
+                           up: @escaping () -> Void) -> Bool {
         bind(id: 7, keyCode: combo.keyCode, modifiers: combo.modifiers, action: down, release: up)
     }
 
@@ -198,11 +252,19 @@ final class GlobalHotkey {
 
     // MARK: -
 
+    /// Returns whether the chord is now ours. False means somebody else owns it.
+    ///
+    /// The return value is the whole reason this is not `Void`: a shortcut that failed to
+    /// register looks *exactly* like one that works right up until it is pressed, and the
+    /// only moment anybody can be told the truth is here. `AppState` carries it up to the
+    /// Settings pane; the stderr line stays for the case where nobody is looking at the
+    /// pane.
+    @discardableResult
     private func bind(id: UInt32,
                       keyCode: UInt32,
                       modifiers: UInt32,
                       action: @escaping () -> Void,
-                      release: (() -> Void)? = nil) {
+                      release: (() -> Void)? = nil) -> Bool {
         installHandlerIfNeeded()
         unbind(id: id)
 
@@ -211,13 +273,16 @@ final class GlobalHotkey {
         let status = RegisterEventHotKey(keyCode, modifiers, hkID,
                                          GetApplicationEventTarget(), 0, &ref)
         // A combo another app already owns fails here rather than silently doing nothing,
-        // which is worth knowing about when a key "doesn't work".
+        // which is worth knowing about when a key "doesn't work". Note that "another app"
+        // includes this one: two of our own slots on one chord fail the same way, and the
+        // second one asked is the one that loses.
         guard status == noErr else {
             FileHandle.standardError.write(Data(
                 "[hotkey] could not register id \(id) (OSStatus \(status)) — another app may own it\n".utf8))
-            return
+            return false
         }
         slots[id] = Slot(ref: ref, action: action, release: release)
+        return true
     }
 
     private func unbind(id: UInt32) {
