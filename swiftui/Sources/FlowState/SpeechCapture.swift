@@ -166,7 +166,7 @@ enum AudioClipRecorder {
     /// The directory clips would live in. Created lazily, and only by a real recorder.
     ///
     /// Under `ConversationStore.root` rather than reaching for Application Support
-    /// directly, so it moves with `VIBEVOICE_HOME` like everything else FlowState keeps.
+    /// directly, so it moves with `FLOWSTATE_HOME` like everything else FlowState keeps.
     /// It did not, which meant "delete everything" pointed at the real folder even
     /// during a test run over a temporary home.
     static var directory: URL {

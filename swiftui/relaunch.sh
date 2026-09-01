@@ -60,6 +60,19 @@ cp -R FlowState.app "$INSTALLED"
 if [ -f "$SIGN_KC" ] && [ -f "$HOME/.config/vibe-voice/signing/kc.pass" ]; then
   security unlock-keychain -p "$(cat "$HOME/.config/vibe-voice/signing/kc.pass")" "$SIGN_KC" 2>/dev/null
   codesign --force --deep --sign "$SIGN_ID" --keychain "$SIGN_KC" --timestamp=none "$INSTALLED" 2>&1 | sed 's/^/    /'
+else
+  # Ad-hoc, for everybody who is not this machine.
+  #
+  # This used to be an `if` with no `else`, so a clone on somebody else's Mac
+  # installed an UNSIGNED bundle. macOS hands TCC grants to a code identity, and an
+  # unsigned app's identity changes with the bytes — so the microphone permission
+  # they granted on Tuesday stopped applying on Wednesday, once for every rebuild,
+  # with no error saying why.
+  #
+  # `--sign -` costs nothing, needs no certificate and no Apple Developer account,
+  # and gives the bundle a stable identity for as long as the identifier stays put.
+  echo "    ad-hoc signing (no developer certificate needed)"
+  codesign --force --deep --sign - "$INSTALLED" 2>&1 | sed 's/^/    /'
 fi
 echo "    designated => $(codesign -d -r- "$INSTALLED" 2>&1 | sed -n 's/^designated => //p')"
 

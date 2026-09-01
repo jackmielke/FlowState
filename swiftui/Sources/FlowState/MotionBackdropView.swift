@@ -140,7 +140,7 @@ extension Color {
 enum MotionLibrary {
 
     /// Where a user's own loops go. Under the same root as everything else FlowState
-    /// keeps, so `VIBEVOICE_HOME` moves them with the transcripts.
+    /// keeps, so `FLOWSTATE_HOME` moves them with the transcripts.
     static var userFolder: URL {
         ConversationStore.root.appendingPathComponent("Motion", isDirectory: true)
     }

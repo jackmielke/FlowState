@@ -48,7 +48,7 @@ warning and nothing to do in Terminal.
 **If you'd rather build it** — you need Xcode's command line tools:
 
 ```bash
-git clone https://github.com/jackmielke/FlowState && cd vantage/swiftui
+git clone https://github.com/jackmielke/FlowState && cd FlowState/swiftui
 ./build.sh && open FlowState.app
 ```
 

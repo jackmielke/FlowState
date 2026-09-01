@@ -571,7 +571,7 @@ final class SettingsStore: ObservableObject {
     }
 
     private static var fileURL: URL {
-        // One root for everything FlowState keeps, so `VIBEVOICE_HOME` moves the settings
+        // One root for everything FlowState keeps, so `FLOWSTATE_HOME` moves the settings
         // with the transcripts instead of half of each.
         let base = ConversationStore.root
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)

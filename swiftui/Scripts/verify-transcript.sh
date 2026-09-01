@@ -12,7 +12,7 @@
 # round trip is proved here, by writing files, throwing the store away, building a new
 # one over the same folder and asking it what it remembers.
 #
-# Everything runs under VIBEVOICE_HOME in a temp folder, so this never touches the
+# Everything runs under FLOWSTATE_HOME in a temp folder, so this never touches the
 # conversations on the machine it runs on.
 #
 # ConversationStore.swift imports Foundation, Combine and VibeVoiceCore, and nothing
@@ -24,7 +24,7 @@ cd "$(dirname "$0")/.."
 WORK="$(mktemp -d)"
 OUT="$WORK/verify-transcript"
 DRIVER="$WORK/main.swift"
-export VIBEVOICE_HOME="$WORK/home"
+export FLOWSTATE_HOME="$WORK/home"
 
 cat > "$DRIVER" <<'SWIFT'
 import Foundation

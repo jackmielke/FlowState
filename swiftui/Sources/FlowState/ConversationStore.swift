@@ -474,13 +474,13 @@ final class ConversationStore: ObservableObject {
 
     /// Where everything FlowState keeps lives. Settings, transcripts, notes, the index.
     ///
-    /// `VIBEVOICE_HOME` moves the lot somewhere else for the length of one launch. That
+    /// `FLOWSTATE_HOME` moves the lot somewhere else for the length of one launch. That
     /// exists so this half of the app can be exercised for real — quit it, start it
     /// again, check the conversation came back — without a test run rummaging through
     /// somebody's actual conversations. Unset, which is every normal launch, it is
     /// Application Support as before.
     nonisolated static var root: URL {
-        let env = ProcessInfo.processInfo.environment["VIBEVOICE_HOME"] ?? ""
+        let env = ProcessInfo.processInfo.environment["FLOWSTATE_HOME"] ?? ""
         if !env.isEmpty {
             return URL(fileURLWithPath: (env as NSString).expandingTildeInPath, isDirectory: true)
         }

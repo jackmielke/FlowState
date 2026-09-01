@@ -284,7 +284,7 @@ kept and one that is merely on screen.
 
 `Scripts/verify-transcript.sh` compiles the real `ConversationStore` on its own — it
 imports Foundation, Combine and FlowStateCore and nothing else — over a temporary
-`VIBEVOICE_HOME`, then writes, throws the store away, builds a new one over the same
+`FLOWSTATE_HOME`, then writes, throws the store away, builds a new one over the same
 folder and asks what it remembers. Seven groups: written to disk at 0600, read back after
 a "restart", corrected and deleted per line, pinned across a restart and past its
 retention window, trimmed by keep-last, held out of disk by manual-save, and finally
@@ -346,7 +346,7 @@ go and look at what was kept and delete it with `rm`. A file they can read is wo
 here than an index they cannot. Session ids are minted by the app and reduced to
 `[A-Za-z0-9-_]` before becoming a path (`SessionID.sanitize`).
 
-`VIBEVOICE_HOME` moves the whole directory somewhere else for the length of one launch.
+`FLOWSTATE_HOME` moves the whole directory somewhere else for the length of one launch.
 It exists so this half of the app can be exercised for real — quit it, start it again,
 check the conversation came back — without a test run rummaging through actual
 conversations.
