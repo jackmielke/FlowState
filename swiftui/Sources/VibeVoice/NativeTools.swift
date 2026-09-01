@@ -209,7 +209,7 @@ enum NativeTools {
         case "get_context":     return context()
         case "read_clipboard":  return clipboard()
         case "get_calendar":    return await calendar(daysAhead: intArg(args["days_ahead"]) ?? 0)
-        case "list_shortcuts":  return shortcutList()
+        case "list_shortcuts":  return await shortcutList()
         case "run_shortcut":    return await runShortcut(name: args["name"] as? String ?? "",
                                                          input: args["input"] as? String)
         case "web_search":      return await WebSearch.search(args["query"] as? String ?? "")
@@ -246,18 +246,29 @@ enum NativeTools {
             : "Clipboard: " + s
     }
 
+    /// One store for the app's life.
+    ///
+    /// `EKEventStore()` opens the calendar database, which is not free, and the old code
+    /// built a fresh one — plus a fresh access request — on every "what's on today?".
+    /// Held onto, the second call is a query against something already warm.
+    private static let events = EKEventStore()
+
     private static func calendar(daysAhead: Int) async -> String {
-        let store = EKEventStore()
-        let granted: Bool
-        do {
-            granted = try await store.requestFullAccessToEvents()
-        } catch {
-            return "Calendar access failed: \(error.localizedDescription)"
+        // Asking for access that has already been granted still round-trips through TCC.
+        // Read the status first and only ask when the answer might be no.
+        if EKEventStore.authorizationStatus(for: .event) != .fullAccess {
+            let granted: Bool
+            do {
+                granted = try await events.requestFullAccessToEvents()
+            } catch {
+                return "Calendar access failed: \(error.localizedDescription)"
+            }
+            guard granted else {
+                return "Calendar access is off. Turn it on in System Settings, Privacy & Security, "
+                     + "Calendars, then ask again."
+            }
         }
-        guard granted else {
-            return "Calendar access is off. Turn it on in System Settings, Privacy & Security, "
-                 + "Calendars, then ask again."
-        }
+        let store = events
 
         let cal = Foundation.Calendar.current
         let start = cal.startOfDay(for: Date())

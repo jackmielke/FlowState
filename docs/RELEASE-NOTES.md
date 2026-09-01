@@ -5,6 +5,66 @@ goes missing — what it does *not* do yet.
 
 ---
 
+## ⌃Q on, Esc off
+
+The two ends of a conversation now have a key each, and both are rebindable in
+Settings › Access.
+
+| | Key | What it does |
+|---|---|---|
+| **Activate** | ⌃Q | Brings FlowState forward, ends any hush snooze, unmutes the microphone and opens a session. Never hangs up, so it can be hit without knowing what state anything is in. Held, it dictates instead; pressed twice, it starts talking. |
+| **Deactivate** | Esc | Hangs up, clears the captions, and keeps the wake phrase and the clap quiet for 90 seconds afterwards. Never connects. |
+
+Alternates for both, since neither chord is free on every Mac: ⌃⇧Q and ⌃⌥Space for
+activate, ⌃⇧Esc / ⌘⇧Esc / ⌘⇧. for deactivate. Either row can be switched off entirely —
+"Off" is one of the choices rather than a separate switch, because turning a shortcut off
+and moving it are the same decision.
+
+### Escape is only listened for when it is wanted
+
+A shortcut registered the ordinary way is registered ahead of every app on the machine,
+for as long as FlowState runs. Doing that to a bare Escape would break dismissing a
+dialog, leaving a vim insert mode, cancelling a Spotlight query — all day, for one
+feature. So this one is bound to a moment rather than to the app: **only while a session
+is live, and only while FlowState is not the app in front.**
+
+That is where you would reach for it — you are in another app, something is talking, you
+want it to stop. Inside FlowState's own window Escape keeps its ordinary meaning (cancel
+this edit, close this panel) and stopping is the Disconnect button, ⌃Q on it, or Session ›
+Stop Everything. If you would rather have a stop key that is always listening — including
+while idle, where it starts the quiet period with no session open — pick one of the three
+modifier chords instead. Those are bound permanently, exactly as before.
+
+### A shortcut that does not work now says so
+
+Before, a chord another app already owned failed silently: Settings went on showing the
+row as set, the key did nothing, and the app looked broken. Three failures are now named
+under the row that caused them.
+
+- **Another app owns it.** Caught from what `RegisterEventHotKey` returns, at the moment
+  it returns it — "⌥Space could not be registered for Show the window."
+- **Two rows on one chord.** Caught from the settings themselves, before anything is
+  pressed. macOS gives a chord to one owner, so the other row is dead; neither is named
+  as the winner, because which one survives depends on the order they happened to be
+  bound in.
+- **It works, but it costs something.** ⌃Q is also XON in a terminal, the key that
+  resumes output after ⌃S. ⌥Space is Alfred's and Raycast's default. The note appears
+  only when that chord is the one selected.
+
+### What it does not do yet
+
+- **No arbitrary chords.** Each row offers three or four fixed choices plus Off, not a
+  record-any-keystroke field. A recorder needs an event tap, and that means an
+  Accessibility prompt this app has so far avoided entirely.
+- **No conflict check against other apps' shortcuts before you pick.** macOS exposes no
+  list of who owns what; the only way to find out is to ask for it and be refused, which
+  is what the first warning above reports.
+- **Click activation and the wake phrase are untouched.** The Connect button, ⌘K, the
+  menu bar, `flowstate://connect`, "Hey Flow" and the two claps all still work exactly as
+  they did — the keys are one more route in, not a replacement for any of them.
+
+---
+
 ## The overlays follow the active screen
 
 The two things FlowState draws over everybody else's windows — the caption strip and the

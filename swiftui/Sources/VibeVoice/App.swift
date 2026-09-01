@@ -100,6 +100,12 @@ struct VibeVoiceApp: App {
                     state.wakeAndConnect(from: "menu")
                 }
                 .disabled(state.settings.wakeHotkey.isEmpty)
+                // Its opposite, for the same reason: the deactivate key is Esc by
+                // default and Esc is deliberately not bound while this app is in front,
+                // so somebody looking at the window needs a visible way to stop.
+                Button("Stop Everything\(state.settings.hushHotkey.isEmpty ? "" : " (\(HotkeyCombo.named(state.settings.hushHotkey).label))")") {
+                    state.hush()
+                }
                 Button("Send Screenshot") { Task { await state.captureAndSend(auto: false) } }
                     .keyboardShortcut("2", modifiers: [.command, .shift])
                 Button("Settings…") { state.showSettings = true }
@@ -144,8 +150,18 @@ struct MenuBarMenu: View {
         }
         .keyboardShortcut("k", modifiers: .command)
 
+        // Chords named rather than bound: these are user-chosen global hotkeys, and a
+        // `.keyboardShortcut` here would register a second, menu-local copy fighting the
+        // real one. The label is the only honest way to make them discoverable from
+        // outside Settings.
         if state.connection != .live {
-            Button("Wake and listen") { state.wakeAndConnect(from: "menubar") }
+            Button("Wake and listen\(shortcutSuffix(state.settings.wakeHotkey))") {
+                state.wakeAndConnect(from: "menubar")
+            }
+        } else {
+            Button("Stop everything\(shortcutSuffix(state.settings.hushHotkey))") {
+                state.hush()
+            }
         }
 
         Button("New conversation") { state.newConversation() }
@@ -174,5 +190,10 @@ struct MenuBarMenu: View {
         Button("Quit FlowState") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q", modifiers: .command)
 
+    }
+
+    /// " (⌃Q)", or nothing at all when that row is switched off.
+    private func shortcutSuffix(_ id: String) -> String {
+        id.isEmpty ? "" : " (" + HotkeyCombo.named(id).label + ")"
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import VibeVoiceCore
 
 /// Runs headless Claude Code (`claude -p`) and streams its progress back live.
 ///
@@ -89,9 +90,42 @@ actor ClaudeCode {
 
     static var isReady: Bool { availability() == .ready }
 
+    /// The resolved CLI path, remembered.
+    ///
+    /// The fallback branch below spawns a LOGIN shell (`sh -lc`), which on a Mac with a
+    /// full zsh profile is 100–300 ms — and it was being paid on every availability
+    /// check, every settings redraw and every dispatch. The binary does not move while
+    /// the app is running; `forgetBinary()` is there for the Check-again button, which is
+    /// the one moment it might have.
+    private static let binaryCache = ResolvedBinary()
+
+    /// Small box so the cache is safe to touch from the actor and from the main thread
+    /// (`availability()` is called from SwiftUI) without either owning it.
+    private final class ResolvedBinary: @unchecked Sendable {
+        private let lock = NSLock()
+        private var resolved: String??
+        func value(_ compute: () -> String?) -> String? {
+            lock.lock()
+            if let r = resolved { lock.unlock(); return r }
+            lock.unlock()
+            let found = compute()
+            lock.lock(); resolved = found; lock.unlock()
+            return found
+        }
+        func forget() { lock.lock(); resolved = nil; lock.unlock() }
+    }
+
+    /// Drops the remembered path, so a Claude Code installed while the app was open is
+    /// found without a relaunch.
+    static func forgetBinary() { binaryCache.forget() }
+
     /// A GUI .app inherits no shell PATH, so the usual install locations are checked
     /// explicitly before falling back to a login shell lookup.
     static func binary() -> String? {
+        binaryCache.value { resolveBinary() }
+    }
+
+    private static func resolveBinary() -> String? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let candidates = [
             "\(home)/.local/bin/claude",
@@ -156,6 +190,7 @@ actor ClaudeCode {
              task: String,
              repo: String,
              permissionMode: String = "acceptEdits",
+             plan: DevTaskPlan = DevTaskPlan(shape: .medium, model: "sonnet"),
              resumeSessionID: String? = nil,
              onProgress: @escaping @Sendable (String) -> Void) async -> Result {
 
@@ -170,6 +205,22 @@ actor ClaudeCode {
         // "just do it" mode.
         var args = ["-p", "--output-format", "stream-json", "--verbose",
                     "--permission-mode", permissionMode]
+
+        // The plan, on the command line.
+        //
+        // `--strict-mcp-config` with no `--mcp-config` behind it means "connect nothing":
+        // measured on this Mac, five user-level MCP servers cost about three seconds of
+        // startup on EVERY run, including a one-line typo fix, and again on every
+        // follow-up. `DevTaskPlan` gives them back the moment the instruction names
+        // something that lives behind one.
+        args += ["--model", plan.model]
+        if let effort = plan.effort { args += ["--effort", effort] }
+        if let fallback = plan.fallbackModel { args += ["--fallback-model", fallback] }
+        if !plan.loadsMCP { args.append("--strict-mcp-config") }
+        // A question gets the read tools only: faster, because it cannot wander into an
+        // edit, and safer for the same reason.
+        if let tools = plan.tools { args += ["--tools", tools.joined(separator: ",")] }
+
         if let sid = resumeSessionID { args += ["--resume", sid] }
         args.append(task)
 

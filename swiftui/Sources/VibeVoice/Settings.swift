@@ -63,6 +63,16 @@ struct AppSettings: Codable, Equatable {
     /// voice, and also means a misheard sentence can run anything.
     var devPermissionMode: String = "acceptEdits"
 
+    /// Start Claude Code without connecting this Mac's MCP servers unless the task
+    /// actually names one.
+    ///
+    /// Measured here: five user-level servers add about three seconds to every run,
+    /// before it has read a single file, and it is paid again on every follow-up. A typo
+    /// fix does not need Figma. `DevTaskPlan` gives them back the moment an instruction
+    /// mentions Notion, Slack, Supabase and so on; this switch is the way out for a repo
+    /// whose tasks need a connector the words never name.
+    var devFastStart: Bool = true
+
     /// Native tools the user has switched OFF. Stored as the exceptions rather than the
     /// enabled list, so a tool added in a later build is on by default instead of
     /// silently missing for everyone who already has a settings file.
@@ -171,8 +181,19 @@ struct AppSettings: Codable, Equatable {
     /// `LoginItem` for the two halves of that and why both ship.
     var startAtLogin: Bool = false
 
-    /// Stop everything, now. Empty string = off.
-    var hushHotkey: String = "ctrlShiftEscape"
+    /// Stop everything, now — the deactivate key. Empty string = off.
+    ///
+    /// Escape by default, which is the key a person already presses at anything they
+    /// want to stop. It is the one binding in here that is not simply handed to Carbon
+    /// and left there: a permanent process-wide Escape would break cancelling in every
+    /// app on the machine, so it is bound only while a session is live and Flow is not
+    /// in front, and released the moment either stops being true. See
+    /// `HotkeyCombo.escape` and `AppState.applyHushHotkey`.
+    ///
+    /// The three modifier chords beside it are for anyone who would rather have a key
+    /// that is always listening — including while idle, where it silences the wake
+    /// phrase for `hushSeconds` without a session needing to exist.
+    var hushHotkey: String = "escape"
     /// How long the wake trigger stays quiet after the hush key. Long enough to get out
     /// of whatever set it off; short enough that nobody has to remember to undo it.
     var hushSeconds: Double = 90
@@ -187,7 +208,11 @@ struct AppSettings: Codable, Equatable {
     /// UI claims it does.
     var claimedHotkeyIDs: Set<String> {
         Set([summonHotkey, connectHotkey, recordHotkey, hushHotkey, wakeHotkey]
-            .filter { !$0.isEmpty })
+            // Session-scoped chords — Escape — are deliberately not claimed. They are
+            // never registered while Flow is the app in front, which is the only time a
+            // window shortcut could have fired anyway, so listing one here would block a
+            // key that was free.
+            .filter { !$0.isEmpty && !HotkeyCombo.named($0).isSessionScoped })
     }
 
     /// Let it start the conversation when something is worth saying — a coding task
@@ -375,7 +400,7 @@ struct AppSettings: Codable, Equatable {
         case voice, model, systemPrompt, speed, continuousScreen, screenInterval
         case vadThreshold, silenceDurationMs, transcribeUser, micMuted, devMode, devRepo
         case maxScreenFrames, screenshotSize, qualityMode, appearance, screenDisplayID
-        case devNarrate, devNarrateInterval, devNarrateMax, devPermissionMode
+        case devNarrate, devNarrateInterval, devNarrateMax, devPermissionMode, devFastStart
         case disabledTools, backdrop, backdropImagePath, daylightMode, ambientMode
         case photoRotateSeconds, menuBarEnabled, summonHotkey, devNudgeDismissed
         case connectHotkey, recordHotkey, hushHotkey, hushSeconds, proactive, wakeWord, wakePhrase, clapToWake, clapSensitivity
@@ -423,6 +448,7 @@ extension AppSettings {
         devRepo           = v(.devRepo, d.devRepo)
         devNarrate        = v(.devNarrate, d.devNarrate)
         devPermissionMode = v(.devPermissionMode, d.devPermissionMode)
+        devFastStart      = v(.devFastStart, d.devFastStart)
         disabledTools     = v(.disabledTools, d.disabledTools)
         devNarrateInterval = v(.devNarrateInterval, d.devNarrateInterval)
         devNarrateMax     = v(.devNarrateMax, d.devNarrateMax)
